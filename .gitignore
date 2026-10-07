@@ -1,0 +1,39 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+**/appsettings.Local.json
+**/appsettings.*.Local.json
+secrets/
+*.pem
+*.key
+*.pfx
+*.p12
+.aws/
+
+# Build and tooling
+**/bin/
+**/obj/
+**/node_modules/
+**/dist/
+.vs/
+.idea/
+**/__pycache__/
+.venv/
+**/TestResults/
+coverage/
+
+# Runtime and account data
+data/
+logs/
+exports/
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# OS
+Thumbs.db
+.DS_Store
