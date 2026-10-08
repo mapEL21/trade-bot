@@ -10,11 +10,14 @@
 
 ## 1. User interface prototype
 
-- [ ] Bot list with status, instrument, position, and daily PnL.
-- [ ] Bot detail view with overview, trades, settings, and journal.
-- [ ] Versioned configuration import/export with validation.
-- [ ] Clearly labeled demonstration data and execution modes.
-- [ ] Distinct pause and stop-and-close controls.
+- [x] Bot list with status, instrument, allocated demo balance, and historical PnL.
+- [x] Bot detail view with overview, trades, settings, and journal.
+- [x] Versioned configuration import/export with validation.
+- [x] Clearly labeled demonstration data; live and simulation modes unavailable.
+- [x] Distinct pause and stop-and-close controls with demo-only status transitions.
+- [x] Local persistence, mobile layout and browser interaction tests.
+
+Position monitoring and actual command execution require the future engine.
 
 Acceptance: a user can create a demo bot, open its statistics, edit settings, and export/import its configuration without credentials.
 

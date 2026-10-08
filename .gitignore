@@ -22,6 +22,8 @@ secrets/
 .venv/
 **/TestResults/
 coverage/
+*.tsbuildinfo
+artifacts/
 
 # Runtime and account data
 data/
