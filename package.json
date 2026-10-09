@@ -10,6 +10,7 @@
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "test:ui": "playwright test",
     "dev:api": "node scripts/dotnet.mjs run --project server/TradeBot.Api",
+    "record:market": "node scripts/dotnet.mjs run --project server/TradeBot.Recorder --",
     "test:api": "node scripts/dotnet.mjs test TradeBot.slnx",
     "build:api": "node scripts/dotnet.mjs build TradeBot.slnx"
   },

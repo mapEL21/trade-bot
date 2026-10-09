@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 export default defineConfig({
   testDir: './tests/browser',
   fullyParallel: true,
+  workers: 2,
   use: {
     baseURL: 'http://127.0.0.1:5175',
     channel: process.env.PLAYWRIGHT_CHANNEL || undefined,
@@ -19,6 +20,7 @@ export default defineConfig({
       env: {
         Storage__Path: resolve('artifacts/browser-workspace.db'),
         Ui__Origin: 'http://127.0.0.1:5175',
+        Market__Path: resolve('artifacts/browser-market'),
       },
       reuseExistingServer: false,
     },

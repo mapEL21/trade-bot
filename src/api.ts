@@ -44,11 +44,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       response.status,
     );
   }
-  if (response.status === 204) return undefined as T;
+  if (response.status === 204 || response.headers.get('content-length') === '0')
+    return undefined as T;
   return response.json();
 }
 
 export const api = {
+  startResearch: (config: { coin: string; seconds: number; maxMb: number }) =>
+    request<{ id: string }>('/research', { method: 'POST', body: JSON.stringify(config) }),
+  stopResearch: (id: string) => request<void>(`/research/${id}/stop`, { method: 'POST' }),
   workspace: async (): Promise<Workspace> =>
     parseWorkspace(JSON.stringify(await request('/workspace'))),
   strategies: () => request<StrategyDefinition[]>('/strategies'),

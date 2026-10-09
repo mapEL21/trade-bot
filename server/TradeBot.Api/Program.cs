@@ -4,6 +4,8 @@ using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.Sqlite;
 using TradeBot.Api;
+using TradeBot.Recorder;
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 var port = builder.Configuration.GetValue<int?>("Api:Port") ?? 5080;
@@ -17,6 +19,9 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.Services.AddProblemDetails();
 builder.Services.AddOpenApi();
 builder.Services.AddSingleton<StrategyCatalog>();
+builder.Services.AddSingleton<IRecordingRunner, RecordingRunner>();
+builder.Services.AddSingleton<MarketResearch>();
+builder.Services.AddHostedService(services => services.GetRequiredService<MarketResearch>());
 builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(
     builder.Configuration["Storage:Path"] ?? Path.Combine(builder.Environment.ContentRootPath, "data", "workspace.db")));
 builder.Services.AddRateLimiter(options =>
@@ -74,6 +79,32 @@ app.UseRateLimiter();
 app.MapOpenApi();
 var api = app.MapGroup("/api/v1").RequireRateLimiting("local");
 api.MapGet("/health", () => Results.Ok(new { status = "ok", executionEnabled = false }));
+api.MapGet("/research", (MarketResearch research) => Results.Ok(research.Snapshot()));
+api.MapPost("/research", (ResearchRequest request, MarketResearch research) =>
+{
+    try { return Results.Accepted("/api/v1/research", new { id = research.Start(request) }); }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+    catch (InvalidOperationException e) { return Results.Problem(statusCode: 409, title: e.Message); }
+});
+api.MapPost("/research/{id:guid}/stop", (Guid id, MarketResearch research) => research.Stop(id.ToString())
+    ? Results.Accepted("/api/v1/research", new { id = id.ToString() })
+    : Results.Problem(statusCode: 409, title: "Сессия уже сменилась. Обновите состояние перед остановкой."));
+api.MapGet("/research/stream", async (HttpContext context, MarketResearch research) =>
+{
+    context.Response.ContentType = "text/event-stream";
+    context.Response.Headers["X-Accel-Buffering"] = "no";
+    var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+    try
+    {
+        while (!context.RequestAborted.IsCancellationRequested)
+        {
+            await context.Response.WriteAsync($"data: {JsonSerializer.Serialize(research.Snapshot(), json)}\n\n", context.RequestAborted);
+            await context.Response.Body.FlushAsync(context.RequestAborted);
+            await Task.Delay(1000, context.RequestAborted);
+        }
+    }
+    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
+});
 api.MapGet("/strategies", (StrategyCatalog catalog) => Results.Ok(catalog.Items));
 api.MapGet("/workspace", async (IWorkspaceStore store, CancellationToken ct) => Results.Ok(await store.ReadAsync(ct)));
 api.MapPost("/bots", async (BotConfig config, StrategyCatalog catalog, IWorkspaceStore store, CancellationToken ct) =>

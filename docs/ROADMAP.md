@@ -31,19 +31,23 @@ Acceptance: a user can create a demo bot, open its statistics, edit settings, an
 - [x] UI distinguishes algorithm metadata from configurable instances.
 - [x] Demo browser data remains separate from server data; planned algorithms cannot start.
 
-Trading execution and exchange connections remain pending.
+Trading execution and account connections remain pending. A separate public-feed recorder is implemented; see [recording guide](MARKET_RECORDER.md).
 
-- [ ] Confirm broker API access and actual maker/taker fees and cashback.
+- [x] Select Hyperliquid as signal source and X Binance via TigerX as intended execution venue; record displayed fee assumptions in the strategy specification.
+- [ ] Confirm custom-bot access to TigerX API, charged fees and cashback eligibility for this execution route.
 - [ ] Filter altcoin perpetuals by order constraints and liquidity; exclude BTC/ETH from initial selection.
-- [ ] Record market events and local receipt timestamps.
+- [x] Implement bounded raw recording of Hyperliquid and Binance public events with local receipt timestamps and reconnect markers; verify a short live capture.
+- [x] Add server-owned recording controls and live BBO monitoring to the research page, with explicit stale/disconnected states and raw price comparison.
+- [ ] Collect longer research sessions across market regimes; implement rotation and disk monitoring before unattended collection.
 - [ ] Reconstruct books and detect missing updates.
-- [ ] Compare spread, depth, estimated execution cost, and impulse opportunities.
+- [ ] Compare spread, depth, estimated execution cost, and DEX → CEX lead–lag opportunities using local receipt timestamps.
 
 Acceptance: recordings support reproducible replay, gaps are flagged, and a candidate fits the intended test balance without relying on excessive leverage.
 
 ## 3. First strategy and simulation
 
-- [ ] Define entry, invalidation, exit, time limit, and position sizing for an impulse strategy.
+- [x] Draft DEX → CEX research rules: DEX signal, CEX-only futures execution; see [strategy specification](STRATEGY_DEX_LEAD_LAG.md).
+- [ ] Validate lead–lag for the selected Hyperliquid → X Binance setup and select one asset and concrete entry/exit/risk parameters from recordings. The existing planned impulse catalog entry is not an implementation of this hypothesis.
 - [ ] Model latency, fees, partial fills, and conservative limit-order execution.
 - [ ] Evaluate on a separate period not used for parameter selection.
 - [ ] Show persistent per-bot statistics from simulation.

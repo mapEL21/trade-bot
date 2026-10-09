@@ -32,6 +32,7 @@ import {
 } from 'lucide-react';
 import { api, type StrategyDefinition } from './api';
 import { Strategies } from './Strategies';
+import { Research } from './Research';
 import { Chart, DownloadButton, Empty, Modal, SelectField, Toast, Tooltip } from './components';
 import {
   createDemo,
@@ -58,12 +59,13 @@ import {
 const demoMode = new URLSearchParams(location.search).get('demo') === '1';
 const emptyWorkspace: Workspace = { schemaVersion: 1, bots: [], events: [] };
 
-type Page = 'strategies' | 'overview' | 'bots' | 'trades' | 'events' | 'connections';
+type Page = 'strategies' | 'overview' | 'bots' | 'trades' | 'events' | 'connections' | 'research';
 type Tab = 'overview' | 'trades' | 'settings' | 'events';
 const nav: { id: Page; label: string; icon: typeof BotIcon }[] = [
   { id: 'overview', label: 'Обзор', icon: LayoutDashboard },
   { id: 'bots', label: 'Мои боты', icon: BotIcon },
   { id: 'strategies', label: 'Стратегии', icon: Zap },
+  { id: 'research', label: 'Исследование рынка', icon: Radio },
   { id: 'trades', label: 'Сделки', icon: Activity },
   { id: 'events', label: 'Журнал событий', icon: Clock3 },
   { id: 'connections', label: 'Подключения', icon: Waypoints },
@@ -476,7 +478,7 @@ export default function App() {
               ) : (
                 <>
                   <strong>Серверное пространство.</strong> Настройки хранятся в базе. Торговый
-                  алгоритм и биржи ещё не подключены.
+                  алгоритм ещё не подключён. Публичные котировки доступны в исследовании рынка.
                 </>
               )}
             </span>
@@ -674,6 +676,7 @@ export default function App() {
                         overview: 'Результаты, стратегии и боты — в одном пространстве.',
                         bots: 'Экземпляры стратегий: настройки, состояние и статистика.',
                         strategies: 'Наши алгоритмы, их версии и готовность к запуску.',
+                        research: 'Проверяем гипотезу Hyperliquid → Binance на реальных данных.',
                         trades: 'История исполнений всех ботов в одном месте.',
                         events: 'Все изменения вашего рабочего пространства.',
                         connections: 'Биржевые подключения и данные приложения.',
@@ -685,6 +688,7 @@ export default function App() {
                   {(page === 'overview' || page === 'bots') && actions}
                 </div>
               </div>
+              {page === 'research' && <Research demo={demoMode} />}
               {page === 'strategies' && (
                 <Strategies
                   demo={demoMode}
@@ -954,7 +958,7 @@ export default function App() {
                       <span>
                         {demoMode
                           ? 'Деморежим проверяет только интерфейс. Статусы не запускают алгоритм и не создают сделки.'
-                          : 'Сервер сохраняет настройки экземпляров. Код торговой стратегии и биржевые подключения ещё не реализованы.'}{' '}
+                          : 'Сервер сохраняет настройки и записывает публичные потоки в разделе «Исследование рынка». Торговая стратегия и подключения к аккаунтам ещё не реализованы.'}{' '}
                         Выбранный тикер — пример, а не рекомендация.
                       </span>
                     </div>
