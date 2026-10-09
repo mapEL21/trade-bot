@@ -1830,3 +1830,25 @@ tbody tr:hover {
     scroll-behavior: auto !important;
   }
 }
+
+.server-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin: 16px 0;
+  color: var(--muted);
+}
+.server-toolbar a {
+  color: var(--green);
+}
+.strategy-explanation {
+  margin-bottom: 24px;
+}
+.exchange-card h2 {
+  font-size: 20px;
+  margin: 14px 0;
+}
+.strategy-card {
+  display: block;
+}

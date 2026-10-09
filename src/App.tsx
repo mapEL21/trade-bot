@@ -30,6 +30,8 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import { api, type StrategyDefinition } from './api';
+import { Strategies } from './Strategies';
 import { Chart, DownloadButton, Empty, Modal, SelectField, Toast, Tooltip } from './components';
 import {
   createDemo,
@@ -53,11 +55,15 @@ import {
   type Workspace,
 } from './model';
 
-type Page = 'overview' | 'bots' | 'trades' | 'events' | 'connections';
+const demoMode = new URLSearchParams(location.search).get('demo') === '1';
+const emptyWorkspace: Workspace = { schemaVersion: 1, bots: [], events: [] };
+
+type Page = 'strategies' | 'overview' | 'bots' | 'trades' | 'events' | 'connections';
 type Tab = 'overview' | 'trades' | 'settings' | 'events';
 const nav: { id: Page; label: string; icon: typeof BotIcon }[] = [
   { id: 'overview', label: 'Обзор', icon: LayoutDashboard },
   { id: 'bots', label: 'Мои боты', icon: BotIcon },
+  { id: 'strategies', label: 'Стратегии', icon: Zap },
   { id: 'trades', label: 'Сделки', icon: Activity },
   { id: 'events', label: 'Журнал событий', icon: Clock3 },
   { id: 'connections', label: 'Подключения', icon: Waypoints },
@@ -92,7 +98,11 @@ function load() {
   }
 }
 export default function App() {
-  const [initial] = useState(load);
+  const [initial] = useState(() => (demoMode ? load() : { workspace: emptyWorkspace, error: '' }));
+  const [strategies, setStrategies] = useState<StrategyDefinition[]>([]);
+  const [loading, setLoading] = useState(!demoMode);
+  const [busy, setBusy] = useState(false);
+  const mutation = useRef(false);
   const [workspace, setWorkspace] = useState<Workspace>(initial.workspace);
   const [storageError, setStorageError] = useState(initial.error);
   const [storageEnabled, setStorageEnabled] = useState(!initial.error);
@@ -127,7 +137,7 @@ export default function App() {
       (filter === 'all' || b.status === filter),
   );
   useEffect(() => {
-    if (!storageEnabled) return;
+    if (!demoMode || !storageEnabled) return;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
       setStorageError('');
@@ -143,6 +153,41 @@ export default function App() {
     },
     [],
   );
+  useEffect(() => {
+    if (demoMode) return;
+    let active = true;
+    Promise.all([api.workspace(), api.strategies()])
+      .then(([data, catalog]) => {
+        if (active) {
+          setWorkspace(data);
+          setStrategies(catalog);
+          setStorageError('');
+        }
+      })
+      .catch((error) => {
+        if (active) setStorageError(error.message);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+  async function refreshServer() {
+    setLoading(true);
+    try {
+      const [data, catalog] = await Promise.all([api.workspace(), api.strategies()]);
+      setWorkspace(data);
+      setStrategies(catalog);
+      setStorageError('');
+    } catch (error) {
+      setStorageError((error as Error).message);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  }
   function notify(message: string) {
     setToast(message);
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -176,6 +221,10 @@ export default function App() {
     setPage('bots');
   }
   function setStatus(b: Bot, status: Status) {
+    if (!demoMode) {
+      notify('Алгоритм ещё не реализован. Запуск недоступен.');
+      return;
+    }
     setWorkspace((s) =>
       log(
         {
@@ -193,7 +242,34 @@ export default function App() {
         : 'Статус демобота обновлён.',
     );
   }
-  function save(config: BotConfig, id?: string) {
+  async function save(config: BotConfig, id?: string) {
+    if (!demoMode) {
+      if (mutation.current) throw new Error('Дождитесь завершения предыдущего запроса.');
+      mutation.current = true;
+      setBusy(true);
+      let saved = false;
+      try {
+        const existing = workspace.bots.find((b) => b.id === id);
+        if (id && !existing) throw new Error('Бот больше не существует. Обновите данные.');
+        const result = existing ? await api.update(existing, config) : await api.create(config);
+        saved = true;
+        setEditor(null);
+        setImporting(false);
+        openBot(result.id);
+        await refreshServer();
+        notify('Настройки экземпляра сохранены на сервере');
+      } catch (error) {
+        const message = saved
+          ? 'Настройки сохранены, но обновить список не удалось. Нажмите «Обновить данные».'
+          : (error as Error).message;
+        setStorageError(message);
+        throw new Error(message);
+      } finally {
+        mutation.current = false;
+        setBusy(false);
+      }
+      return;
+    }
     if (!id && workspace.bots.length >= 100)
       throw new Error('В демопространстве можно создать до 100 ботов.');
     const existing = workspace.bots.find((b) => b.id === id);
@@ -224,7 +300,28 @@ export default function App() {
     openBot(next.id);
     notify(existing ? 'Настройки сохранены' : 'Бот добавлен в рабочее пространство');
   }
-  function runConfirm() {
+  async function runConfirm() {
+    if (!demoMode) {
+      if (mutation.current || confirm?.type !== 'delete') return;
+      const target = workspace.bots.find((b) => b.id === confirm.id);
+      if (!target) return;
+      mutation.current = true;
+      setBusy(true);
+      try {
+        await api.remove(target);
+        setConfirm(null);
+        go('bots');
+        await refreshServer();
+        notify('Экземпляр удалён с сервера');
+      } catch (error) {
+        setStorageError((error as Error).message);
+        setConfirm(null);
+      } finally {
+        mutation.current = false;
+        setBusy(false);
+      }
+      return;
+    }
     if (confirm?.type === 'reset') {
       setWorkspace(createDemo());
       setStorageEnabled(true);
@@ -250,11 +347,19 @@ export default function App() {
   }
   const actions = (
     <>
-      <button className="button secondary" onClick={() => setImporting(true)}>
+      <button
+        className="button secondary"
+        disabled={!demoMode && (loading || !strategies.length)}
+        onClick={() => setImporting(true)}
+      >
         <FolderInput size={17} />
         Импорт бота
       </button>
-      <button className="button primary" onClick={() => setEditor({ config: defaultConfig })}>
+      <button
+        className="button primary"
+        disabled={!demoMode && (loading || !strategies.length)}
+        onClick={() => setEditor({ config: defaultConfig })}
+      >
         <Plus size={18} />
         Создать бота
       </button>
@@ -296,7 +401,7 @@ export default function App() {
         <div className="workspace-switch">
           <span className="avatar">M</span>
           <span>
-            Моё пространство<small>Локальный профиль</small>
+            Моё пространство<small>{demoMode ? 'Демопример в браузере' : 'Локальный сервер'}</small>
           </span>
           <span className="workspace-dot" />
         </div>
@@ -321,12 +426,13 @@ export default function App() {
             <strong>Место для экспериментов</strong>
             <p>Настройте бота и изучите интерфейс без реальных сделок.</p>
             <button onClick={() => go('connections')}>
-              О деморежиме <ArrowUpRight size={15} />
+              {demoMode ? 'О деморежиме' : 'О рабочем пространстве'} <ArrowUpRight size={15} />
             </button>
           </div>
           <div className="sidebar-footer">
             <span className="tiny-dot" />
-            Демо-пространство<span>v0.1</span>
+            {demoMode ? 'Демо-пространство' : 'Серверное пространство'}
+            <span>v0.1</span>
           </div>
         </div>
       </aside>
@@ -347,10 +453,13 @@ export default function App() {
           <div className="topbar-right">
             <span className="mode-pill">
               <FlaskConical size={13} />
-              ДЕМО
+              {demoMode ? 'ДЕМО' : 'СЕРВЕР'}
             </span>
             <span className="topbar-divider" />
-            <span className="profile" title="Локальный профиль">
+            <span
+              className="profile"
+              title={demoMode ? 'Демопример в браузере' : 'Локальный сервер'}
+            >
               M
             </span>
           </div>
@@ -359,8 +468,17 @@ export default function App() {
           <div className="demo-banner">
             <FlaskConical size={16} />
             <span>
-              <strong>Демонстрационный режим.</strong> Данные вымышлены. Подключений к биржам и
-              реальных сделок нет.
+              {demoMode ? (
+                <>
+                  <strong>Демонстрационный режим.</strong> Данные вымышлены. Подключений к биржам и
+                  реальных сделок нет.
+                </>
+              ) : (
+                <>
+                  <strong>Серверное пространство.</strong> Настройки хранятся в базе. Торговый
+                  алгоритм и биржи ещё не подключены.
+                </>
+              )}
             </span>
             <button onClick={() => go('connections')}>
               Подробнее
@@ -370,6 +488,41 @@ export default function App() {
           {storageError && (
             <div className="error-banner" role="alert">
               {storageError}
+              {!demoMode && (
+                <button
+                  className="button secondary"
+                  disabled={loading || busy}
+                  onClick={() => void refreshServer().catch(() => {})}
+                >
+                  Обновить данные
+                </button>
+              )}
+            </div>
+          )}
+          {!demoMode && (
+            <div className="server-toolbar">
+              <span role="status">
+                {loading
+                  ? 'Загрузка с сервера…'
+                  : busy
+                    ? 'Сохранение…'
+                    : storageError
+                      ? 'Не удалось обновить данные'
+                      : 'Данные загружены с сервера'}
+              </span>
+              <button
+                className="text-button"
+                disabled={loading || busy}
+                onClick={() => void refreshServer().catch(() => {})}
+              >
+                Обновить данные
+              </button>
+              <a href="/?demo=1">Открыть демопример</a>
+            </div>
+          )}
+          {demoMode && (
+            <div className="server-toolbar">
+              <a href="/">Перейти к серверному пространству</a>
             </div>
           )}
           {bot ? (
@@ -394,7 +547,11 @@ export default function App() {
                 </div>
                 <div className="heading-actions">
                   <StatusBadge status={bot.status} />
-                  {bot.status === 'running' ? (
+                  {!demoMode ? (
+                    <button className="button secondary" disabled>
+                      Алгоритм в разработке
+                    </button>
+                  ) : bot.status === 'running' ? (
                     <button className="button secondary" onClick={() => setStatus(bot, 'paused')}>
                       <Pause size={16} />
                       Пауза
@@ -407,6 +564,7 @@ export default function App() {
                   )}
                   <button
                     className="icon-button bordered danger-icon"
+                    disabled={!demoMode}
                     title="Остановить и закрыть"
                     aria-label="Остановить и закрыть"
                     onClick={() => setConfirm({ type: 'stop', id: bot.id })}
@@ -430,7 +588,9 @@ export default function App() {
               {tab === 'overview' && (
                 <>
                   <div className="section-line">
-                    <span className="muted">Статистика демопримера</span>
+                    <span className="muted">
+                      {demoMode ? 'Статистика демопримера' : 'Статистика экземпляра'}
+                    </span>
                     {period}
                   </div>
                   <Stats stat={stat} budget={budget} />
@@ -455,7 +615,9 @@ export default function App() {
               {tab === 'trades' && (
                 <>
                   <div className="section-line">
-                    <p className="muted">Только демонстрационные исполнения</p>
+                    <p className="muted">
+                      {demoMode ? 'Только демонстрационные исполнения' : 'Исполнений пока нет'}
+                    </p>
                     {period}
                   </div>
                   <TradesTable trades={trades} botName={bot.name} symbol={bot.symbol} />
@@ -510,7 +672,8 @@ export default function App() {
                     {
                       {
                         overview: 'Результаты, стратегии и боты — в одном пространстве.',
-                        bots: 'Создавайте, настраивайте и сравнивайте свои стратегии.',
+                        bots: 'Экземпляры стратегий: настройки, состояние и статистика.',
+                        strategies: 'Наши алгоритмы, их версии и готовность к запуску.',
                         trades: 'История исполнений всех ботов в одном месте.',
                         events: 'Все изменения вашего рабочего пространства.',
                         connections: 'Биржевые подключения и данные приложения.',
@@ -522,12 +685,35 @@ export default function App() {
                   {(page === 'overview' || page === 'bots') && actions}
                 </div>
               </div>
+              {page === 'strategies' && (
+                <Strategies
+                  demo={demoMode}
+                  items={
+                    demoMode
+                      ? [
+                          {
+                            id: 'impulse',
+                            version: '0.1.0',
+                            name: 'Импульс',
+                            description:
+                              'Шаблон для знакомства с интерфейсом. Алгоритм ещё не реализован.',
+                            implementationStatus: 'planned',
+                            canCreate: true,
+                            canRun: false,
+                            exchanges,
+                          },
+                        ]
+                      : strategies
+                  }
+                  onCreate={() => setEditor({ config: defaultConfig })}
+                />
+              )}
               {page === 'overview' && (
                 <>
                   <div className="section-line">
                     <span className="section-kicker">
                       <span className="tiny-dot" />
-                      ДЕМОНСТРАЦИОННАЯ СТАТИСТИКА
+                      {demoMode ? 'ДЕМОНСТРАЦИОННАЯ СТАТИСТИКА' : 'СТАТИСТИКА ЭКЗЕМПЛЯРОВ'}
                     </span>
                     {period}
                   </div>
@@ -550,7 +736,7 @@ export default function App() {
                         </div>
                       </div>
                       <Fact
-                        label="Демо запущено"
+                        label={demoMode ? 'Демо запущено' : 'Запущено'}
                         value={
                           <span className="positive">
                             {workspace.bots.filter((b) => b.status === 'running').length}
@@ -607,6 +793,7 @@ export default function App() {
                     ))}
                     <button
                       className="add-bot-card"
+                      disabled={!demoMode && (loading || !strategies.length)}
                       onClick={() => setEditor({ config: defaultConfig })}
                     >
                       <span>
@@ -621,8 +808,10 @@ export default function App() {
                     </button>
                   </div>
                   <div className="footnote">
-                    <ShieldCheck size={14} /> Данные хранятся в этом браузере. Демоистория: 30
-                    сентября — 7 октября 2026.
+                    <ShieldCheck size={14} />{' '}
+                    {demoMode
+                      ? 'Данные хранятся в этом браузере. Демоистория: 30 сентября — 7 октября 2026.'
+                      : 'Настройки и журнал сохраняются в базе локального сервера.'}
                   </div>
                 </>
               )}
@@ -701,6 +890,7 @@ export default function App() {
                         action={
                           <button
                             className="button primary"
+                            disabled={!demoMode && (loading || !strategies.length)}
                             onClick={() => setEditor({ config: defaultConfig })}
                           >
                             <Plus size={16} />
@@ -715,7 +905,11 @@ export default function App() {
               {page === 'trades' && (
                 <>
                   <div className="section-line">
-                    <span className="muted">Вымышленные сделки · не торговый отчёт</span>
+                    <span className="muted">
+                      {demoMode
+                        ? 'Вымышленные сделки · не торговый отчёт'
+                        : 'Исполнений ещё нет — торговый движок не подключён'}
+                    </span>
                     {period}
                   </div>
                   <TradesTable trades={periodTrades(allTrades, days)} showBot />
@@ -747,7 +941,10 @@ export default function App() {
                       <div>
                         <h3>Данные рабочего пространства</h3>
                         <p className="muted">
-                          Настройки сохраняются локально. Секретные ключи здесь не запрашиваются.
+                          {demoMode
+                            ? 'Настройки сохраняются в браузере.'
+                            : 'Настройки и журнал сохраняются сервером в SQLite.'}{' '}
+                          Секретные ключи здесь не запрашиваются.
                         </p>
                       </div>
                       <ShieldCheck size={25} className="positive" />
@@ -755,14 +952,20 @@ export default function App() {
                     <div className="inline-note">
                       <FlaskConical size={18} />
                       <span>
-                        Деморежим проверяет только интерфейс. Статусы не запускают алгоритм, не
-                        получают рыночные данные и не создают сделки. Выбранный тикер — пример, а не
-                        рекомендация.
+                        {demoMode
+                          ? 'Деморежим проверяет только интерфейс. Статусы не запускают алгоритм и не создают сделки.'
+                          : 'Сервер сохраняет настройки экземпляров. Код торговой стратегии и биржевые подключения ещё не реализованы.'}{' '}
+                        Выбранный тикер — пример, а не рекомендация.
                       </span>
                     </div>
-                    <button className="button danger" onClick={() => setConfirm({ type: 'reset' })}>
-                      Сбросить демопространство
-                    </button>
+                    {demoMode && (
+                      <button
+                        className="button danger"
+                        onClick={() => setConfirm({ type: 'reset' })}
+                      >
+                        Сбросить демопространство
+                      </button>
+                    )}
                   </div>
                 </>
               )}
@@ -781,7 +984,7 @@ export default function App() {
       {editor && (
         <Modal
           title={editor.id ? 'Настроить бота' : 'Создать нового бота'}
-          subtitle="Начните с шаблона. Все настройки можно изменить позже."
+          subtitle="Создайте экземпляр стратегии: выберите биржу, инструмент и лимиты. Код стратегии подключается отдельно."
           onClose={() => setEditor(null)}
         >
           <ConfigForm
@@ -806,7 +1009,7 @@ export default function App() {
         >
           <p className="confirm-text">
             {confirm.type === 'delete'
-              ? 'Настройки и история этого бота будут удалены из браузера. При необходимости сначала экспортируйте настройки.'
+              ? 'Настройки этого экземпляра будут удалены из текущего пространства. При необходимости сначала экспортируйте настройки.'
               : confirm.type === 'reset'
                 ? 'Все добавленные боты, настройки и журнал будут заменены исходным демонстрационным примером.'
                 : 'Демобот перейдёт в статус «Остановлен». Реальных позиций и ордеров в этой версии нет.'}
@@ -817,7 +1020,8 @@ export default function App() {
             </button>
             <button
               className={`button ${confirm.type === 'stop' ? 'primary' : 'danger'}`}
-              onClick={runConfirm}
+              disabled={busy}
+              onClick={() => void runConfirm()}
             >
               {confirm.type === 'delete'
                 ? 'Удалить'
@@ -864,14 +1068,14 @@ function Stats({ stat, budget }: { stat: ReturnType<typeof metrics>; budget: num
         value={formatMoney(budget)}
         unit="USDT"
         icon={<Wallet size={18} />}
-        note="Виртуальный начальный баланс"
+        note={demoMode ? 'Виртуальный начальный баланс' : 'Планируемый баланс экземпляров'}
       />
       <Stat
         label="Прибыльных сделок"
         value={stat.winRate === null ? '—' : stat.winRate.toFixed(1).replace('.', ',')}
         unit={stat.winRate === null ? '' : '%'}
         icon={<Gauge size={18} />}
-        note={`${stat.count} закрытых демосделок`}
+        note={`${stat.count} закрытых ${demoMode ? 'демосделок' : 'сделок'}`}
       />
       <Stat
         label="Макс. просадка"
@@ -1005,6 +1209,8 @@ function BotCard({
           <button
             className="icon-button"
             aria-label={`${bot.status === 'running' ? 'Приостановить' : 'Запустить демо'} ${bot.name}`}
+            disabled={!demoMode}
+            title={!demoMode ? 'Алгоритм ещё не реализован' : undefined}
             onClick={onStatus}
           >
             {bot.status === 'running' ? <Pause size={16} /> : <Play size={16} />}
@@ -1026,23 +1232,28 @@ function ConfigForm({
   historyLocked = false,
 }: {
   config: BotConfig;
-  onSave: (c: BotConfig) => void;
+  onSave: (c: BotConfig) => Promise<void>;
   submitLabel: string;
   onCancel?: () => void;
   historyLocked?: boolean;
 }) {
   const [form, setForm] = useState(config);
+  const [submitting, setSubmitting] = useState(false);
+  const pending = useRef(false);
   const [error, setError] = useState('');
   const errorId = useId();
   useEffect(() => {
     setForm(config);
     setError('');
   }, [config]);
-  function submit(e: FormEvent) {
+  async function submit(e: FormEvent) {
     e.preventDefault();
+    if (pending.current) return;
+    pending.current = true;
+    setSubmitting(true);
     try {
       const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion } = form;
-      onSave(
+      await onSave(
         validateConfig({
           name,
           exchange,
@@ -1056,6 +1267,9 @@ function ConfigForm({
       setError('');
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      pending.current = false;
+      setSubmitting(false);
     }
   }
   return (
@@ -1101,7 +1315,7 @@ function ConfigForm({
           />
         </label>
         <label className="field">
-          <span>Демо-баланс, USDT</span>
+          <span>{demoMode ? 'Демо-баланс, USDT' : 'Выделенный баланс, USDT'}</span>
           <input
             type="number"
             min="1"
@@ -1133,8 +1347,10 @@ function ConfigForm({
       <div className="inline-note">
         <FlaskConical size={17} />
         <span>
-          Создаётся демобот. Доступность инструмента, минимальный ордер и достаточность маржи на
-          бирже ещё не проверяются.
+          {demoMode
+            ? 'Создаётся демобот.'
+            : 'Создаётся черновик экземпляра. Алгоритм ещё не реализован, запуск недоступен.'}{' '}
+          Доступность инструмента, минимальный ордер и маржа ещё не проверяются.
         </span>
       </div>
       {error && (
@@ -1148,7 +1364,7 @@ function ConfigForm({
             Отмена
           </button>
         )}
-        <button className="button primary" type="submit">
+        <button className="button primary" type="submit" disabled={submitting}>
           {submitLabel}
           <ArrowRight size={16} />
         </button>
@@ -1161,12 +1377,14 @@ function ImportDialog({
   onImport,
 }: {
   onClose: () => void;
-  onImport: (c: BotConfig) => void;
+  onImport: (c: BotConfig) => Promise<void>;
 }) {
   const [text, setText] = useState('');
   const [error, setError] = useState('');
   const errorId = useId();
   const [filename, setFilename] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const pending = useRef(false);
   async function file(f?: File) {
     if (!f) return;
     setError('');
@@ -1238,12 +1456,18 @@ function ImportDialog({
         </button>
         <button
           className="button primary"
-          disabled={!text.trim()}
-          onClick={() => {
+          disabled={!text.trim() || submitting}
+          onClick={async () => {
+            if (pending.current) return;
+            pending.current = true;
+            setSubmitting(true);
             try {
-              onImport(importConfig(text));
+              await onImport(importConfig(text));
             } catch (e) {
               setError((e as Error).message);
+            } finally {
+              pending.current = false;
+              setSubmitting(false);
             }
           }}
         >
@@ -1361,7 +1585,8 @@ function TradesTable({
         </div>
       )}
       <div className="table-note">
-        Вымышленные исполнения. Комиссии и результаты указаны в USDT.
+        {demoMode ? 'Вымышленные исполнения.' : 'Торговый движок ещё не подключён.'} Комиссии и
+        результаты указаны в USDT.
       </div>
     </section>
   );

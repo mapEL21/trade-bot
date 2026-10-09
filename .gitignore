@@ -24,6 +24,7 @@ secrets/
 coverage/
 *.tsbuildinfo
 artifacts/
+.tools/
 
 # Runtime and account data
 data/

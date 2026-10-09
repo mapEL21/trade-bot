@@ -20,6 +20,7 @@ export interface Trade {
   quantity: number;
 }
 export interface Bot extends BotConfig {
+  revision?: number;
   id: string;
   status: Status;
   trades: Trade[];
@@ -99,7 +100,11 @@ export function validateConfig(value: unknown): BotConfig {
     throw new Error('Название должно содержать от 1 до 40 символов.');
   if (!exchanges.includes(v.exchange as Exchange))
     throw new Error('Выберите Binance, Bybit или OKX.');
-  if (typeof v.symbol !== 'string' || !/^[A-Z0-9]{2,16}USDT$/.test(v.symbol))
+  if (
+    typeof v.symbol !== 'string' ||
+    v.symbol !== v.symbol.trim() ||
+    !/^[A-Z0-9]{2,16}USDT$/.test(v.symbol)
+  )
     throw new Error('Укажите символ USDT-фьючерса, например ARBUSDT.');
   if (
     typeof v.budget !== 'number' ||

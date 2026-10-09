@@ -5,7 +5,7 @@ import { createDemo, exportConfig, STORAGE_KEY } from '../../src/model';
 test('overview, trade periods and bot navigation work without console errors', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  await page.goto('/');
+  await page.goto('/?demo=1');
   await expect(page.getByRole('heading', { name: 'Всё под контролем' })).toBeVisible();
   await page.screenshot({
     path: 'artifacts/overview-desktop.png',
@@ -35,7 +35,7 @@ for (const width of [375, 768, 1440]) {
     });
     page.on('pageerror', (error) => failures.push(error.message));
     await page.setViewportSize({ width, height: 1000 });
-    await page.goto('/');
+    await page.goto('/?demo=1');
     await page.evaluate(() => document.fonts.ready);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
@@ -66,7 +66,7 @@ for (const width of [375, 768, 1440]) {
 }
 
 test('create, persist, pause, export, import and delete a bot', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?demo=1');
   await page.getByRole('button', { name: 'Создать бота', exact: true }).first().click();
   await page.getByLabel('Название бота').fill('Тестовый бот');
   await page.getByRole('dialog').getByRole('button', { name: 'Создать бота', exact: true }).click();
@@ -101,7 +101,7 @@ test('create, persist, pause, export, import and delete a bot', async ({ page })
 });
 
 test('invalid imports and history-changing edits are rejected', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?demo=1');
   await page.getByRole('button', { name: 'Импорт бота', exact: true }).click();
   await page.getByLabel('Или вставьте содержимое JSON').fill('{"schemaVersion":5}');
   await page.getByRole('button', { name: 'Импортировать', exact: true }).click();
@@ -117,7 +117,7 @@ test('invalid imports and history-changing edits are rejected', async ({ page })
 
 test('mobile navigation and modal fit the viewport', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/');
+  await page.goto('/?demo=1');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({
     path: 'artifacts/overview-mobile.png',
@@ -137,7 +137,7 @@ test('mobile navigation and modal fit the viewport', async ({ page }) => {
 
 test('corrupt storage is reported and requires explicit reset', async ({ page }) => {
   await page.addInitScript((key) => localStorage.setItem(key, '{broken'), STORAGE_KEY);
-  await page.goto('/');
+  await page.goto('/?demo=1');
   await expect(page.getByRole('alert')).toContainText('повреждены');
   expect(await page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY)).toBe('{broken');
   await page.getByRole('button', { name: 'Подключения', exact: true }).click();

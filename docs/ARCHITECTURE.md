@@ -1,6 +1,6 @@
 # Architecture draft
 
-Status: the React / TypeScript demo UI is implemented. The API, trading engine, exchange adapters, and server persistence below remain proposed.
+Status: React / TypeScript UI and a local ASP.NET Core / .NET 10 API are implemented. Strategy execution, exchange adapters and order/fill persistence remain proposed.
 
 ## Current frontend
 
@@ -10,9 +10,11 @@ Status: the React / TypeScript demo UI is implemented. The API, trading engine, 
 - `src/styles.css`: responsive dark interface with a bundled font.
 - `tests/`: model tests and Playwright interaction/accessibility checks.
 
-The browser stores the workspace in `trade-bot.workspace.v1`. Corrupt records are preserved until the user explicitly resets the workspace. Import/export contains configuration only and accepts no executable code or secrets. Bot events use stable bot IDs, so renaming does not lose journal attribution.
+The primary workspace is stored by the API in SQLite. `server/TradeBot.Api` contains catalog metadata, validation, versioned routes and a transactional workspace store. `src/api.ts` connects the UI through the Vite proxy. The explicit demo mode (`?demo=1`) stores its separate workspace in `trade-bot.workspace.v1`. Corrupt records are preserved until the user explicitly resets the workspace. Import/export contains configuration only and accepts no executable code or secrets. Bot events use stable bot IDs, so renaming does not lose journal attribution.
 
-Demo status transitions do not run an algorithm or send orders. Demo PnL is gross result minus synthetic fees; funding and rebates are absent. The fixed dataset is anchored at 2026-10-07. This local prototype has no server, authentication, or multi-user support.
+Demo status transitions do not run an algorithm or send orders. Demo PnL is gross result minus synthetic fees; funding and rebates are absent. The fixed dataset is anchored at 2026-10-07. The local API has no authentication or multi-user support; it listens on loopback only. Server instances remain drafts with no trades until executable strategy code exists. Metadata in the catalog is not an executable strategy.
+
+Configuration writes and journal events commit in one SQLite transaction. Bot revisions and `If-Match` protect updates and deletes from stale tabs. The UI waits for server confirmation, reports errors, and never falls back to demo data silently. Local demo settings can be moved using configuration export/import, without synthetic history. See [API](API.md) for the contract and limits.
 
 ## Components
 

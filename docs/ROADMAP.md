@@ -23,6 +23,16 @@ Acceptance: a user can create a demo bot, open its statistics, edit settings, an
 
 ## 2. Market recording and selection
 
+### Local application server (implemented before market recording)
+
+- [x] ASP.NET Core API with a strategy/version catalog.
+- [x] Persistent instances and journal in local SQLite.
+- [x] Server validation and revision checks to prevent lost updates.
+- [x] UI distinguishes algorithm metadata from configurable instances.
+- [x] Demo browser data remains separate from server data; planned algorithms cannot start.
+
+Trading execution and exchange connections remain pending.
+
 - [ ] Confirm broker API access and actual maker/taker fees and cashback.
 - [ ] Filter altcoin perpetuals by order constraints and liquidity; exclude BTC/ETH from initial selection.
 - [ ] Record market events and local receipt timestamps.

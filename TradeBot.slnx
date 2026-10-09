@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="server/TradeBot.Api/TradeBot.Api.csproj" />
+  <Project Path="server/TradeBot.Api.Tests/TradeBot.Api.Tests.csproj" />
+</Solution>

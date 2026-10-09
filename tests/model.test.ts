@@ -36,6 +36,7 @@ test('rejects secrets, unknown versions, nonfinite values and invalid risk limit
   assert.throws(() => validateConfig({ ...config, apiKey: 'should-not-be-imported' }));
   assert.throws(() => validateConfig({ ...config, budget: Infinity }));
   assert.throws(() => validateConfig({ ...config, lossLimit: 11 }));
+  assert.throws(() => validateConfig({ ...config, symbol: 'ARBUSDT\n' }));
   assert.throws(() => importConfig('{"schemaVersion":2}'));
   assert.throws(() => importConfig('invalid json'));
   assert.throws(() => importConfig(' '.repeat(32769)));
