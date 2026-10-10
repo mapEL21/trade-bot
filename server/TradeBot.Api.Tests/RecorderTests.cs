@@ -76,6 +76,64 @@ public class RecorderTests
     }
 
     [Fact]
+    public async Task ConcurrentBurstSurvivesPausedWriterAndStopDrainsEveryAcceptedEvent()
+    {
+        var capture = new CaptureFile(20_000_000);
+        using var output = new PausedStream();
+        CaptureEvent Event(int producer, int index) => new($"feed-{producer}", "c", "market",
+            DateTimeOffset.UnixEpoch.AddMilliseconds(index), index, $"{{\"sequence\":{index},\"text\":\"цена\"}}");
+        capture.Publish(Event(0, 0));
+        var writer = capture.DrainAsync(output);
+        await output.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.WhenAll(Enumerable.Range(1, 4).Select(producer => Task.Run(() =>
+        {
+            for (var i = 0; i < 1000; i++) capture.Publish(Event(producer, i));
+        })));
+        Assert.Equal(4000, capture.BufferSummary().PeakEvents);
+        capture.Complete();
+        output.Resume.TrySetResult();
+        await writer.WaitAsync(TimeSpan.FromSeconds(10));
+        var saved = Encoding.UTF8.GetString(output.ToArray()).Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => JsonSerializer.Deserialize<CaptureEvent>(line)!).ToArray();
+        Assert.Equal(4001, capture.Written);
+        Assert.Equal(output.Length, capture.Bytes);
+        Assert.Equal(4001, saved.Length);
+        for (var producer = 1; producer <= 4; producer++)
+            Assert.Equal(Enumerable.Range(0, 1000).Select(i => Event(producer, i)), saved.Where(e => e.Source == $"feed-{producer}"));
+        Assert.Equal(0, capture.BufferSummary().PendingEvents);
+        Assert.Equal(0, capture.BufferSummary().PendingEstimatedBytes);
+    }
+
+    [Fact]
+    public async Task MemoryBudgetRejectsLargeBurstWithoutDroppingAcceptedEvent()
+    {
+        var capture = new CaptureFile(100000, maxBufferedBytes: 4096);
+        var item = new CaptureEvent("test", "c", "market", DateTimeOffset.UtcNow, Stopwatch.GetTimestamp(), new string('x', 1000));
+        capture.Publish(item);
+        var error = Assert.Throws<InvalidOperationException>(() => capture.Publish(item));
+        Assert.Contains("буфер заполнен", error.Message);
+        Assert.Equal(1, capture.BufferSummary().PendingEvents);
+        capture.Complete();
+        using var output = new MemoryStream();
+        await capture.DrainAsync(output);
+        Assert.Equal(1, capture.Written);
+        Assert.Equal(0, capture.BufferSummary().PendingEstimatedBytes);
+        Assert.Contains("уже закрыта", Assert.Throws<InvalidOperationException>(() => capture.Publish(item)).Message);
+    }
+
+    private sealed class PausedStream : MemoryStream
+    {
+        public readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource Resume = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            Entered.TrySetResult();
+            await Resume.Task.WaitAsync(cancellationToken);
+            await base.WriteAsync(buffer, cancellationToken);
+        }
+    }
+
+    [Fact]
     public async Task ReassemblesUtf8SplitAcrossFrames()
     {
         var bytes = Encoding.UTF8.GetBytes("{\"text\":\"цена\"}");

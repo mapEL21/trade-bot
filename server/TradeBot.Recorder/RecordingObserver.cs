@@ -9,7 +9,10 @@ public interface IRecordingObserver
 
 public sealed record RecordingReport(DateTimeOffset EndedUtc, string Status, string? Failure,
     int GapCount, long Written, long Bytes, Dictionary<string, long> MarketMessages,
-    object PersistenceDelay, bool ExecutionEnabled = false);
+    object PersistenceDelay, bool ExecutionEnabled = false)
+{
+    public CaptureBufferReport? Buffer { get; init; }
+}
 
 public interface IRecordingRunner
 {

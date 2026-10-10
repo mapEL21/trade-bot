@@ -68,7 +68,7 @@ public static class RecorderProgram
         async Task Drain()
         {
             try { await capture.DrainAsync(file); }
-            catch { stop.Cancel(); throw; }
+            catch { capture.Complete(); stop.Cancel(); throw; }
         }
         async Task FeedTask(Feed feed)
         {
@@ -81,11 +81,13 @@ public static class RecorderProgram
         catch (Exception e) { failure = e.Message; }
         finally { capture.Complete(); }
         try { await writer; }
-        catch (Exception e) { failure ??= e.Message; }
+        // A disk/size failure can cause secondary producer errors; retain the writer's root cause.
+        catch (Exception e) { failure = e.Message; }
         var allReceived = options.Feeds.All(x => capture.MarketMessages.GetValueOrDefault(x.Name) > 0);
         var summary = new RecordingReport(DateTimeOffset.UtcNow,
             failure is not null ? "failed" : !allReceived ? "no-data" : gaps > 0 ? "completed-with-gaps" : "completed",
-            failure, gaps, capture.Written, capture.Bytes, capture.MarketMessages, capture.DelaySummary());
+            failure, gaps, capture.Written, capture.Bytes, capture.MarketMessages, capture.DelaySummary())
+            { Buffer = capture.BufferSummary() };
         await File.WriteAllTextAsync(Path.Combine(directory, "summary.json"), JsonSerializer.Serialize(summary, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         observer?.Finished(summary);
         if (observer is null) Console.WriteLine(JsonSerializer.Serialize(summary));
