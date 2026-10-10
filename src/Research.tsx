@@ -85,7 +85,6 @@ export function Research({ demo }: { demo: boolean }) {
   const pending = useRef(false);
   const mounted = useRef(false);
   const incoming = useRef<string | null>(null);
-  const openedAt = useRef(performance.now());
 
   useEffect(() => {
     mounted.current = true;
@@ -94,6 +93,9 @@ export function Research({ demo }: { demo: boolean }) {
         mounted.current = false;
       };
     const source = new EventSource('/api/v1/research/stream');
+    let lastPayload: string | null = null;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    let watchdog = setTimeout(() => setStreamError(true), 10000);
     source.onmessage = (event) => {
       try {
         const value = JSON.parse(event.data) as Snapshot;
@@ -103,10 +105,22 @@ export function Research({ demo }: { demo: boolean }) {
           value.executionEnabled !== false
         )
           throw new Error('Invalid research state');
-        const received = performance.now();
-        setSnapshot(value);
-        setReceipt(received);
-        setNow(received);
+        clearTimeout(watchdog);
+        watchdog = setTimeout(() => setStreamError(true), 3000);
+        // Keep connection monitoring, but do not redraw unchanged finished sessions.
+        if (value.active || event.data !== lastPayload) {
+          const received = performance.now();
+          setSnapshot(value);
+          setReceipt(received);
+          setNow(received);
+        }
+        lastPayload = event.data;
+        if (value.active && timer === undefined) {
+          timer = setInterval(() => setNow(performance.now()), 500);
+        } else if (!value.active && timer !== undefined) {
+          clearInterval(timer);
+          timer = undefined;
+        }
         setStreamError(false);
         // Initialise controls on return, without overwriting user edits on every update.
         if (incoming.current !== value.id && value.active && value.coin) {
@@ -120,11 +134,11 @@ export function Research({ demo }: { demo: boolean }) {
       }
     };
     source.onerror = () => setStreamError(true);
-    const timer = setInterval(() => setNow(performance.now()), 500);
     return () => {
       mounted.current = false;
       source.close();
       clearInterval(timer);
+      clearTimeout(watchdog);
     };
   }, [demo]);
 
@@ -141,8 +155,8 @@ export function Research({ demo }: { demo: boolean }) {
         </a>
       </section>
     );
-  const delay = receipt === null ? 0 : Math.max(0, now - receipt);
-  const offline = streamError || (receipt !== null ? delay > 3000 : now - openedAt.current > 10000);
+  const delay = receipt === null || !snapshot?.active ? 0 : Math.max(0, now - receipt);
+  const offline = streamError || (snapshot?.active === true && delay > 3000);
   const ready = snapshot !== null && !offline;
   const active = snapshot?.active ?? false;
   const fresh = (q: Quote | null | undefined) =>
@@ -366,7 +380,8 @@ export function Research({ demo }: { demo: boolean }) {
                   Спред: <strong>{q ? `${q.spreadBps.toFixed(2)} б.п.` : '—'}</strong>
                 </span>
                 <span>
-                  Возраст BBO: <strong>{q ? `${quantity(q.ageMs + delay)} мс` : '—'}</strong>
+                  {active ? 'Возраст BBO' : 'Возраст BBO при остановке'}:{' '}
+                  <strong>{q ? `${quantity(q.ageMs + delay)} мс` : '—'}</strong>
                 </span>
               </div>
               <p className="field-hint">

@@ -138,6 +138,55 @@ test('recording controls use server commands and session survives navigation; si
   expect(stops).toBe(1);
 });
 
+test('finished BBO ages stay frozen across updates and navigation; a new recording resumes the clock', async ({
+  page,
+}) => {
+  const completed = {
+    ...live,
+    state: 'completed',
+    active: false,
+    rawDifferencePercent: null,
+    feeds: live.feeds.map((f) => ({
+      ...f,
+      status: 'stopped',
+      quote: f.quote ? { ...f.quote, ageMs: 123, stale: true } : null,
+    })),
+  };
+  await installFeed(page, live);
+  await openResearch(page);
+  await expect(page.getByText('Идёт запись', { exact: true })).toBeVisible();
+  await page.clock.install();
+  await emit(page, completed);
+  await page.clock.runFor(200);
+  const ages = page
+    .locator('.research-quote-footer span')
+    .filter({ hasText: 'Возраст BBO при остановке' });
+  await expect(ages).toHaveCount(2);
+  await expect(ages.first()).toHaveText('Возраст BBO при остановке: 123 мс');
+  await page.clock.runFor(2000);
+  await expect(ages.first()).toHaveText('Возраст BBO при остановке: 123 мс');
+  await expect(page.getByRole('button', { name: 'Начать запись' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Обзор', exact: true }).click();
+  await page.getByRole('button', { name: 'Исследование рынка', exact: true }).click();
+  await page.clock.runFor(200);
+  await expect(ages.first()).toHaveText('Возраст BBO при остановке: 123 мс');
+  await emit(page, { ...live, id: 'new-session' });
+  await page.clock.runFor(200);
+  await page.evaluate(() => {
+    (window as unknown as { researchSilence: boolean }).researchSilence = true;
+  });
+  // Allow the 500 ms display timer to pass a full second after the last snapshot.
+  await page.clock.runFor(1700);
+  const runningAge = page
+    .locator('.research-quote-footer span')
+    .filter({ hasText: 'Возраст BBO:' })
+    .first();
+  expect(
+    Number((await runningAge.locator('strong').innerText()).replace(/\D/g, '')),
+  ).toBeGreaterThan(1000);
+  await expect(page.getByTestId('research-difference')).toHaveText('+0.1234%');
+});
+
 test('rejected start remains idle and shows error; stale quotes never show a gap as a signal', async ({
   page,
 }) => {

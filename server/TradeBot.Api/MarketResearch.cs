@@ -145,7 +145,7 @@ public sealed class ResearchSession(string id, RecorderOptions options) : IRecor
     {
         lock (gate)
         {
-            var now = Stopwatch.GetTimestamp();
+            var now = endedTicks ?? Stopwatch.GetTimestamp();
             var active = state is "starting" or "recording" or "stopping";
             double Age(long ticks) => Math.Max(0, Stopwatch.GetElapsedTime(ticks, now).TotalMilliseconds);
             string Text(decimal value) => value.ToString(CultureInfo.InvariantCulture);

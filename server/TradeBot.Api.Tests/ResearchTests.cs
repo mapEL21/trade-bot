@@ -70,6 +70,32 @@ public class ResearchTests
     }
 
     [Theory]
+    [InlineData("completed")]
+    [InlineData("completed-with-gaps")]
+    [InlineData("failed")]
+    [InlineData("stopped")]
+    public async Task TerminalSessionFreezesQuoteAndEventAges(string status)
+    {
+        using var session = new ResearchSession("test", Options);
+        session.Started("unused");
+        Connect(session, "hyperliquid"); Connect(session, "binance-public");
+        session.Recorded(Event("hyperliquid", "market", Hl), 2, 2);
+        session.Recorded(Event("binance-public", "market", Bn), 3, 3);
+        if (status == "failed") session.Fail("test failure");
+        else if (status == "stopped") session.EndCancelled();
+        else session.Finished(new(DateTimeOffset.UtcNow, status, null, 3, 3, 0, [], new { }));
+
+        var first = session.Snapshot();
+        await Task.Delay(30);
+        var later = session.Snapshot();
+        Assert.False(later.Active);
+        Assert.Null(later.RawDifferencePercent);
+        Assert.Equal(first.ElapsedSeconds, later.ElapsedSeconds);
+        Assert.Equal(first.Feeds, later.Feeds);
+        Assert.All(later.Feeds.Where(f => f.Quote is not null), f => Assert.True(f.Quote!.Stale));
+    }
+
+    [Theory]
     [InlineData("\"1.04\"", "\"1.02\"")]
     [InlineData("\"0\"", "\"1.02\"")]
     [InlineData("null", "\"1.02\"")]
