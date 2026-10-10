@@ -55,6 +55,19 @@ const live = {
 
 // Browser fixtures replace only the transport. Production code never contains synthetic quotes.
 async function installFeed(page: Page, snapshot: unknown) {
+  await page.route('**/api/v1/research/markets?*', (route) => {
+    const exchange = new URL(route.request().url()).searchParams.get('exchange') ?? 'binance';
+    return route.fulfill({
+      json: {
+        exchange,
+        updatedUtc: '2026-10-10T10:00:00Z',
+        instruments: ['ARB', 'SOL'].map((coin) => ({
+          coin,
+          symbol: exchange === 'okx' ? `${coin}-USDT-SWAP` : `${coin}USDT`,
+        })),
+      },
+    });
+  });
   await page.addInitScript((initial) => {
     const state = window as unknown as { researchFixture: unknown; researchSilence: boolean };
     state.researchFixture = initial;
@@ -93,7 +106,12 @@ test('recording controls use server commands and session survives navigation; si
     stops = 0;
   await page.route('**/api/v1/research', async (route) => {
     expect(route.request().method()).toBe('POST');
-    expect(route.request().postDataJSON()).toEqual({ coin: 'ARB', seconds: 60, maxMb: 256 });
+    expect(route.request().postDataJSON()).toEqual({
+      coin: 'ARB',
+      exchange: 'binance',
+      seconds: 60,
+      maxMb: 256,
+    });
     starts++;
     await emit(page, live);
     await route.fulfill({
@@ -234,8 +252,8 @@ for (const width of [375, 768, 1440]) {
       ).violations,
     ).toEqual([]);
     await emit(page, idle);
-    await expect(page.getByLabel('Тикер альткоина')).toBeEnabled();
-    await page.getByLabel('Тикер альткоина').focus();
+    await expect(page.getByLabel('Торговая пара')).toBeEnabled();
+    await page.getByLabel('Торговая пара').focus();
     await page.keyboard.press('Tab');
     await expect(page.getByLabel('Длительность, сек')).toBeFocused();
     await page.keyboard.press('Tab');
@@ -243,6 +261,70 @@ for (const width of [375, 768, 1440]) {
     expect(errors).toEqual([]);
   });
 }
+
+test('exchange and pair dropdowns drive the recording request and preserve session selection', async ({
+  page,
+}) => {
+  await installFeed(page, idle);
+  await openResearch(page);
+  await expect(page.getByLabel('Торговая пара')).toBeEnabled();
+  await page.getByLabel('Биржа сравнения').selectOption('okx');
+  await expect(
+    page
+      .getByLabel('Торговая пара')
+      .getByRole('option', { name: 'SOL-USDT-SWAP · SOL', exact: true }),
+  ).toHaveCount(1);
+  await page.getByLabel('Торговая пара').selectOption('SOL');
+  await page.route('**/api/v1/research', async (route) => {
+    expect(route.request().postDataJSON()).toEqual({
+      exchange: 'okx',
+      coin: 'SOL',
+      seconds: 60,
+      maxMb: 256,
+    });
+    await emit(page, {
+      ...live,
+      exchange: 'okx',
+      coin: 'SOL',
+      symbol: 'SOL-USDT-SWAP',
+      feeds: live.feeds.map((f) => ({ ...f, id: f.id.replace('binance', 'okx') })),
+    });
+    await route.fulfill({ status: 202, json: { id: live.id } });
+  });
+  await page.getByRole('button', { name: 'Начать запись' }).click();
+  await expect(page.getByLabel('Биржа сравнения')).toBeDisabled();
+  await expect(page.getByRole('heading', { name: 'OKX', exact: true })).toBeVisible();
+  await expect(page.getByText('Объём: 100 контрактов')).toBeVisible();
+  await page.getByRole('button', { name: 'Обзор', exact: true }).click();
+  await page.getByRole('button', { name: 'Исследование рынка', exact: true }).click();
+  await expect(page.getByLabel('Биржа сравнения')).toHaveValue('okx');
+  await expect(page.getByLabel('Торговая пара')).toHaveValue('SOL');
+});
+
+test('catalog failure blocks starting and retry restores available pairs', async ({ page }) => {
+  await installFeed(page, idle);
+  let fails = true;
+  await page.route('**/api/v1/research/markets?*', (route) =>
+    route.fulfill(
+      fails
+        ? { status: 503, json: { title: 'Не удалось загрузить инструменты с бирж.' } }
+        : {
+            json: {
+              exchange: 'binance',
+              updatedUtc: '2026-10-10T10:00:00Z',
+              instruments: [{ coin: 'SOL', symbol: 'SOLUSDT' }],
+            },
+          },
+    ),
+  );
+  await openResearch(page);
+  await expect(page.getByRole('alert')).toContainText('Не удалось загрузить');
+  await expect(page.getByRole('button', { name: 'Начать запись' })).toBeDisabled();
+  fails = false;
+  await page.getByRole('button', { name: 'Обновить список пар' }).click();
+  await expect(page.getByLabel('Торговая пара')).toHaveValue('SOL');
+  await expect(page.getByRole('button', { name: 'Начать запись' })).toBeEnabled();
+});
 
 test('demo research cannot launch real recording', async ({ page }) => {
   let requests = 0;

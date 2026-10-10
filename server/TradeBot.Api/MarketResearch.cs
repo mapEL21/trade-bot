@@ -4,7 +4,7 @@ using TradeBot.Recorder;
 
 namespace TradeBot.Api;
 
-public sealed record ResearchRequest(string Coin, int Seconds, int MaxMb);
+public sealed record ResearchRequest(string Coin, int Seconds, int MaxMb, string Exchange = "binance");
 public sealed record QuoteView(string Bid, string Ask, string BidSize, string AskSize, string Mid,
     decimal SpreadBps, DateTimeOffset ReceivedUtc, double AgeMs, bool Stale);
 public sealed record FeedView(string Id, string Status, long Messages, int Gaps,
@@ -15,6 +15,7 @@ public sealed record ResearchSnapshot(string? Id, string State, bool Active, str
     string? Error, decimal? RawDifferencePercent, FeedView[] Feeds, ResearchEvent[] Events, bool ExecutionEnabled = false)
 {
     public int MaxMb { get; init; }
+    public string Exchange { get; init; } = "binance";
 }
 
 public sealed class ResearchSession(string id, RecorderOptions options) : IRecordingObserver, IDisposable
@@ -160,7 +161,7 @@ public sealed class ResearchSession(string id, RecorderOptions options) : IRecor
                 return new FeedView(pair.Key, status, f.Messages, f.Gaps, f.LastEventUtc, age, quote);
             }).ToArray();
             var hl = views.First(x => x.Id == "hyperliquid").Quote;
-            var bn = views.First(x => x.Id == "binance-public").Quote;
+            var bn = views.First(x => x.Id == options.Exchange + "-public").Quote;
             decimal? difference = null;
             if (hl is { Stale: false } && bn is { Stale: false })
             {
@@ -170,7 +171,7 @@ public sealed class ResearchSession(string id, RecorderOptions options) : IRecor
             return new(id, state, active, options.Coin, options.Symbol, options.Seconds,
                 startedTicks is { } start ? Math.Max(0, Stopwatch.GetElapsedTime(start, endedTicks ?? now).TotalSeconds) : 0,
                 written, bytes, views.Sum(x => x.Gaps), directory, error, difference, views, events.ToArray())
-            { MaxMb = (int)(options.MaxBytes / 1048576) };
+            { MaxMb = (int)(options.MaxBytes / 1048576), Exchange = options.Exchange };
         }
     }
 
@@ -199,7 +200,7 @@ public sealed class MarketResearch(IRecordingRunner runner, IConfiguration confi
     public string Start(ResearchRequest request)
     {
         var root = configuration["Market:Path"] ?? Path.Combine(environment.ContentRootPath, "data", "market");
-        var options = RecorderOptions.Parse(["--coin", request.Coin ?? "", "--symbol", (request.Coin ?? "") + "USDT",
+        var options = RecorderOptions.Parse(["--coin", request.Coin ?? "", "--symbol", MarketCatalog.Symbol(request.Exchange, request.Coin ?? ""), "--exchange", request.Exchange,
             "--seconds", request.Seconds.ToString(CultureInfo.InvariantCulture), "--max-mb", request.MaxMb.ToString(CultureInfo.InvariantCulture), "--output", root]);
         lock (gate)
         {

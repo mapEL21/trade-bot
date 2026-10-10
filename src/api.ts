@@ -11,6 +11,12 @@ export interface StrategyDefinition {
   exchanges: string[];
 }
 
+export interface ResearchMarketList {
+  exchange: string;
+  updatedUtc: string;
+  instruments: { coin: string; symbol: string }[];
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -50,7 +56,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  startResearch: (config: { coin: string; seconds: number; maxMb: number }) =>
+  researchMarkets: (exchange: string, signal: AbortSignal) =>
+    request<ResearchMarketList>(`/research/markets?exchange=${encodeURIComponent(exchange)}`, {
+      signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]),
+    }),
+  startResearch: (config: { coin: string; seconds: number; maxMb: number; exchange: string }) =>
     request<{ id: string }>('/research', { method: 'POST', body: JSON.stringify(config) }),
   stopResearch: (id: string) => request<void>(`/research/${id}/stop`, { method: 'POST' }),
   workspace: async (): Promise<Workspace> =>

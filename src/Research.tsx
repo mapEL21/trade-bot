@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, Database, Radio, Square, Play, Clock3 } from 'lucide-react';
-import { api } from './api';
+import { ArrowRight, Database, Radio, Square, Play, Clock3, ChevronDown } from 'lucide-react';
+import { api, type ResearchMarketList } from './api';
 
 interface Quote {
   bid: string;
@@ -30,6 +30,7 @@ interface Snapshot {
   symbol: string | null;
   seconds: number;
   maxMb?: number;
+  exchange?: string;
   elapsedSeconds: number;
   written: number;
   bytes: number;
@@ -66,7 +67,12 @@ const feedNames: Record<string, string> = {
   hyperliquid: 'Hyperliquid',
   'binance-public': 'Binance · котировки',
   'binance-market': 'Binance · сделки',
+  'bybit-public': 'Bybit · котировки',
+  'bybit-market': 'Bybit · сделки',
+  'okx-public': 'OKX · котировки',
+  'okx-market': 'OKX · сделки',
 };
+const exchanges: Record<string, string> = { binance: 'Binance', bybit: 'Bybit', okx: 'OKX' };
 const quantity = (n: number) => n.toLocaleString('ru-RU', { maximumFractionDigits: 0 });
 const price = (s: string) => Number(s).toLocaleString('ru-RU', { maximumFractionDigits: 12 });
 const duration = (n: number) =>
@@ -79,12 +85,50 @@ export function Research({ demo }: { demo: boolean }) {
   const [streamError, setStreamError] = useState(false);
   const [error, setError] = useState('');
   const [coin, setCoin] = useState('ARB');
+  const [exchange, setExchange] = useState('binance');
+  const [catalog, setCatalog] = useState<ResearchMarketList | null>(null);
+  const [catalogError, setCatalogError] = useState('');
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [reloadCatalog, setReloadCatalog] = useState(0);
   const [seconds, setSeconds] = useState('60');
   const [maxMb, setMaxMb] = useState('256');
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const mounted = useRef(false);
   const incoming = useRef<string | null>(null);
+  const sessionActive = useRef(false);
+
+  useEffect(() => {
+    if (demo) return;
+    const controller = new AbortController();
+    setCatalogLoading(true);
+    setCatalogError('');
+    void api
+      .researchMarkets(exchange, controller.signal)
+      .then((value) => {
+        if (controller.signal.aborted) return;
+        setCatalog(value);
+        if (!sessionActive.current) {
+          setCoin((current) =>
+            value.instruments.some((item) => item.coin === current)
+              ? current
+              : (value.instruments.find((item) => item.coin === 'ARB')?.coin ??
+                value.instruments[0]?.coin ??
+                ''),
+          );
+        }
+      })
+      .catch((e: Error) => {
+        if (!controller.signal.aborted) {
+          setCatalog(null);
+          setCatalogError(e.message);
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCatalogLoading(false);
+      });
+    return () => controller.abort();
+  }, [demo, exchange, reloadCatalog]);
 
   useEffect(() => {
     mounted.current = true;
@@ -122,9 +166,11 @@ export function Research({ demo }: { demo: boolean }) {
           timer = undefined;
         }
         setStreamError(false);
+        sessionActive.current = value.active;
         // Initialise controls on return, without overwriting user edits on every update.
         if (incoming.current !== value.id && value.active && value.coin) {
           setCoin(value.coin);
+          setExchange(value.exchange ?? 'binance');
           setSeconds(String(value.seconds));
           if (value.maxMb) setMaxMb(String(value.maxMb));
         }
@@ -159,10 +205,15 @@ export function Research({ demo }: { demo: boolean }) {
   const offline = streamError || (snapshot?.active === true && delay > 3000);
   const ready = snapshot !== null && !offline;
   const active = snapshot?.active ?? false;
+  const catalogReady = !catalogLoading && !catalogError && catalog?.exchange === exchange;
+  const instruments = catalogReady ? catalog.instruments : [];
+  const selectedInstrument = instruments.find((item) => item.coin === coin);
+  const recordedExchange = snapshot?.coin ? (snapshot.exchange ?? 'binance') : exchange;
+  const exchangeName = exchanges[recordedExchange] ?? recordedExchange;
   const fresh = (q: Quote | null | undefined) =>
     ready && snapshot?.state === 'recording' && !!q && !q.stale && q.ageMs + delay <= 3000;
   const hl = snapshot?.feeds.find((f) => f.id === 'hyperliquid');
-  const bn = snapshot?.feeds.find((f) => f.id === 'binance-public');
+  const bn = snapshot?.feeds.find((f) => f.id === `${recordedExchange}-public`);
   const showDifference =
     fresh(hl?.quote) && fresh(bn?.quote) && snapshot?.rawDifferencePercent != null;
   const status = offline
@@ -177,7 +228,7 @@ export function Research({ demo }: { demo: boolean }) {
 
   async function start(event: FormEvent) {
     event.preventDefault();
-    if (pending.current || !ready || active) return;
+    if (pending.current || !ready || active || !catalogReady || !selectedInstrument) return;
     if (
       !/^[A-Z][A-Z0-9]{0,19}$/.test(coin) ||
       !Number.isInteger(Number(seconds)) ||
@@ -194,7 +245,7 @@ export function Research({ demo }: { demo: boolean }) {
     setBusy(true);
     setError('');
     try {
-      await api.startResearch({ coin, seconds: Number(seconds), maxMb: Number(maxMb) });
+      await api.startResearch({ coin, exchange, seconds: Number(seconds), maxMb: Number(maxMb) });
     } catch (e) {
       if (mounted.current) setError((e as Error).message);
     } finally {
@@ -234,21 +285,54 @@ export function Research({ demo }: { demo: boolean }) {
           </span>
         </div>
         <p className="muted research-intro">
-          Hyperliquid → Binance perpetual. Ключи не нужны. Закрытие вкладки не останавливает
-          серверную запись.
+          Hyperliquid → {exchanges[exchange]} perpetual. Ключи не нужны. Закрытие вкладки не
+          останавливает серверную запись.
         </p>
         <form className="research-form" onSubmit={(e) => void start(e)}>
           <label className="field">
-            <span>Тикер альткоина</span>
-            <input
-              value={coin}
-              onChange={(e) => setCoin(e.target.value.toUpperCase())}
-              disabled={active || busy}
-              required
-              maxLength={20}
-              pattern="[A-Z][A-Z0-9]{0,19}"
-              aria-describedby="research-form-note"
-            />
+            <span>Биржа сравнения</span>
+            <div className="select-wrap">
+              <select
+                value={exchange}
+                onChange={(e) => setExchange(e.target.value)}
+                disabled={active || busy}
+              >
+                {Object.entries(exchanges).map(([id, name]) => (
+                  <option key={id} value={id}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown size={16} aria-hidden="true" />
+            </div>
+          </label>
+          <label className="field">
+            <span>Торговая пара</span>
+            <div className="select-wrap">
+              <select
+                value={coin}
+                onChange={(e) => setCoin(e.target.value)}
+                disabled={active || busy || !catalogReady || instruments.length === 0}
+                required
+                aria-describedby="research-form-note"
+              >
+                {!selectedInstrument && (
+                  <option value={coin}>
+                    {active
+                      ? snapshot?.symbol
+                      : catalogLoading
+                        ? 'Загружаем пары…'
+                        : 'Нет доступных пар'}
+                  </option>
+                )}
+                {instruments.map((item) => (
+                  <option key={item.coin} value={item.coin}>
+                    {item.symbol} · {item.coin}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown size={16} aria-hidden="true" />
+            </div>
           </label>
           <label className="field">
             <span>Длительность, сек</span>
@@ -277,7 +361,11 @@ export function Research({ demo }: { demo: boolean }) {
             />
           </label>
           <div className="research-buttons">
-            <button className="button primary" type="submit" disabled={!ready || active || busy}>
+            <button
+              className="button primary"
+              type="submit"
+              disabled={!ready || active || busy || !catalogReady || !selectedInstrument}
+            >
               <Play size={16} aria-hidden="true" />
               {busy && !active ? 'Запускаем…' : 'Начать запись'}
             </button>
@@ -293,9 +381,27 @@ export function Research({ demo }: { demo: boolean }) {
           </div>
         </form>
         <p id="research-form-note" className="field-hint">
-          Проверим пару {coin || 'TOKEN'} / {coin || 'TOKEN'}USDT на обеих площадках. ARB — пример
-          для проверки подключения, не выбранный инструмент стратегии.
+          Источник сигнала — Hyperliquid.{' '}
+          {catalogReady ? `Доступно пар: ${instruments.length}. ` : ''}В списке только активные
+          фьючерсы с прямым соответствием на обеих площадках. Выбор пары не означает рекомендацию
+          для стратегии.
         </p>
+        <button
+          className="button secondary"
+          type="button"
+          disabled={catalogLoading || active || busy}
+          onClick={() => setReloadCatalog((value) => value + 1)}
+        >
+          {catalogLoading ? 'Загружаем инструменты…' : 'Обновить список пар'}
+        </button>
+        {catalogError && (
+          <p className="form-error" role="alert">
+            {catalogError}
+          </p>
+        )}
+        {catalogReady && instruments.length === 0 && (
+          <p className="field-hint">На этих площадках нет общих доступных инструментов.</p>
+        )}
         {error && (
           <p className="form-error" role="alert">
             {error}
@@ -348,7 +454,7 @@ export function Research({ demo }: { demo: boolean }) {
       <section className="research-quotes" aria-label="Котировки площадок">
         {[
           { title: 'Hyperliquid', subtitle: snapshot?.coin ?? 'Источник сигнала', feed: hl },
-          { title: 'Binance', subtitle: snapshot?.symbol ?? 'Рынок исполнения', feed: bn },
+          { title: exchangeName, subtitle: snapshot?.symbol ?? 'Рынок сравнения', feed: bn },
         ].map(({ title, subtitle, feed }) => {
           const q = feed?.quote;
           const live = fresh(q);
@@ -367,12 +473,18 @@ export function Research({ demo }: { demo: boolean }) {
                 <div>
                   <span>Bid · покупка</span>
                   <strong>{q ? price(q.bid) : '—'}</strong>
-                  <small>Объём: {q ? price(q.bidSize) : '—'}</small>
+                  <small>
+                    Объём: {q ? price(q.bidSize) : '—'}
+                    {feed?.id === 'okx-public' ? ' контрактов' : ''}
+                  </small>
                 </div>
                 <div>
                   <span>Ask · продажа</span>
                   <strong>{q ? price(q.ask) : '—'}</strong>
-                  <small>Объём: {q ? price(q.askSize) : '—'}</small>
+                  <small>
+                    Объём: {q ? price(q.askSize) : '—'}
+                    {feed?.id === 'okx-public' ? ' контрактов' : ''}
+                  </small>
                 </div>
               </div>
               <div className="research-quote-footer">
@@ -396,7 +508,7 @@ export function Research({ demo }: { demo: boolean }) {
       <section className="panel research-difference" aria-labelledby="difference-title">
         <div>
           <h2 id="difference-title">Сырая разница средних цен</h2>
-          <p className="muted">(Mid Hyperliquid / Mid Binance − 1) × 100%</p>
+          <p className="muted">(Mid Hyperliquid / Mid {exchangeName} − 1) × 100%</p>
         </div>
         <strong className="research-difference-value" data-testid="research-difference">
           {showDifference
@@ -412,7 +524,8 @@ export function Research({ demo }: { demo: boolean }) {
       <section className="panel research-feeds" aria-labelledby="feeds-title">
         <h2 id="feeds-title">Состояние потоков</h2>
         <div className="research-feed-list">
-          {Object.entries(feedNames).map(([id, name]) => {
+          {['hyperliquid', `${recordedExchange}-public`, `${recordedExchange}-market`].map((id) => {
+            const name = feedNames[id];
             const f = snapshot?.feeds.find((item) => item.id === id);
             const age = f?.eventAgeMs == null ? null : f.eventAgeMs + delay;
             const label = offline

@@ -44,6 +44,29 @@ public sealed record MarketQuote(decimal Bid, decimal Ask, decimal BidSize, deci
                 ask = Number(data.GetProperty("a"));
                 askSize = Number(data.GetProperty("A"));
             }
+            else if (item.Source == "bybit-public")
+            {
+                if (!data.GetProperty("topic").GetString()!.StartsWith("orderbook.1.", StringComparison.Ordinal)) return false;
+                relevant = true;
+                if (data.GetProperty("type").GetString() != "snapshot") return true;
+                order = long.Parse(data.GetProperty("ts").ToString(), CultureInfo.InvariantCulture);
+                data = data.GetProperty("data");
+                bid = Number(data.GetProperty("b")[0][0]);
+                bidSize = Number(data.GetProperty("b")[0][1]);
+                ask = Number(data.GetProperty("a")[0][0]);
+                askSize = Number(data.GetProperty("a")[0][1]);
+            }
+            else if (item.Source == "okx-public")
+            {
+                if (data.GetProperty("arg").GetProperty("channel").GetString() != "bbo-tbt") return false;
+                relevant = true;
+                data = data.GetProperty("data")[0];
+                order = long.Parse(data.GetProperty("ts").GetString()!, CultureInfo.InvariantCulture);
+                bid = Number(data.GetProperty("bids")[0][0]);
+                bidSize = Number(data.GetProperty("bids")[0][1]);
+                ask = Number(data.GetProperty("asks")[0][0]);
+                askSize = Number(data.GetProperty("asks")[0][1]);
+            }
             else return false;
             if (order < 0 || bid <= 0 || ask < bid || ask > 1_000_000_000_000m || bidSize <= 0 || askSize <= 0) return true;
             quote = new(bid, ask, bidSize, askSize, order, item.ReceivedUtc, item.ReceivedTicks);

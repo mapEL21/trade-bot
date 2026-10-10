@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Net.Http.Json;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -12,7 +11,7 @@ public static class RecorderProgram
     {
         if (args.Contains("--help"))
         {
-            Console.WriteLine("Публичная запись, без торговли: --coin ARB --symbol ARBUSDT [--seconds 60] [--output data/market] [--max-mb 256]. ARB — пример проверки подключения, не выбор стратегии.");
+            Console.WriteLine("Публичная запись, без торговли: --coin ARB --symbol ARBUSDT [--exchange binance|bybit|okx] [--seconds 60] [--output data/market] [--max-mb 256]. Для OKX: --symbol ARB-USDT-SWAP. ARB — пример проверки подключения, не выбор стратегии.");
             return 0;
         }
         using var stop = new CancellationTokenSource();
@@ -31,8 +30,8 @@ public static class RecorderProgram
     {
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-        var binanceTask = http.GetStringAsync("https://fapi.binance.com/fapi/v1/exchangeInfo", stop.Token);
-        var hlTask = GetHyperliquidMetaAsync(http, stop.Token);
+        var binanceTask = MarketCatalog.ExchangeMetadataAsync(http, options.Exchange, stop.Token);
+        var hlTask = MarketCatalog.HyperliquidMetadataAsync(http, stop.Token);
         await Task.WhenAll(binanceTask, hlTask);
         var binance = await binanceTask;
         var hyperliquid = await hlTask;
@@ -45,7 +44,7 @@ public static class RecorderProgram
         using var hyperliquidDoc = JsonDocument.Parse(hyperliquid);
         var manifest = new
         {
-            schemaVersion = 1,
+            schemaVersion = 2,
             session,
             startedUtc = DateTimeOffset.UtcNow,
             options,
@@ -53,7 +52,7 @@ public static class RecorderProgram
             feeds = options.Feeds,
             executionEnabled = false,
             scope = "Raw public feed capture. No full orderbook, signals, fills or verified contract equivalence.",
-            binanceMetadata = binanceDoc.RootElement,
+            exchangeMetadata = binanceDoc.RootElement,
             hyperliquidMetadata = hyperliquidDoc.RootElement
         };
         await File.WriteAllTextAsync(Path.Combine(directory, "manifest.json"), JsonSerializer.Serialize(manifest), stop.Token);
@@ -94,22 +93,8 @@ public static class RecorderProgram
 
     public static void ValidateMarkets(string binance, string hyperliquid, RecorderOptions options)
     {
-        using var b = JsonDocument.Parse(binance);
-        using var h = JsonDocument.Parse(hyperliquid);
-        var validB = b.RootElement.GetProperty("symbols").EnumerateArray().Any(s =>
-            s.GetProperty("symbol").GetString() == options.Symbol && s.GetProperty("baseAsset").GetString() == options.Coin
-            && s.GetProperty("quoteAsset").GetString() == "USDT" && s.GetProperty("contractType").GetString() == "PERPETUAL"
-            && s.GetProperty("status").GetString() == "TRADING");
-        var validH = h.RootElement.GetProperty("universe").EnumerateArray().Any(s =>
-            s.GetProperty("name").GetString() == options.Coin && (!s.TryGetProperty("isDelisted", out var delisted) || !delisted.GetBoolean()));
-        if (!validB || !validH) throw new ArgumentException("Нет активного инструмента на обеих площадках. Подписки не запущены.");
-    }
-
-    private static async Task<string> GetHyperliquidMetaAsync(HttpClient http, CancellationToken ct)
-    {
-        using var response = await http.PostAsJsonAsync("https://api.hyperliquid.xyz/info", new { type = "meta" }, ct);
-        response.EnsureSuccessStatusCode();
-        return await response.Content.ReadAsStringAsync(ct);
+        if (!MarketCatalog.CommonMarkets(options.Exchange, binance, hyperliquid).Contains(new(options.Coin, options.Symbol)))
+            throw new ArgumentException("Нет активного инструмента на обеих площадках. Подписки не запущены.");
     }
 
     private static async Task CaptureAsync(Feed feed, RecorderOptions options, CaptureFile capture, Action gap, CancellationToken ct)
@@ -122,6 +107,8 @@ public static class RecorderProgram
             using var socket = new ClientWebSocket();
             socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
             socket.Options.KeepAliveTimeout = TimeSpan.FromSeconds(15);
+            using var connected = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            Task heartbeat = Task.CompletedTask;
             try
             {
                 Record("connecting", feed.Endpoint.ToString());
@@ -131,11 +118,12 @@ public static class RecorderProgram
                     await socket.ConnectAsync(feed.Endpoint, connect.Token);
                 }
                 Record("connected", "Новая сессия; данные до подключения не восстанавливаются.");
-                foreach (var type in feed.Subscriptions)
+                foreach (var message in MarketWire.SubscriptionMessages(feed, options))
                 {
-                    var bytes = JsonSerializer.SerializeToUtf8Bytes(new { method = "subscribe", subscription = new { type, coin = options.Coin } });
+                    var bytes = Encoding.UTF8.GetBytes(message);
                     await socket.SendAsync(bytes.AsMemory(), WebSocketMessageType.Text, true, ct);
                 }
+                heartbeat = MarketWire.HeartbeatAsync(socket, feed.Name, connected.Token);
                 while (!ct.IsCancellationRequested)
                 {
                     // No message != no price change. This timeout marks a recording gap, not a trading signal.
@@ -163,7 +151,13 @@ public static class RecorderProgram
                 Console.Error.WriteLine($"{feed.Name}: разрыв; повторное подключение.");
                 await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(10000, 500 * Math.Pow(2, Math.Min(retry++, 5))) + Random.Shared.Next(250)), ct);
             }
-            finally { socket.Abort(); }
+            finally
+            {
+                connected.Cancel();
+                socket.Abort();
+                try { await heartbeat; }
+                catch (Exception e) when (e is OperationCanceledException or WebSocketException) { }
+            }
         }
     }
 }

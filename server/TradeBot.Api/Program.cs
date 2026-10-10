@@ -21,6 +21,7 @@ builder.Services.AddOpenApi();
 builder.Services.AddSingleton<StrategyCatalog>();
 builder.Services.AddSingleton<IRecordingRunner, RecordingRunner>();
 builder.Services.AddSingleton<MarketResearch>();
+builder.Services.AddSingleton(_ => new ResearchMarkets(new HttpClient { Timeout = TimeSpan.FromSeconds(8) }));
 builder.Services.AddHostedService(services => services.GetRequiredService<MarketResearch>());
 builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(
     builder.Configuration["Storage:Path"] ?? Path.Combine(builder.Environment.ContentRootPath, "data", "workspace.db")));
@@ -80,6 +81,16 @@ app.MapOpenApi();
 var api = app.MapGroup("/api/v1").RequireRateLimiting("local");
 api.MapGet("/health", () => Results.Ok(new { status = "ok", executionEnabled = false }));
 api.MapGet("/research", (MarketResearch research) => Results.Ok(research.Snapshot()));
+api.MapGet("/research/markets", async (string exchange, ResearchMarkets markets, HttpContext context) =>
+{
+    try { return Results.Ok(await markets.GetAsync(exchange, context.RequestAborted)); }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+    catch (Exception e) when (e is HttpRequestException or JsonException or KeyNotFoundException or InvalidOperationException
+        || e is OperationCanceledException && !context.RequestAborted.IsCancellationRequested)
+    {
+        return Results.Problem(statusCode: 503, title: "Не удалось загрузить инструменты с бирж. Повторите загрузку.");
+    }
+});
 api.MapPost("/research", (ResearchRequest request, MarketResearch research) =>
 {
     try { return Results.Accepted("/api/v1/research", new { id = research.Start(request) }); }
