@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, Database, Radio, Square, Play, Clock3, ChevronDown } from 'lucide-react';
 import { api, type ResearchMarketList } from './api';
+import { MarketPairPicker, marketSymbol } from './MarketPairPicker';
 
 interface Quote {
   bid: string;
@@ -31,6 +32,8 @@ interface Snapshot {
   seconds: number;
   maxMb?: number;
   exchange?: string;
+  sourceExchange?: string;
+  sourceSymbol?: string;
   elapsedSeconds: number;
   written: number;
   bytes: number;
@@ -72,7 +75,16 @@ const feedNames: Record<string, string> = {
   'okx-public': 'OKX · котировки',
   'okx-market': 'OKX · сделки',
 };
-const exchanges: Record<string, string> = { binance: 'Binance', bybit: 'Bybit', okx: 'OKX' };
+const exchanges: Record<string, string> = {
+  hyperliquid: 'Hyperliquid',
+  binance: 'Binance',
+  bybit: 'Bybit',
+  okx: 'OKX',
+};
+const quoteFeedId = (exchange: string) =>
+  exchange === 'hyperliquid' ? exchange : `${exchange}-public`;
+const exchangeFeedIds = (exchange: string) =>
+  exchange === 'hyperliquid' ? [exchange] : [`${exchange}-public`, `${exchange}-market`];
 const quantity = (n: number) => n.toLocaleString('ru-RU', { maximumFractionDigits: 0 });
 const price = (s: string) => Number(s).toLocaleString('ru-RU', { maximumFractionDigits: 12 });
 const duration = (n: number) =>
@@ -86,6 +98,7 @@ export function Research({ demo }: { demo: boolean }) {
   const [error, setError] = useState('');
   const [coin, setCoin] = useState('ARB');
   const [exchange, setExchange] = useState('binance');
+  const [sourceExchange, setSourceExchange] = useState('hyperliquid');
   const [catalog, setCatalog] = useState<ResearchMarketList | null>(null);
   const [catalogError, setCatalogError] = useState('');
   const [catalogLoading, setCatalogLoading] = useState(true);
@@ -104,7 +117,7 @@ export function Research({ demo }: { demo: boolean }) {
     setCatalogLoading(true);
     setCatalogError('');
     void api
-      .researchMarkets(exchange, controller.signal)
+      .researchMarkets(exchange, sourceExchange, controller.signal)
       .then((value) => {
         if (controller.signal.aborted) return;
         setCatalog(value);
@@ -128,7 +141,7 @@ export function Research({ demo }: { demo: boolean }) {
         if (!controller.signal.aborted) setCatalogLoading(false);
       });
     return () => controller.abort();
-  }, [demo, exchange, reloadCatalog]);
+  }, [demo, exchange, sourceExchange, reloadCatalog]);
 
   useEffect(() => {
     mounted.current = true;
@@ -171,6 +184,7 @@ export function Research({ demo }: { demo: boolean }) {
         if (incoming.current !== value.id && value.active && value.coin) {
           setCoin(value.coin);
           setExchange(value.exchange ?? 'binance');
+          setSourceExchange(value.sourceExchange ?? 'hyperliquid');
           setSeconds(String(value.seconds));
           if (value.maxMb) setMaxMb(String(value.maxMb));
         }
@@ -205,15 +219,23 @@ export function Research({ demo }: { demo: boolean }) {
   const offline = streamError || (snapshot?.active === true && delay > 3000);
   const ready = snapshot !== null && !offline;
   const active = snapshot?.active ?? false;
-  const catalogReady = !catalogLoading && !catalogError && catalog?.exchange === exchange;
+  const catalogReady =
+    !catalogLoading &&
+    !catalogError &&
+    catalog?.exchange === exchange &&
+    (catalog.sourceExchange ?? 'hyperliquid') === sourceExchange;
   const instruments = catalogReady ? catalog.instruments : [];
   const selectedInstrument = instruments.find((item) => item.coin === coin);
   const recordedExchange = snapshot?.coin ? (snapshot.exchange ?? 'binance') : exchange;
   const exchangeName = exchanges[recordedExchange] ?? recordedExchange;
+  const recordedSource = snapshot?.coin
+    ? (snapshot.sourceExchange ?? 'hyperliquid')
+    : sourceExchange;
+  const sourceName = exchanges[recordedSource];
   const fresh = (q: Quote | null | undefined) =>
     ready && snapshot?.state === 'recording' && !!q && !q.stale && q.ageMs + delay <= 3000;
-  const hl = snapshot?.feeds.find((f) => f.id === 'hyperliquid');
-  const bn = snapshot?.feeds.find((f) => f.id === `${recordedExchange}-public`);
+  const hl = snapshot?.feeds.find((f) => f.id === quoteFeedId(recordedSource));
+  const bn = snapshot?.feeds.find((f) => f.id === quoteFeedId(recordedExchange));
   const showDifference =
     fresh(hl?.quote) && fresh(bn?.quote) && snapshot?.rawDifferencePercent != null;
   const status = offline
@@ -245,7 +267,13 @@ export function Research({ demo }: { demo: boolean }) {
     setBusy(true);
     setError('');
     try {
-      await api.startResearch({ coin, exchange, seconds: Number(seconds), maxMb: Number(maxMb) });
+      await api.startResearch({
+        coin,
+        exchange,
+        sourceExchange,
+        seconds: Number(seconds),
+        maxMb: Number(maxMb),
+      });
     } catch (e) {
       if (mounted.current) setError((e as Error).message);
     } finally {
@@ -285,16 +313,21 @@ export function Research({ demo }: { demo: boolean }) {
           </span>
         </div>
         <p className="muted research-intro">
-          Hyperliquid → {exchanges[exchange]} perpetual. Ключи не нужны. Закрытие вкладки не
-          останавливает серверную запись.
+          {exchanges[sourceExchange]} → {exchanges[exchange]} perpetual. Ключи не нужны. Закрытие
+          вкладки не останавливает серверную запись.
         </p>
         <form className="research-form" onSubmit={(e) => void start(e)}>
           <label className="field">
-            <span>Биржа сравнения</span>
+            <span id="research-source-label">Источник сигнала</span>
             <div className="select-wrap">
               <select
-                value={exchange}
-                onChange={(e) => setExchange(e.target.value)}
+                value={sourceExchange}
+                aria-labelledby="research-source-label"
+                onChange={(e) => {
+                  const next = e.target.value;
+                  if (next === exchange) setExchange(sourceExchange);
+                  setSourceExchange(next);
+                }}
                 disabled={active || busy}
               >
                 {Object.entries(exchanges).map(([id, name]) => (
@@ -307,33 +340,36 @@ export function Research({ demo }: { demo: boolean }) {
             </div>
           </label>
           <label className="field">
-            <span>Торговая пара</span>
+            <span id="research-target-label">Биржа сравнения</span>
             <div className="select-wrap">
               <select
-                value={coin}
-                onChange={(e) => setCoin(e.target.value)}
-                disabled={active || busy || !catalogReady || instruments.length === 0}
-                required
-                aria-describedby="research-form-note"
+                value={exchange}
+                aria-labelledby="research-target-label"
+                onChange={(e) => {
+                  const next = e.target.value;
+                  if (next === sourceExchange) setSourceExchange(exchange);
+                  setExchange(next);
+                }}
+                disabled={active || busy}
               >
-                {!selectedInstrument && (
-                  <option value={coin}>
-                    {active
-                      ? snapshot?.symbol
-                      : catalogLoading
-                        ? 'Загружаем пары…'
-                        : 'Нет доступных пар'}
-                  </option>
-                )}
-                {instruments.map((item) => (
-                  <option key={item.coin} value={item.coin}>
-                    {item.symbol} · {item.coin}
+                {Object.entries(exchanges).map(([id, name]) => (
+                  <option key={id} value={id}>
+                    {name}
                   </option>
                 ))}
               </select>
               <ChevronDown size={16} aria-hidden="true" />
             </div>
           </label>
+          <MarketPairPicker
+            key={`${sourceExchange}:${exchange}`}
+            instruments={instruments}
+            coin={coin}
+            sourceExchange={sourceExchange}
+            disabled={active || busy || !catalogReady || instruments.length === 0}
+            loading={catalogLoading}
+            onChange={setCoin}
+          />
           <label className="field">
             <span>Длительность, сек</span>
             <input
@@ -381,7 +417,7 @@ export function Research({ demo }: { demo: boolean }) {
           </div>
         </form>
         <p id="research-form-note" className="field-hint">
-          Источник сигнала — Hyperliquid.{' '}
+          Источник сигнала — {exchanges[sourceExchange]}.{' '}
           {catalogReady ? `Доступно пар: ${instruments.length}. ` : ''}В списке только активные
           фьючерсы с прямым соответствием на обеих площадках. Выбор пары не означает рекомендацию
           для стратегии.
@@ -453,7 +489,13 @@ export function Research({ demo }: { demo: boolean }) {
       </div>
       <section className="research-quotes" aria-label="Котировки площадок">
         {[
-          { title: 'Hyperliquid', subtitle: snapshot?.coin ?? 'Источник сигнала', feed: hl },
+          {
+            title: sourceName,
+            subtitle: snapshot?.coin
+              ? marketSymbol(recordedSource, snapshot.coin)
+              : 'Источник сигнала',
+            feed: hl,
+          },
           { title: exchangeName, subtitle: snapshot?.symbol ?? 'Рынок сравнения', feed: bn },
         ].map(({ title, subtitle, feed }) => {
           const q = feed?.quote;
@@ -508,7 +550,9 @@ export function Research({ demo }: { demo: boolean }) {
       <section className="panel research-difference" aria-labelledby="difference-title">
         <div>
           <h2 id="difference-title">Сырая разница средних цен</h2>
-          <p className="muted">(Mid Hyperliquid / Mid {exchangeName} − 1) × 100%</p>
+          <p className="muted">
+            (Mid {sourceName} / Mid {exchangeName} − 1) × 100%
+          </p>
         </div>
         <strong className="research-difference-value" data-testid="research-difference">
           {showDifference
@@ -524,7 +568,7 @@ export function Research({ demo }: { demo: boolean }) {
       <section className="panel research-feeds" aria-labelledby="feeds-title">
         <h2 id="feeds-title">Состояние потоков</h2>
         <div className="research-feed-list">
-          {['hyperliquid', `${recordedExchange}-public`, `${recordedExchange}-market`].map((id) => {
+          {[...exchangeFeedIds(recordedSource), ...exchangeFeedIds(recordedExchange)].map((id) => {
             const name = feedNames[id];
             const f = snapshot?.feeds.find((item) => item.id === id);
             const age = f?.eventAgeMs == null ? null : f.eventAgeMs + delay;

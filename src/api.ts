@@ -13,6 +13,7 @@ export interface StrategyDefinition {
 
 export interface ResearchMarketList {
   exchange: string;
+  sourceExchange?: string;
   updatedUtc: string;
   instruments: { coin: string; symbol: string }[];
 }
@@ -56,12 +57,20 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  researchMarkets: (exchange: string, signal: AbortSignal) =>
-    request<ResearchMarketList>(`/research/markets?exchange=${encodeURIComponent(exchange)}`, {
-      signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]),
-    }),
-  startResearch: (config: { coin: string; seconds: number; maxMb: number; exchange: string }) =>
-    request<{ id: string }>('/research', { method: 'POST', body: JSON.stringify(config) }),
+  researchMarkets: (exchange: string, sourceExchange: string, signal: AbortSignal) =>
+    request<ResearchMarketList>(
+      `/research/markets?exchange=${encodeURIComponent(exchange)}&sourceExchange=${encodeURIComponent(sourceExchange)}`,
+      {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]),
+      },
+    ),
+  startResearch: (config: {
+    coin: string;
+    seconds: number;
+    maxMb: number;
+    exchange: string;
+    sourceExchange: string;
+  }) => request<{ id: string }>('/research', { method: 'POST', body: JSON.stringify(config) }),
   stopResearch: (id: string) => request<void>(`/research/${id}/stop`, { method: 'POST' }),
   workspace: async (): Promise<Workspace> =>
     parseWorkspace(JSON.stringify(await request('/workspace'))),

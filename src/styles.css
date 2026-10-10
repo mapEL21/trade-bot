@@ -1901,13 +1901,85 @@ tbody tr:hover {
 }
 .research-form {
   display: grid;
-  grid-template-columns: 1fr 1.3fr 0.8fr 0.8fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: end;
   gap: 16px;
 }
 .research-form .field {
   margin: 0;
   min-width: 0;
+}
+.market-pair-field {
+  position: relative;
+  grid-column: 1 / -1;
+}
+.market-pair-input {
+  position: relative;
+}
+.market-pair-input input {
+  padding-left: 36px;
+  padding-right: 34px;
+}
+.market-pair-input svg {
+  position: absolute;
+  top: 12px;
+  color: #a6b1c3;
+  pointer-events: none;
+}
+.market-pair-input svg:first-child {
+  left: 12px;
+}
+.market-pair-input svg:last-child {
+  right: 12px;
+}
+.market-pair-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  margin-top: 6px;
+  border: 1px solid #42536b;
+  border-radius: 8px;
+  background: #111c2b;
+  box-shadow: 0 12px 30px #0008;
+}
+.market-pair-menu [role='listbox'] {
+  max-height: 260px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.market-pair-menu [role='option'] {
+  padding: 12px;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  cursor: pointer;
+  color: #e6ecf5;
+}
+.market-pair-menu [role='option'] span {
+  color: #b6c3d4;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.market-pair-menu [role='option']:hover,
+.market-pair-menu .is-highlighted {
+  background: #233c48;
+}
+.market-pair-menu p {
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid #344156;
+  color: #b6c3d4;
+}
+.market-pair-field .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 .research-form input,
 .research-form select {

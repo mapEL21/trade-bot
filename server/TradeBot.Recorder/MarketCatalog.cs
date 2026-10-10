@@ -10,14 +10,23 @@ public static class MarketCatalog
 {
     public static string Symbol(string exchange, string coin) => exchange switch
     {
+        "hyperliquid" => coin,
         "binance" or "bybit" => coin + "USDT",
         "okx" => coin + "-USDT-SWAP",
-        _ => throw new ArgumentException("Биржа не поддерживается. Выберите Binance, Bybit или OKX.")
+        _ => throw new ArgumentException("Биржа не поддерживается. Выберите Hyperliquid, Binance, Bybit или OKX.")
     };
+
+    public static void ValidatePair(string sourceExchange, string exchange)
+    {
+        _ = Symbol(sourceExchange, "ARB");
+        _ = Symbol(exchange, "ARB");
+        if (sourceExchange == exchange) throw new ArgumentException("Выберите две разные биржи.");
+    }
 
     public static async Task<string> ExchangeMetadataAsync(HttpClient http, string exchange, CancellationToken ct)
     {
         _ = Symbol(exchange, "ARB");
+        if (exchange == "hyperliquid") return await HyperliquidMetadataAsync(http, ct);
         if (exchange == "binance") return await http.GetStringAsync("https://fapi.binance.com/fapi/v1/exchangeInfo", ct);
         if (exchange == "okx") return await http.GetStringAsync("https://www.okx.com/api/v5/public/instruments?instType=SWAP", ct);
         var entries = new List<JsonElement>();
@@ -45,16 +54,22 @@ public static class MarketCatalog
 
     public static MarketInstrument[] CommonBinanceMarkets(string binance, string hyperliquid) => CommonMarkets("binance", binance, hyperliquid);
 
-    public static MarketInstrument[] CommonMarkets(string exchange, string metadata, string hyperliquid)
+    public static MarketInstrument[] CommonMarkets(string exchange, string metadata, string sourceMetadata, string sourceExchange = "hyperliquid")
+    {
+        ValidatePair(sourceExchange, exchange);
+        var coins = ActiveMarkets(sourceExchange, sourceMetadata).Select(s => s.Coin).ToHashSet(StringComparer.Ordinal);
+        return ActiveMarkets(exchange, metadata).Where(s => coins.Contains(s.Coin)).ToArray();
+    }
+
+    public static MarketInstrument[] ActiveMarkets(string exchange, string metadata)
     {
         _ = Symbol(exchange, "ARB");
         using var b = JsonDocument.Parse(metadata);
-        using var h = JsonDocument.Parse(hyperliquid);
-        var coins = h.RootElement.GetProperty("universe").EnumerateArray()
-            .Where(s => !s.TryGetProperty("isDelisted", out var delisted) || !delisted.GetBoolean())
-            .Select(s => s.GetProperty("name").GetString()!).ToHashSet(StringComparer.Ordinal);
         IEnumerable<MarketInstrument> markets;
-        if (exchange == "binance") markets = b.RootElement.GetProperty("symbols").EnumerateArray()
+        if (exchange == "hyperliquid") markets = b.RootElement.GetProperty("universe").EnumerateArray()
+            .Where(s => !s.TryGetProperty("isDelisted", out var delisted) || !delisted.GetBoolean())
+            .Select(s => new MarketInstrument(s.GetProperty("name").GetString()!, s.GetProperty("name").GetString()!));
+        else if (exchange == "binance") markets = b.RootElement.GetProperty("symbols").EnumerateArray()
             .Where(s => s.GetProperty("quoteAsset").GetString() == "USDT"
                 && s.GetProperty("contractType").GetString() == "PERPETUAL"
                 && s.GetProperty("status").GetString() == "TRADING")
@@ -77,7 +92,7 @@ public static class MarketCatalog
         }
         return markets
             .Where(s => Regex.IsMatch(s.Coin, "\\A[A-Z][A-Z0-9]{0,19}\\z")
-                && s.Symbol == Symbol(exchange, s.Coin) && coins.Contains(s.Coin))
+                && s.Symbol == Symbol(exchange, s.Coin))
             .Distinct().OrderBy(s => s.Coin, StringComparer.Ordinal).ToArray();
     }
 }

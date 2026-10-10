@@ -13,7 +13,7 @@ public static class MarketWire
         if (feed.Name.StartsWith("bybit-", StringComparison.Ordinal))
             return [JsonSerializer.Serialize(new { op = "subscribe", args = feed.Subscriptions })];
         if (feed.Name.StartsWith("okx-", StringComparison.Ordinal))
-            return [JsonSerializer.Serialize(new { op = "subscribe", args = feed.Subscriptions.Select(channel => new { channel, instId = options.Symbol }) })];
+            return [JsonSerializer.Serialize(new { op = "subscribe", args = feed.Subscriptions.Select(channel => new { channel, instId = options.SymbolForFeed(feed.Name) }) })];
         return feed.Subscriptions.Select(type => JsonSerializer.Serialize(new { method = "subscribe", subscription = new { type, coin = options.Coin } }));
     }
 

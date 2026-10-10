@@ -11,7 +11,7 @@ public static class RecorderProgram
     {
         if (args.Contains("--help"))
         {
-            Console.WriteLine("Публичная запись, без торговли: --coin ARB --symbol ARBUSDT [--exchange binance|bybit|okx] [--seconds 60] [--output data/market] [--max-mb 256]. Для OKX: --symbol ARB-USDT-SWAP. ARB — пример проверки подключения, не выбор стратегии.");
+            Console.WriteLine("Публичная запись: --coin ARB --symbol ARBUSDT [--source-exchange hyperliquid] [--exchange binance] [--seconds 60] [--output data/market] [--max-mb 256]. Выберите две разные биржи: hyperliquid, binance, bybit, okx. --symbol относится к бирже сравнения: ARBUSDT, ARB-USDT-SWAP или ARB. Торговли нет.");
             return 0;
         }
         using var stop = new CancellationTokenSource();
@@ -30,21 +30,22 @@ public static class RecorderProgram
     {
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-        var binanceTask = MarketCatalog.ExchangeMetadataAsync(http, options.Exchange, stop.Token);
-        var hlTask = MarketCatalog.HyperliquidMetadataAsync(http, stop.Token);
-        await Task.WhenAll(binanceTask, hlTask);
-        var binance = await binanceTask;
-        var hyperliquid = await hlTask;
-        ValidateMarkets(binance, hyperliquid, options);
+        MarketCatalog.ValidatePair(options.SourceExchange, options.Exchange);
+        var exchangeTask = MarketCatalog.ExchangeMetadataAsync(http, options.Exchange, stop.Token);
+        var sourceTask = MarketCatalog.ExchangeMetadataAsync(http, options.SourceExchange, stop.Token);
+        await Task.WhenAll(exchangeTask, sourceTask);
+        var exchangeMetadata = await exchangeTask;
+        var sourceMetadata = await sourceTask;
+        ValidateMarkets(exchangeMetadata, sourceMetadata, options);
 
         var session = Guid.NewGuid().ToString("N");
         var directory = Path.Combine(options.Output, $"{DateTimeOffset.UtcNow:yyyyMMddTHHmmssZ}-{session}");
         Directory.CreateDirectory(directory);
-        using var binanceDoc = JsonDocument.Parse(binance);
-        using var hyperliquidDoc = JsonDocument.Parse(hyperliquid);
+        using var exchangeDoc = JsonDocument.Parse(exchangeMetadata);
+        using var sourceDoc = JsonDocument.Parse(sourceMetadata);
         var manifest = new
         {
-            schemaVersion = 2,
+            schemaVersion = 3,
             session,
             startedUtc = DateTimeOffset.UtcNow,
             options,
@@ -52,8 +53,8 @@ public static class RecorderProgram
             feeds = options.Feeds,
             executionEnabled = false,
             scope = "Raw public feed capture. No full orderbook, signals, fills or verified contract equivalence.",
-            exchangeMetadata = binanceDoc.RootElement,
-            hyperliquidMetadata = hyperliquidDoc.RootElement
+            exchangeMetadata = exchangeDoc.RootElement,
+            sourceMetadata = sourceDoc.RootElement
         };
         await File.WriteAllTextAsync(Path.Combine(directory, "manifest.json"), JsonSerializer.Serialize(manifest), stop.Token);
         if (observer is null) Console.WriteLine($"Публичная запись {options.Coin}/{options.Symbol}, {options.Seconds} секунд. Каталог: {directory}");
@@ -91,9 +92,9 @@ public static class RecorderProgram
         return failure is not null || !allReceived ? 1 : 0;
     }
 
-    public static void ValidateMarkets(string binance, string hyperliquid, RecorderOptions options)
+    public static void ValidateMarkets(string exchangeMetadata, string sourceMetadata, RecorderOptions options)
     {
-        if (!MarketCatalog.CommonMarkets(options.Exchange, binance, hyperliquid).Contains(new(options.Coin, options.Symbol)))
+        if (!MarketCatalog.CommonMarkets(options.Exchange, exchangeMetadata, sourceMetadata, options.SourceExchange).Contains(new(options.Coin, options.Symbol)))
             throw new ArgumentException("Нет активного инструмента на обеих площадках. Подписки не запущены.");
     }
 
@@ -133,7 +134,7 @@ public static class RecorderProgram
                     var ticks = Stopwatch.GetTimestamp();
                     var utc = DateTimeOffset.UtcNow;
                     string kind;
-                    try { kind = MarketWire.Classify(feed.Name, raw, options.Coin, options.Symbol); }
+                    try { kind = MarketWire.Classify(feed.Name, raw, options.Coin, options.SymbolForFeed(feed.Name)); }
                     catch (Exception e) when (e is JsonException or InvalidDataException or KeyNotFoundException or InvalidOperationException)
                     {
                         capture.Publish(new(feed.Name, connection, "invalid", utc, ticks, raw));

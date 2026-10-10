@@ -81,9 +81,9 @@ app.MapOpenApi();
 var api = app.MapGroup("/api/v1").RequireRateLimiting("local");
 api.MapGet("/health", () => Results.Ok(new { status = "ok", executionEnabled = false }));
 api.MapGet("/research", (MarketResearch research) => Results.Ok(research.Snapshot()));
-api.MapGet("/research/markets", async (string exchange, ResearchMarkets markets, HttpContext context) =>
+api.MapGet("/research/markets", async (string exchange, string? sourceExchange, ResearchMarkets markets, HttpContext context) =>
 {
-    try { return Results.Ok(await markets.GetAsync(exchange, context.RequestAborted)); }
+    try { return Results.Ok(await markets.GetAsync(exchange, context.RequestAborted, sourceExchange ?? "hyperliquid")); }
     catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
     catch (Exception e) when (e is HttpRequestException or JsonException or KeyNotFoundException or InvalidOperationException
         || e is OperationCanceledException && !context.RequestAborted.IsCancellationRequested)

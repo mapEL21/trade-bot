@@ -60,10 +60,17 @@ async function installFeed(page: Page, snapshot: unknown) {
     return route.fulfill({
       json: {
         exchange,
+        sourceExchange:
+          new URL(route.request().url()).searchParams.get('sourceExchange') ?? 'hyperliquid',
         updatedUtc: '2026-10-10T10:00:00Z',
         instruments: ['ARB', 'SOL'].map((coin) => ({
           coin,
-          symbol: exchange === 'okx' ? `${coin}-USDT-SWAP` : `${coin}USDT`,
+          symbol:
+            exchange === 'hyperliquid'
+              ? coin
+              : exchange === 'okx'
+                ? `${coin}-USDT-SWAP`
+                : `${coin}USDT`,
         })),
       },
     });
@@ -109,6 +116,7 @@ test('recording controls use server commands and session survives navigation; si
     expect(route.request().postDataJSON()).toEqual({
       coin: 'ARB',
       exchange: 'binance',
+      sourceExchange: 'hyperliquid',
       seconds: 60,
       maxMb: 256,
     });
@@ -254,6 +262,15 @@ for (const width of [375, 768, 1440]) {
     await emit(page, idle);
     await expect(page.getByLabel('Торговая пара')).toBeEnabled();
     await page.getByLabel('Торговая пара').focus();
+    await expect(page.getByRole('listbox', { name: 'Доступные торговые пары' })).toBeVisible();
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    await page.screenshot({ path: `artifacts/research-search-${width}.png`, fullPage: true });
     await page.keyboard.press('Tab');
     await expect(page.getByLabel('Длительность, сек')).toBeFocused();
     await page.keyboard.press('Tab');
@@ -269,15 +286,13 @@ test('exchange and pair dropdowns drive the recording request and preserve sessi
   await openResearch(page);
   await expect(page.getByLabel('Торговая пара')).toBeEnabled();
   await page.getByLabel('Биржа сравнения').selectOption('okx');
-  await expect(
-    page
-      .getByLabel('Торговая пара')
-      .getByRole('option', { name: 'SOL-USDT-SWAP · SOL', exact: true }),
-  ).toHaveCount(1);
-  await page.getByLabel('Торговая пара').selectOption('SOL');
+  await expect(page.getByLabel('Торговая пара')).toBeEnabled();
+  await page.getByLabel('Торговая пара').fill('sol-usdt');
+  await page.getByRole('option', { name: /SOL.*SOL-USDT-SWAP/ }).click();
   await page.route('**/api/v1/research', async (route) => {
     expect(route.request().postDataJSON()).toEqual({
       exchange: 'okx',
+      sourceExchange: 'hyperliquid',
       coin: 'SOL',
       seconds: 60,
       maxMb: 256,
@@ -298,7 +313,7 @@ test('exchange and pair dropdowns drive the recording request and preserve sessi
   await page.getByRole('button', { name: 'Обзор', exact: true }).click();
   await page.getByRole('button', { name: 'Исследование рынка', exact: true }).click();
   await expect(page.getByLabel('Биржа сравнения')).toHaveValue('okx');
-  await expect(page.getByLabel('Торговая пара')).toHaveValue('SOL');
+  await expect(page.getByLabel('Торговая пара')).toHaveValue(/SOL/);
 });
 
 test('catalog failure blocks starting and retry restores available pairs', async ({ page }) => {
@@ -322,8 +337,91 @@ test('catalog failure blocks starting and retry restores available pairs', async
   await expect(page.getByRole('button', { name: 'Начать запись' })).toBeDisabled();
   fails = false;
   await page.getByRole('button', { name: 'Обновить список пар' }).click();
-  await expect(page.getByLabel('Торговая пара')).toHaveValue('SOL');
+  await expect(page.getByLabel('Торговая пара')).toHaveValue(/SOL/);
   await expect(page.getByRole('button', { name: 'Начать запись' })).toBeEnabled();
+});
+
+test('source selection filters the common list, search is keyboard accessible and CEX pair survives navigation', async ({
+  page,
+}) => {
+  await installFeed(page, idle);
+  await page.route('**/api/v1/research/markets?*', (route) => {
+    const query = new URL(route.request().url()).searchParams;
+    const exchange = query.get('exchange')!;
+    const sourceExchange = query.get('sourceExchange')!;
+    expect(sourceExchange).not.toBe(exchange);
+    const coins = sourceExchange === 'bybit' && exchange === 'okx' ? ['SOL'] : ['ARB', 'SOL'];
+    return route.fulfill({
+      json: {
+        exchange,
+        sourceExchange,
+        updatedUtc: '2026-10-10T10:00:00Z',
+        instruments: coins.map((coin) => ({
+          coin,
+          symbol: exchange === 'okx' ? `${coin}-USDT-SWAP` : `${coin}USDT`,
+        })),
+      },
+    });
+  });
+  await openResearch(page);
+  await page.getByLabel('Источник сигнала', { exact: true }).selectOption('bybit');
+  await page.getByLabel('Биржа сравнения').selectOption('okx');
+  const pair = page.getByLabel('Торговая пара');
+  await expect(pair).toHaveValue(/SOL/);
+  await pair.fill('ARB');
+  await expect(page.getByText('Совпадений нет. Попробуйте другой тикер.')).toBeVisible();
+  await expect(page.getByRole('listbox').getByRole('option')).toHaveCount(0);
+  await pair.fill('sol/usdt');
+  await expect(page.getByRole('listbox').getByRole('option')).toHaveCount(1);
+  await pair.press('ArrowDown');
+  await pair.press('Enter');
+  await expect(pair).toHaveValue('SOL · SOLUSDT ↔ SOL-USDT-SWAP');
+  await page.route('**/api/v1/research', async (route) => {
+    expect(route.request().postDataJSON()).toEqual({
+      coin: 'SOL',
+      sourceExchange: 'bybit',
+      exchange: 'okx',
+      seconds: 60,
+      maxMb: 256,
+    });
+    await emit(page, {
+      ...live,
+      sourceExchange: 'bybit',
+      exchange: 'okx',
+      coin: 'SOL',
+      symbol: 'SOL-USDT-SWAP',
+      feeds: ['bybit-public', 'bybit-market', 'okx-public', 'okx-market'].map((id) => ({
+        ...live.feeds[0],
+        id,
+        quote: id.endsWith('public') ? quote : null,
+      })),
+    });
+    await route.fulfill({ status: 202, json: { id: live.id } });
+  });
+  await page.getByRole('button', { name: 'Начать запись' }).click();
+  await expect(page.getByRole('heading', { name: 'Bybit', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Hyperliquid', exact: true })).toHaveCount(0);
+  await expect(page.getByText('(Mid Bybit / Mid OKX − 1) × 100%')).toBeVisible();
+  await expect(page.getByLabel('Источник сигнала', { exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: 'Обзор', exact: true }).click();
+  await page.getByRole('button', { name: 'Исследование рынка', exact: true }).click();
+  await expect(page.getByLabel('Источник сигнала', { exact: true })).toHaveValue('bybit');
+  await expect(page.getByLabel('Биржа сравнения')).toHaveValue('okx');
+});
+
+test('choosing the other exchange swaps the pair and Escape preserves the selected instrument', async ({
+  page,
+}) => {
+  await installFeed(page, idle);
+  await openResearch(page);
+  await page.getByLabel('Источник сигнала', { exact: true }).selectOption('binance');
+  await expect(page.getByLabel('Биржа сравнения')).toHaveValue('hyperliquid');
+  const pair = page.getByLabel('Торговая пара');
+  await expect(pair).toHaveValue('ARB · ARBUSDT ↔ ARB');
+  await pair.fill('does-not-exist');
+  await pair.press('Escape');
+  await expect(pair).toHaveValue('ARB · ARBUSDT ↔ ARB');
+  await expect(page.getByRole('listbox')).toHaveCount(0);
 });
 
 test('demo research cannot launch real recording', async ({ page }) => {
