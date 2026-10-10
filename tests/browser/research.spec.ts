@@ -437,3 +437,100 @@ test('demo research cannot launch real recording', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Начать запись' })).toHaveCount(0);
   expect(requests).toBe(0);
 });
+
+const analysisRecording = {
+  id: '20261010T100000Z-11111111111111111111111111111111',
+  coin: 'SOL',
+  sourceExchange: 'hyperliquid',
+  exchange: 'binance',
+  startedUtc: '2026-10-10T10:00:00Z',
+  status: 'completed',
+  hasReport: true,
+};
+const analysisReport = {
+  recording: analysisRecording,
+  settings: {
+    impulseBps: 3,
+    windowMs: 250,
+    entryDelayMs: 100,
+    holdMs: 1000,
+    maxAgeMs: 1000,
+    feeBps: 5,
+    slippageBps: 1,
+  },
+  durationSeconds: 60,
+  events: 1000,
+  gaps: 0,
+  invalidQuotes: 0,
+  outOfOrderQuotes: 0,
+  coveragePercent: 99,
+  feeds: [
+    { exchange: 'hyperliquid', quotes: 500, averageSpreadBps: 1 },
+    { exchange: 'binance', quotes: 500, averageSpreadBps: 1 },
+  ],
+  directions: [
+    {
+      sourceExchange: 'hyperliquid',
+      exchange: 'binance',
+      impulses: 3,
+      horizons: [{ horizonMs: 100, samples: 3, sameDirectionPercent: 100, meanMoveBps: 2 }],
+      model: {
+        trades: 3,
+        excluded: 0,
+        winPercent: 0,
+        meanGrossBps: 2,
+        meanNetBps: -8,
+        meanFeeBps: 10,
+      },
+    },
+  ],
+  notes: [
+    'Запись короче 10 минут: подходит для проверки подключения, но не для вывода о стратегии.',
+  ],
+};
+
+test('saved analysis reloads, recalculates chosen costs, and remains accessible on mobile', async ({
+  page,
+}) => {
+  await installFeed(page, idle);
+  await page.route('**/api/v1/research/recordings', (route) =>
+    route.fulfill({ json: { items: [analysisRecording], unavailable: 0 } }),
+  );
+  let fee = 5;
+  await page.route('**/api/v1/research/recordings/*/analysis', (route) => {
+    if (route.request().method() === 'POST') fee = route.request().postDataJSON().feeBps;
+    return route.fulfill({
+      json: { ...analysisReport, settings: { ...analysisReport.settings, feeBps: fee } },
+    });
+  });
+  await openResearch(page);
+  await expect(page.getByRole('heading', { name: 'Отчёт: SOL' })).toBeVisible();
+  await page.getByText('Параметры расчёта', { exact: true }).click();
+  await page.getByLabel('Комиссия за сторону, б.п.', { exact: true }).fill('2');
+  await page.getByRole('button', { name: 'Проанализировать запись' }).click();
+  await expect(page.getByText(/Параметры этого отчёта:/)).toContainText('комиссия 2');
+  await page.reload();
+  await page.getByRole('button', { name: 'Исследование рынка', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Отчёт: SOL' })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(
+    (await new AxeBuilder({ page }).include('.research-analysis').analyze()).violations,
+  ).toEqual([]);
+});
+
+test('analysis shows a server error without fabricated report', async ({ page }) => {
+  await installFeed(page, idle);
+  await page.route('**/api/v1/research/recordings', (route) =>
+    route.fulfill({
+      json: { items: [{ ...analysisRecording, hasReport: false }], unavailable: 0 },
+    }),
+  );
+  await page.route('**/api/v1/research/recordings/*/analysis', (route) =>
+    route.fulfill({ status: 422, json: { title: 'Повреждённая строка 2. Анализ прерван.' } }),
+  );
+  await openResearch(page);
+  await page.getByRole('button', { name: 'Проанализировать запись' }).click();
+  await expect(page.getByRole('alert')).toContainText('Повреждённая строка 2');
+  await expect(page.getByRole('heading', { name: 'Отчёт: SOL' })).toHaveCount(0);
+});

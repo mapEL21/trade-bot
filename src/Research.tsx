@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, Database, Radio, Square, Play, Clock3, ChevronDown } from 'lucide-react';
 import { api, type ResearchMarketList } from './api';
 import { MarketPairPicker, marketSymbol } from './MarketPairPicker';
+import { ResearchAnalysis } from './ResearchAnalysis';
 
 interface Quote {
   bid: string;
@@ -593,6 +594,7 @@ export function Research({ demo }: { demo: boolean }) {
           обновляется раз в секунду; запись идёт независимо от него.
         </p>
       </section>
+      <ResearchAnalysis active={active} />
       <section className="panel research-journal" aria-labelledby="research-journal-title">
         <h2 id="research-journal-title">Журнал текущей сессии</h2>
         {snapshot?.events.length ? (

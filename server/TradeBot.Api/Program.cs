@@ -21,6 +21,7 @@ builder.Services.AddOpenApi();
 builder.Services.AddSingleton<StrategyCatalog>();
 builder.Services.AddSingleton<IRecordingRunner, RecordingRunner>();
 builder.Services.AddSingleton<MarketResearch>();
+builder.Services.AddSingleton<RecordingAnalysisStore>();
 builder.Services.AddSingleton(_ => new ResearchMarkets(new HttpClient { Timeout = TimeSpan.FromSeconds(8) }));
 builder.Services.AddHostedService(services => services.GetRequiredService<MarketResearch>());
 builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(
@@ -81,6 +82,9 @@ app.MapOpenApi();
 var api = app.MapGroup("/api/v1").RequireRateLimiting("local");
 api.MapGet("/health", () => Results.Ok(new { status = "ok", executionEnabled = false }));
 api.MapGet("/research", (MarketResearch research) => Results.Ok(research.Snapshot()));
+api.MapGet("/research/recordings", (RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ListAsync(ct)));
+api.MapGet("/research/recordings/{id}/analysis", (string id, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReadAsync(id, ct)));
+api.MapPost("/research/recordings/{id}/analysis", (string id, AnalysisSettings settings, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.AnalyzeAsync(id, settings, ct)));
 api.MapGet("/research/markets", async (string exchange, string? sourceExchange, ResearchMarkets markets, HttpContext context) =>
 {
     try { return Results.Ok(await markets.GetAsync(exchange, context.RequestAborted, sourceExchange ?? "hyperliquid")); }
@@ -168,5 +172,20 @@ static IResult Failure(StoreStatus status) => status switch
     StoreStatus.Limit => Results.Problem(statusCode: 409, title: "Можно сохранить до 100 экземпляров ботов."),
     _ => Results.Problem(statusCode: 500, title: "Не удалось сохранить изменения.")
 };
+
+static async Task<IResult> AnalysisResult<T>(Func<Task<T>> action)
+{
+    try { return Results.Ok(await action()); }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+    catch (FileNotFoundException) { return Results.Problem(statusCode: 404, title: "Запись или отчёт не найдены."); }
+    catch (DirectoryNotFoundException) { return Results.Problem(statusCode: 404, title: "Запись не найдена."); }
+    catch (InvalidDataException e) { return Results.Problem(statusCode: 422, title: e.Message); }
+    catch (InvalidOperationException) { return Results.Problem(statusCode: 409, title: "Анализ недоступен: завершите запись и дождитесь окончания другого анализа."); }
+    catch (OperationCanceledException) { return Results.Problem(statusCode: 408, title: "Анализ отменён или превысил 60 секунд. Попробуйте более короткую запись."); }
+    catch (Exception e) when (e is JsonException or KeyNotFoundException or OverflowException or FormatException)
+    { return Results.Problem(statusCode: 422, title: "Некорректный формат записи или отчёта."); }
+    catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+    { return Results.Problem(statusCode: 503, title: "Не удалось прочитать запись или сохранить отчёт."); }
+}
 
 public partial class Program;

@@ -2201,3 +2201,77 @@ tbody tr:hover {
     grid-column: 1 / -1;
   }
 }
+.research-analysis {
+  min-width: 0;
+  padding: 24px;
+}
+.research-analysis > p,
+.research-analysis article p {
+  line-height: 1.65;
+  margin: 8px 0;
+}
+.research-analysis h3 {
+  margin-top: 24px;
+}
+.research-analysis form > button {
+  margin-top: 16px;
+}
+.research-analysis details {
+  margin-top: 16px;
+}
+.research-analysis summary {
+  cursor: pointer;
+  padding: 10px 0;
+}
+.analysis-controls,
+.analysis-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: end;
+}
+.analysis-controls label {
+  flex: 1;
+  min-width: 0;
+}
+.analysis-settings label {
+  flex: 1 1 190px;
+}
+.analysis-controls label,
+.analysis-settings label {
+  display: grid;
+  gap: 8px;
+}
+.analysis-controls select,
+.analysis-settings input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px;
+  background: var(--bg, #101820);
+  color: inherit;
+  border: 1px solid #526171;
+  border-radius: 8px;
+}
+.analysis-table {
+  overflow-x: auto;
+  margin: 18px 0;
+}
+.analysis-table table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+.analysis-table caption {
+  text-align: left;
+  padding-bottom: 12px;
+}
+.analysis-table th,
+.analysis-table td {
+  padding: 12px;
+  border-bottom: 1px solid #526171;
+  white-space: nowrap;
+}
+.research-analysis li {
+  margin: 10px 0;
+  line-height: 1.6;
+}
