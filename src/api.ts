@@ -88,4 +88,90 @@ export const api = {
       method: 'DELETE',
       headers: { 'If-Match': `"${bot.revision}"` },
     }),
+  // Live paper simulation of a leader-lag bot: nothing is sent to an exchange.
+  startPaper: (bot: Bot, seconds: number) =>
+    request<{ id: string }>(`/bots/${bot.id}/start`, {
+      method: 'POST',
+      body: JSON.stringify({ seconds }),
+    }),
+  pausePaper: (bot: Bot, paused: boolean) =>
+    request<void>(`/bots/${bot.id}/${paused ? 'pause' : 'resume'}`, { method: 'POST' }),
+  stopPaper: (bot: Bot, force: boolean) =>
+    request<void>(`/bots/${bot.id}/stop${force ? '?force=true' : ''}`, { method: 'POST' }),
+  paper: (signal?: AbortSignal) => request<PaperSnapshot>('/paper', { signal }),
+  paperRuns: (bot: Bot, signal?: AbortSignal) =>
+    request<PaperRunRecord[]>(`/bots/${bot.id}/runs`, { signal }),
 };
+
+export interface PaperDecision {
+  seconds: number;
+  action: string;
+  reason: string;
+  side: string | null;
+  price: number | null;
+  netBps: number | null;
+  quantity?: number | null;
+}
+export interface PaperTrade {
+  entrySeconds: number;
+  exitSeconds: number;
+  side: string;
+  entryPrice: number;
+  exitPrice: number;
+  netBps: number;
+  exitReason: string;
+  quantity?: number | null;
+  netQuote?: number | null;
+  feesQuote?: number | null;
+}
+export interface PaperSnapshot {
+  id: string | null;
+  state: string;
+  explanation: string;
+  coin: string | null;
+  sourceExchange: string | null;
+  exchange: string | null;
+  settings: { calibrationSeconds: number; executionModel: string; entryOrder?: string } | null;
+  delayMs: number;
+  counter: boolean;
+  sessionSeconds: number;
+  leader: string | null;
+  executionExchange: string | null;
+  normalBasisBps: number | null;
+  decisions: PaperDecision[];
+  trades: PaperTrade[];
+  decided: number;
+  sumNetBps: number;
+  closedNetQuote: number | null;
+  lateEvents: number;
+  result: { unresolvedPositions: number; trades: number } | null;
+  version: string;
+  executionEnabled: boolean;
+  botId: string | null;
+  paused: boolean;
+  stopping: boolean;
+  entriesBlocked: string | null;
+  positionOpen: boolean;
+}
+export interface PaperRunRecord {
+  id: string;
+  version: string;
+  startedUtc: string;
+  endedUtc: string | null;
+  state: string;
+  explanation: string;
+  coin: string;
+  signalExchange: string;
+  exchange: string;
+  delayMs: number;
+  counter: boolean;
+  leader: string | null;
+  executionExchange: string | null;
+  trades: number;
+  sumNetBps: number;
+  closedNetQuote: number | null;
+  unresolved: number;
+  lateEvents: number;
+  tradeLog: PaperTrade[];
+  journal: PaperDecision[];
+}

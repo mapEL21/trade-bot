@@ -85,20 +85,21 @@ interface Report {
     responseBps: number | null;
   }[];
 }
-const fields: [keyof Settings, string, number, number, number][] = [
+// Shared with the bot form so both name and limit the strategy settings the same way.
+export const strategyFields: [keyof Settings, string, number, number, number][] = [
   ['calibrationSeconds', 'Участок выбора поводыря, с', 30, 1800, 1],
   ['impulseBps', 'Порог импульса, б.п.', 0.1, 1000, 0.1],
   ['windowMs', 'Окно движения, мс', 10, 5000, 1],
   ['maxAgeMs', 'Свежесть котировки, мс', 10, 5000, 1],
-  ['feeBps', 'Комиссия taker за сторону, б.п.', 0, 100, 0.1],
-  ['slippageBps', 'Дополнительное проскальзывание, б.п.', 0, 100, 0.1],
+  ['feeBps', 'Комиссия taker за сторону, б.п.', 0, 100, 0.01],
+  ['slippageBps', 'Дополнительное проскальзывание, б.п.', 0, 100, 0.01],
   ['minEdgeBps', 'Запас сверх расходов, б.п.', 0, 100, 0.1],
   ['stopLossBps', 'Порог убытка сделки, б.п.', 1, 1000, 0.1],
   ['maxHoldMs', 'Максимальное удержание, мс', 100, 10000, 1],
   ['leaderAdvantageBps', 'Преимущество поводыря, б.п.', 0.1, 100, 0.1],
   ['orderNotional', 'Номинал заявки в валюте расчёта', 1, 100000, 0.01],
   ['priceLimitBps', 'Предел отклонения цены заявки, б.п.', 0, 100, 0.1],
-  ['makerFeeBps', 'Комиссия maker за вход, б.п.', -10, 100, 0.1],
+  ['makerFeeBps', 'Комиссия maker за вход, б.п.', -10, 100, 0.01],
   ['makerWaitMs', 'Ожидание исполнения maker, мс', 10, 60000, 1],
 ];
 const makerFields: (keyof Settings)[] = ['makerFeeBps', 'makerWaitMs'];
@@ -220,7 +221,7 @@ export function StrategyReplay({
             сама придёт к ней — часто это значит, что рынок пошёл против сделки. Выход всегда taker.
           </p>
           <div className="analysis-settings">
-            {fields.map(([key, label, min, max, step]) => (
+            {strategyFields.map(([key, label, min, max, step]) => (
               <label key={key}>
                 {label}
                 <input
@@ -271,7 +272,7 @@ export function StrategyReplay({
               . Вход: {report.settings.entryOrder === 'maker' ? 'maker' : 'taker'}.
             </p>
             <ul>
-              {fields
+              {strategyFields
                 .filter(
                   ([key]) => report.settings.entryOrder === 'maker' || !makerFields.includes(key),
                 )

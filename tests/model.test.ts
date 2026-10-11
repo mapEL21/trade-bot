@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   createDemo,
   csvCell,
+  defaultLeaderLagSettings,
   exportConfig,
   importConfig,
   makeBot,
@@ -70,4 +71,58 @@ test('stored workspace validation handles corrupted records', () => {
   assert.throws(() => parseWorkspace('{"schemaVersion":1,"bots":[null],"events":[]}'));
   ws.bots.push(ws.bots[0]);
   assert.throws(() => parseWorkspace(JSON.stringify(ws)));
+});
+test('leader-lag configuration keeps its parameters through export and import, and stays strict', () => {
+  const config = {
+    name: 'Поводырь · MAGIC',
+    exchange: 'Binance' as const,
+    symbol: 'MAGICUSDT',
+    budget: 20,
+    lossLimit: 2,
+    strategy: 'leader-lag' as const,
+    strategyVersion: '0.3.2',
+    parameters: {
+      signalExchange: 'OKX' as const,
+      settings: { ...defaultLeaderLagSettings },
+      delayMs: 50,
+      counter: false,
+    },
+  };
+  const bot = makeBot(validateConfig(config));
+  assert.deepEqual(importConfig(exportConfig(bot)), validateConfig(config));
+  assert.throws(() => validateConfig({ ...config, parameters: undefined }));
+  assert.throws(() =>
+    validateConfig({ ...config, parameters: { ...config.parameters, signalExchange: 'Binance' } }),
+  );
+  assert.throws(() =>
+    validateConfig({ ...config, parameters: { ...config.parameters, delayMs: 0 } }),
+  );
+  assert.throws(() =>
+    validateConfig({
+      ...config,
+      parameters: {
+        ...config.parameters,
+        settings: { ...defaultLeaderLagSettings, orderNotional: 50 },
+      },
+    }),
+  );
+  assert.throws(() =>
+    validateConfig({
+      ...config,
+      parameters: { ...config.parameters, settings: { ...defaultLeaderLagSettings, apiKey: 'x' } },
+    }),
+  );
+  assert.equal(
+    validateConfig({
+      ...config,
+      exchange: 'Hyperliquid',
+      parameters: { ...config.parameters, signalExchange: 'Binance' },
+    }).exchange,
+    'Hyperliquid',
+  );
+  // The impulse template keeps its three exchanges and accepts no strategy parameters.
+  const impulse = importConfig(exportConfig(createDemo().bots[0]));
+  assert.throws(() => validateConfig({ ...impulse, exchange: 'Hyperliquid' }));
+  assert.throws(() => validateConfig({ ...impulse, parameters: config.parameters }));
+  assert.doesNotThrow(() => validateConfig({ ...impulse, parameters: null }));
 });

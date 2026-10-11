@@ -1,13 +1,41 @@
-export type Exchange = 'Binance' | 'Bybit' | 'OKX';
-export type Status = 'running' | 'paused' | 'draft' | 'stopped';
+export type Exchange = 'Binance' | 'Bybit' | 'OKX' | 'Hyperliquid';
+export type Status =
+  'running' | 'paused' | 'draft' | 'stopped' | 'calibrating' | 'stopping' | 'interrupted';
+// Settings of the leader-lag strategy, the same fields as the recording check (ReplaySettings on the server).
+export interface LeaderLagSettings {
+  calibrationSeconds: number;
+  impulseBps: number;
+  windowMs: number;
+  maxAgeMs: number;
+  feeBps: number;
+  slippageBps: number;
+  minEdgeBps: number;
+  stopLossBps: number;
+  maxHoldMs: number;
+  leaderAdvantageBps: number;
+  orderNotional: number;
+  priceLimitBps: number;
+  makerFeeBps: number;
+  makerWaitMs: number;
+  executionModel: 'depth' | 'bbo';
+  entryOrder: 'taker' | 'maker';
+}
+// The bot trades (virtually) on its own exchange; the signal exchange must turn out to be the leader.
+export interface LeaderLagParameters {
+  signalExchange: Exchange;
+  settings: LeaderLagSettings;
+  delayMs: number;
+  counter: boolean;
+}
 export interface BotConfig {
   name: string;
   exchange: Exchange;
   symbol: string;
   budget: number;
   lossLimit: number;
-  strategy: 'impulse';
-  strategyVersion: '0.1.0';
+  strategy: 'impulse' | 'leader-lag';
+  strategyVersion: string;
+  parameters?: LeaderLagParameters;
 }
 export interface Trade {
   id: string;
@@ -41,12 +69,89 @@ export interface Workspace {
 export const STORAGE_KEY = 'trade-bot.workspace.v1';
 export const DEMO_NOW = Date.parse('2026-10-07T18:00:00Z');
 export const exchanges: Exchange[] = ['Binance', 'Bybit', 'OKX'];
+// Exchanges the leader-lag research and simulation support; Hyperliquid is one of them, with no fixed role.
+export const paperExchanges: Exchange[] = ['Binance', 'Bybit', 'OKX', 'Hyperliquid'];
 export const statusLabels: Record<Status, string> = {
   running: 'Демо запущено',
   paused: 'На паузе',
   draft: 'Черновик',
   stopped: 'Остановлен',
+  calibrating: 'Калибровка',
+  stopping: 'Останавливается',
+  interrupted: 'Прерван',
 };
+export const defaultLeaderLagSettings: LeaderLagSettings = {
+  calibrationSeconds: 120,
+  impulseBps: 3,
+  windowMs: 250,
+  maxAgeMs: 500,
+  feeBps: 5,
+  slippageBps: 1,
+  minEdgeBps: 2,
+  stopLossBps: 20,
+  maxHoldMs: 2000,
+  leaderAdvantageBps: 0.5,
+  orderNotional: 10,
+  priceLimitBps: 5,
+  makerFeeBps: 2,
+  makerWaitMs: 1000,
+  executionModel: 'depth',
+  entryOrder: 'taker',
+};
+const settingKeys = Object.keys(defaultLeaderLagSettings) as (keyof LeaderLagSettings)[];
+// Shape and obvious limits only; the server applies the full strategy validation.
+function validateParameters(
+  value: unknown,
+  exchange: Exchange,
+  budget: number,
+): LeaderLagParameters {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Укажите параметры стратегии.');
+  const p = value as Record<string, unknown>;
+  if (Object.keys(p).some((k) => !['signalExchange', 'settings', 'delayMs', 'counter'].includes(k)))
+    throw new Error('В параметрах стратегии есть неизвестные поля.');
+  if (!paperExchanges.includes(p.signalExchange as Exchange) || p.signalExchange === exchange)
+    throw new Error('Биржа сигнала должна отличаться от биржи бота.');
+  if (
+    typeof p.delayMs !== 'number' ||
+    !Number.isInteger(p.delayMs) ||
+    p.delayMs < 1 ||
+    p.delayMs > 1000
+  )
+    throw new Error('Задержка заявки — целое число от 1 до 1000 мс.');
+  if (typeof p.counter !== 'boolean') throw new Error('Укажите направление входа.');
+  const s = p.settings as Record<string, unknown> | null;
+  if (
+    !s ||
+    typeof s !== 'object' ||
+    Array.isArray(s) ||
+    Object.keys(s).some((k) => !settingKeys.includes(k as keyof LeaderLagSettings))
+  )
+    throw new Error('Проверьте настройки стратегии.');
+  const settings = { ...defaultLeaderLagSettings };
+  for (const key of settingKeys) {
+    const v = s[key];
+    if (key === 'executionModel') {
+      if (v !== 'depth' && v !== 'bbo') throw new Error('Модель исполнения: стакан или BBO.');
+      settings.executionModel = v;
+    } else if (key === 'entryOrder') {
+      if (v !== 'taker' && v !== 'maker') throw new Error('Вход: taker или maker.');
+      settings.entryOrder = v;
+    } else {
+      if (typeof v !== 'number' || !Number.isFinite(v))
+        throw new Error('Все настройки стратегии должны быть числами.');
+      settings[key] = v;
+    }
+  }
+  if (settings.orderNotional > budget)
+    throw new Error('Номинал заявки не может превышать выделенный баланс.');
+  return {
+    signalExchange: p.signalExchange as Exchange,
+    settings,
+    delayMs: p.delayMs,
+    counter: p.counter,
+  };
+}
 export const formatMoney = (n: number, signed = false) =>
   `${signed && n > 0 ? '+' : ''}${n.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 export const net = (t: Trade) => t.gross - t.fee;
@@ -91,6 +196,7 @@ export function validateConfig(value: unknown): BotConfig {
     'lossLimit',
     'strategy',
     'strategyVersion',
+    'parameters',
   ];
   if (Object.keys(v).some((k) => !allowed.includes(k)))
     throw new Error(
@@ -98,8 +204,13 @@ export function validateConfig(value: unknown): BotConfig {
     );
   if (typeof v.name !== 'string' || !v.name.trim() || v.name.trim().length > 40)
     throw new Error('Название должно содержать от 1 до 40 символов.');
-  if (!exchanges.includes(v.exchange as Exchange))
-    throw new Error('Выберите Binance, Bybit или OKX.');
+  const leaderLag = v.strategy === 'leader-lag';
+  if (!(leaderLag ? paperExchanges : exchanges).includes(v.exchange as Exchange))
+    throw new Error(
+      leaderLag
+        ? 'Выберите Binance, Bybit, OKX или Hyperliquid.'
+        : 'Выберите Binance, Bybit или OKX.',
+    );
   if (
     typeof v.symbol !== 'string' ||
     v.symbol !== v.symbol.trim() ||
@@ -120,8 +231,29 @@ export function validateConfig(value: unknown): BotConfig {
     v.lossLimit > v.budget
   )
     throw new Error('Лимит убытка должен быть больше нуля и не больше баланса.');
-  if (v.strategy !== 'impulse' || v.strategyVersion !== '0.1.0')
-    throw new Error('Эта версия интерфейса поддерживает шаблон «Импульс» 0.1.0.');
+  if (leaderLag) {
+    if (
+      typeof v.strategyVersion !== 'string' ||
+      !/^\d{1,4}\.\d{1,5}\.\d{1,6}$/.test(v.strategyVersion)
+    )
+      throw new Error('Неизвестная версия стратегии «Поводырь».');
+    return {
+      name: v.name.trim(),
+      exchange: v.exchange as Exchange,
+      symbol: v.symbol,
+      budget: v.budget,
+      lossLimit: v.lossLimit,
+      strategy: 'leader-lag',
+      strategyVersion: v.strategyVersion,
+      parameters: validateParameters(v.parameters, v.exchange as Exchange, v.budget),
+    };
+  }
+  if (
+    v.strategy !== 'impulse' ||
+    v.strategyVersion !== '0.1.0' ||
+    (v.parameters !== undefined && v.parameters !== null)
+  )
+    throw new Error('Эта версия интерфейса поддерживает шаблоны «Импульс» 0.1.0 и «Поводырь».');
   return {
     name: v.name.trim(),
     exchange: v.exchange as Exchange,
@@ -133,7 +265,7 @@ export function validateConfig(value: unknown): BotConfig {
   };
 }
 export function exportConfig(bot: Bot): string {
-  const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion } = bot;
+  const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion, parameters } = bot;
   return JSON.stringify(
     {
       schemaVersion: 1,
@@ -145,6 +277,7 @@ export function exportConfig(bot: Bot): string {
         lossLimit,
         strategy,
         strategyVersion,
+        ...(parameters ? { parameters } : {}),
       },
     },
     null,
@@ -236,7 +369,8 @@ export function parseWorkspace(text: string): Workspace {
   const ids = new Set<string>();
   for (const bot of v.bots) {
     if (!bot || typeof bot !== 'object') throw new Error('Invalid bot');
-    const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion } = bot;
+    const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion, parameters } =
+      bot;
     validateConfig({
       name,
       exchange,
@@ -245,6 +379,7 @@ export function parseWorkspace(text: string): Workspace {
       lossLimit,
       strategy,
       strategyVersion,
+      ...(parameters ? { parameters } : {}),
     });
     if (
       typeof bot.id !== 'string' ||

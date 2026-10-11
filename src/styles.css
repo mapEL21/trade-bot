@@ -856,6 +856,20 @@ h2 {
 .status-badge.running > span {
   background: var(--green);
 }
+.status-badge.calibrating,
+.status-badge.stopping {
+  color: #8fb7ee;
+}
+.status-badge.calibrating > span,
+.status-badge.stopping > span {
+  background: #8fb7ee;
+}
+.status-badge.interrupted {
+  color: #e0907a;
+}
+.status-badge.interrupted > span {
+  background: #e0907a;
+}
 .add-bot-card {
   border: 1px dashed #334052;
   border-radius: 10px;
@@ -1108,6 +1122,99 @@ h2 {
 .strategy-option > svg {
   margin-left: auto;
   color: #b5a2ed;
+}
+.strategy-choice {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.strategy-choice legend {
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: #9fb0c6;
+}
+.strategy-choice .strategy-option {
+  cursor: pointer;
+  border-color: #2d3446;
+  background: transparent;
+}
+.strategy-choice .strategy-option.chosen {
+  border-color: #b5a2ed;
+  background: #201f31;
+}
+.strategy-choice .strategy-option input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  accent-color: #b5a2ed;
+}
+.strategy-choice:disabled .strategy-option:not(.chosen) {
+  display: none;
+}
+.checkbox-field {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+}
+.checkbox-field input {
+  width: 16px;
+  height: 16px;
+}
+.strategy-details summary {
+  cursor: pointer;
+  margin-bottom: 14px;
+  font-size: 12px;
+}
+.paper-run {
+  margin-bottom: 18px;
+  padding: 20px;
+}
+.paper-run p {
+  margin: 10px 0;
+  line-height: 1.6;
+}
+.paper-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+  margin: 14px 0;
+}
+.paper-duration {
+  display: grid;
+  gap: 6px;
+  font-size: 11px;
+}
+.paper-duration select {
+  padding: 9px 10px;
+  background: var(--panel);
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.paper-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+.paper-facts span {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 11px;
+  color: #9fb0c6;
+  overflow-wrap: anywhere;
+}
+.paper-facts strong {
+  font-size: 14px;
+  color: #e6edf6;
 }
 .field-hint {
   color: #8294ab;
@@ -2327,4 +2434,7 @@ tbody tr:hover {
 .research-analysis li {
   margin: 10px 0;
   line-height: 1.6;
+}
+.paper-run h2 {
+  font-size: 15px;
 }

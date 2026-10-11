@@ -8,7 +8,7 @@ export function Strategies({
 }: {
   items: StrategyDefinition[];
   demo: boolean;
-  onCreate: () => void;
+  onCreate: (item: StrategyDefinition) => void;
 }) {
   return (
     <>
@@ -38,18 +38,17 @@ export function Strategies({
             </span>
             <p>{item.description}</p>
             <p>Биржи в настройках: {item.exchanges.join(', ')}. Подключения ещё отсутствуют.</p>
-            {/* The bot form only knows the impulse settings so far. */}
             <button
               className="button primary"
-              disabled={!item.canCreate || item.id !== 'impulse'}
-              onClick={onCreate}
+              disabled={!item.canCreate}
+              onClick={() => onCreate(item)}
             >
               <Plus size={16} />
               Создать экземпляр
             </button>
             <p className="field-hint">
-              {item.id !== 'impulse'
-                ? 'Создание и запуск этого бота из интерфейса появятся в следующем обновлении.'
+              {item.implementationStatus === 'paper'
+                ? 'Бот работает в живой симуляции по публичным данным; реальные заявки не отправляются.'
                 : demo
                   ? 'Настройки останутся в демопространстве браузера.'
                   : 'Сохраним черновик на сервере. Запуск станет доступен после реализации алгоритма.'}
