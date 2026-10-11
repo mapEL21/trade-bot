@@ -82,8 +82,57 @@ public sealed record ReplayInstrument(decimal QuantityStep, decimal MinimumQuant
 public readonly record struct ReplayLevel(decimal Price, decimal Quantity);
 public sealed record ReplayBookUpdate(bool Snapshot, long Order, ReplayLevel[] Bids, ReplayLevel[] Asks);
 public sealed record ReplayBookEvent(long Ticks, int Sequence, int Venue, string Connection, ReplayBookUpdate? Update);
-public sealed record ReplayMarketData(ReplayInstrument?[] Instruments, List<ReplayBookEvent> Books);
+public sealed record ReplayPrint(decimal Price, decimal Quantity, bool BuyerAggressor);
+// Prints is null for a connection event or an unreadable trade message: both make the trade stream incomplete.
+public sealed record ReplayTradeEvent(long Ticks, int Sequence, int Venue, string Connection, ReplayPrint[]? Prints);
+public sealed record ReplayMarketData(ReplayInstrument?[] Instruments, List<ReplayBookEvent> Books, List<ReplayTradeEvent>? Trades = null);
 public sealed record ReplayFill(decimal Quantity, decimal Price, bool BeyondVisibleDepth);
+
+public static class ReplayTradeParser
+{
+    // Aggressor side per venue: Binance aggTrade m=true means the buyer was the maker; Bybit S, OKX side and
+    // Hyperliquid side (B/A) are the taker side. OKX sizes are contracts and are converted with ctVal later.
+    public static bool TryRead(CaptureEvent item, string coin, out ReplayPrint[]? prints)
+    {
+        prints = null; var relevant = false;
+        try
+        {
+            using var document = JsonDocument.Parse(item.Payload);
+            var root = document.RootElement;
+            static decimal N(JsonElement x) => ReplayInstrument.Number(x);
+            switch (item.Source)
+            {
+                case "binance-market":
+                    if (root.TryGetProperty("data", out var wrapped)) root = wrapped;
+                    if (!root.TryGetProperty("e", out var e) || e.GetString() != "aggTrade") return false;
+                    relevant = true;
+                    if (root.GetProperty("s").GetString() != coin + "USDT") return true;
+                    prints = [new(N(root.GetProperty("p")), N(root.GetProperty("q")), !root.GetProperty("m").GetBoolean())]; break;
+                case "bybit-market":
+                    if (!root.TryGetProperty("topic", out var topic) || topic.GetString() != "publicTrade." + coin + "USDT") return false;
+                    relevant = true;
+                    prints = root.GetProperty("data").EnumerateArray().Select(x => new ReplayPrint(N(x.GetProperty("p")), N(x.GetProperty("v")),
+                        x.GetProperty("S").GetString() switch { "Buy" => true, "Sell" => false, _ => throw new FormatException() })).ToArray(); break;
+                case "okx-market":
+                    if (!root.TryGetProperty("arg", out var arg) || arg.GetProperty("channel").GetString() != "trades") return false;
+                    relevant = true;
+                    if (arg.GetProperty("instId").GetString() != coin + "-USDT-SWAP") return true;
+                    prints = root.GetProperty("data").EnumerateArray().Select(x => new ReplayPrint(N(x.GetProperty("px")), N(x.GetProperty("sz")),
+                        x.GetProperty("side").GetString() switch { "buy" => true, "sell" => false, _ => throw new FormatException() })).ToArray(); break;
+                case "hyperliquid":
+                    if (!root.TryGetProperty("channel", out var channel) || channel.GetString() != "trades") return false;
+                    relevant = true;
+                    prints = root.GetProperty("data").EnumerateArray().Where(x => x.GetProperty("coin").GetString() == coin).Select(x => new ReplayPrint(
+                        N(x.GetProperty("px")), N(x.GetProperty("sz")),
+                        x.GetProperty("side").GetString() switch { "B" => true, "A" => false, _ => throw new FormatException() })).ToArray(); break;
+                default: return false;
+            }
+            if (prints.Any(x => x.Price <= 0 || x.Quantity <= 0)) prints = null;
+        }
+        catch (Exception e) when (e is JsonException or KeyNotFoundException or InvalidOperationException or FormatException or OverflowException or ArgumentException or IndexOutOfRangeException) { prints = null; }
+        return relevant;
+    }
+}
 
 public static class ReplayDepthParser
 {
@@ -151,6 +200,7 @@ public sealed class ReplayBook
     public double At { get; private set; }
     public void Reset() { bids.Clear(); asks.Clear(); Valid = false; order = -1; }
     public bool Fresh(double at, int maxAge) => Valid && at - At <= maxAge;
+    public decimal Quantity(bool bid, decimal price) => (bid ? bids : asks).GetValueOrDefault(price);
     public void Apply(ReplayBookUpdate? update, double at, decimal unit)
     {
         if (update is null) { Reset(); return; }

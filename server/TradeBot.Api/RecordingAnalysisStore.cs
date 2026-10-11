@@ -117,12 +117,13 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
             {
                 var points = new List<MarketAnalysis.Input>();
                 var ids = new[] { RecorderOptions.QuoteFeedId(recording.SourceExchange), RecorderOptions.QuoteFeedId(recording.Exchange) };
+                var tradeIds = new[] { RecorderOptions.TradeFeedId(recording.SourceExchange), RecorderOptions.TradeFeedId(recording.Exchange) };
                 ReplayMarketData? market = null;
                 if (depth)
                 {
                     using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(FileFor(directory, "manifest.json", 8 * 1048576), token));
                     market = new([ReplayInstrument.Read(manifest.RootElement, recording.SourceExchange, recording.Coin, true),
-                        ReplayInstrument.Read(manifest.RootElement, recording.Exchange, recording.Coin, false)], []);
+                        ReplayInstrument.Read(manifest.RootElement, recording.Exchange, recording.Coin, false)], [], []);
                 }
                 long first = long.MaxValue, last = 0;
                 int events = 0, gaps = 0, levels = 0;
@@ -138,6 +139,20 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
                         throw new InvalidDataException($"Некорректное событие в строке {events}.");
                     first = Math.Min(first, item.ReceivedTicks); last = Math.Max(last, item.ReceivedTicks);
                     if (item.Kind == "gap") gaps++;
+                    if (market is not null && tradeIds.Contains(item.Source))
+                    {
+                        var venue = Array.IndexOf(tradeIds, item.Source);
+                        // Connection events reset the trade stream; for Hyperliquid they are shared with quotes and fall through.
+                        if (item.Kind is "connecting" or "connected" or "gap" or "invalid")
+                            market.Trades!.Add(new(item.ReceivedTicks, events, venue, item.Connection, null));
+                        else if (item.Kind == "market" && ReplayTradeParser.TryRead(item, recording.Coin, out var prints))
+                        {
+                            market.Trades!.Add(new(item.ReceivedTicks, events, venue, item.Connection, prints));
+                            levels += prints?.Length ?? 0;
+                            if (market.Books.Count + market.Trades.Count > 300000 || levels > 2_000_000) throw new InvalidDataException("Лимит симулятора — 300 тысяч сообщений стакана и сделок и 2 миллиона уровней. Используйте более короткую запись.");
+                            continue;
+                        }
+                    }
                     if (!ids.Contains(item.Source)) continue;
                     if (market is not null && item.Kind == "market" && ReplayDepthParser.TryRead(item, recording.Coin, out var book))
                     {

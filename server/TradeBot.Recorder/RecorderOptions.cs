@@ -31,6 +31,7 @@ public sealed record RecorderOptions(string Coin, string Symbol, int Seconds, st
     public string SourceSymbol => MarketCatalog.Symbol(SourceExchange, Coin);
     public string SymbolForFeed(string name) => MarketCatalog.Symbol(name.Split('-')[0], Coin);
     public static string QuoteFeedId(string exchange) => exchange == "hyperliquid" ? exchange : exchange + "-public";
+    public static string TradeFeedId(string exchange) => exchange == "hyperliquid" ? exchange : exchange + "-market";
     public Feed[] Feeds => [.. FeedsFor(SourceExchange), .. FeedsFor(Exchange)];
 
     private Feed[] FeedsFor(string exchange)

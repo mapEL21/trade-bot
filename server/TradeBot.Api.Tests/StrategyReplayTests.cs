@@ -158,6 +158,29 @@ public class StrategyReplayTests
     }
 
     [Fact]
+    public void RecordingEndingWhileMakerOrderRestsIsUnknownNotSkipped()
+    {
+        var input = Data().Where(x => x.Ticks <= 120450).ToList();
+        var result = StrategyReplay.Run(Recording, Settings with { EntryOrder = "maker", MaxHoldMs = 100 }, 1000, 0, 120450, input, default);
+        Assert.All(result.Scenarios.Where(x => x.Mode == "follow"), s =>
+        {
+            Assert.Equal(1, s.UnresolvedPositions); Assert.Equal(0, s.Skipped);
+            Assert.Contains(s.Journal, x => x.Reason.StartsWith("Запись закончилась при отправленной или выставленной заявке"));
+        });
+    }
+
+    [Fact]
+    public void SilentExecutionVenueWhileMakerOrderRestsIsUnknownNotUnfilled()
+    {
+        var input = Data().Where(x => !(x.Source == "binance-public" && x.Ticks is > 120300 and < 122000)).ToList();
+        var result = StrategyReplay.Run(Recording, Settings with { EntryOrder = "maker" }, 1000, 0, 125000, input, default);
+        var follow = result.Scenarios.Single(x => x.Mode == "follow" && x.DelayMs == 10);
+        Assert.Equal(1, follow.UnresolvedPositions);
+        Assert.DoesNotContain(follow.Journal, x => x.Reason == "Заявка maker не исполнилась и снята.");
+        Assert.Contains(follow.Journal, x => x.Reason.Contains("устарели при выставленной заявке"));
+    }
+
+    [Fact]
     public void TooSmallResidualIsLoggedAsSkippedRatherThanForcedTrade()
     {
         var result = StrategyReplay.Run(Recording, Settings with { MinEdgeBps = 100 }, 1000, 0, 125000, Data(), default);

@@ -32,6 +32,19 @@ public class ReplayDepthTests
         Assert.Equal(new ReplayLevel(99, 2), Assert.Single(book.Bids)); Assert.Equal(new ReplayLevel(101, 3), Assert.Single(book.Asks));
     }
 
+    [Theory]
+    [InlineData("binance-market", """{"e":"aggTrade","s":"SOLUSDT","p":"100.5","q":"3","m":true}""")]
+    [InlineData("binance-market", """{"stream":"solusdt@aggTrade","data":{"e":"aggTrade","s":"SOLUSDT","p":"100.5","q":"3","m":true}}""")]
+    [InlineData("bybit-market", """{"topic":"publicTrade.SOLUSDT","type":"snapshot","data":[{"s":"SOLUSDT","S":"Sell","v":"3","p":"100.5"}]}""")]
+    [InlineData("okx-market", """{"arg":{"channel":"trades","instId":"SOL-USDT-SWAP"},"data":[{"instId":"SOL-USDT-SWAP","px":"100.5","sz":"3","side":"sell"}]}""")]
+    [InlineData("hyperliquid", """{"channel":"trades","data":[{"coin":"SOL","side":"A","px":"100.5","sz":"3"}]}""")]
+    public void ReadsSellerInitiatedTradesFromEveryVenue(string source, string payload)
+    {
+        Assert.True(ReplayTradeParser.TryRead(new(source, "c", "market", DateTimeOffset.UnixEpoch, 1, payload), "SOL", out var prints));
+        Assert.Equal(new ReplayPrint(100.5m, 3, false), Assert.Single(prints!));
+        Assert.False(ReplayTradeParser.TryRead(new("hyperliquid", "c", "market", DateTimeOffset.UnixEpoch, 1, """{"channel":"l2Book","data":{}}"""), "SOL", out _));
+    }
+
     [Fact]
     public void MalformedRecognizedDepthInvalidatesRatherThanRefreshingBook()
     {
@@ -86,7 +99,7 @@ public class ReplayDepthTests
     public void ReplayUsesVolumeWeightedPricesAndActualRoundTripFees()
     {
         var report = Run(Market()); var scenario = Follow(report); var trade = Assert.Single(scenario.TradeLog);
-        Assert.Equal("evaluated", report.Status); Assert.Equal("0.3.1", report.Version);
+        Assert.Equal("evaluated", report.Status); Assert.Equal("0.3.2", report.Version);
         Assert.Equal(9, trade.Quantity); Assert.Equal((2 * 120.01m + 7 * 120.03m) / 9, trade.EntryPrice);
         Assert.Equal(120.99m, trade.ExitPrice);
         Assert.Equal(9 * (trade.EntryPrice + trade.ExitPrice) / 10000, trade.FeesQuote);
@@ -95,15 +108,70 @@ public class ReplayDepthTests
         Assert.Equal(trade.NetQuote / 1200 * 10000, scenario.SumNetBps);
     }
 
-    [Fact]
-    public void MakerFillUsesOrderPriceRoundedQuantityAndMakerFeeOnEntryOnly()
+    // The maker buy is placed at 119.99 for 10 coins (floor(1200 / 119.99)) at 120.26 s with 100 coins visible ahead of it.
+    private static readonly ReplaySettings Maker = Settings with { EntryOrder = "maker", MakerFeeBps = 2 };
+    private static ReplayMarketData MakerMarket(params (long Ms, decimal Price, decimal Quantity)[] sells) => Market() with
     {
-        var data = StrategyReplayTests.DipData();
-        var report = StrategyReplay.Run(Recording, Settings with { EntryOrder = "maker", MakerFeeBps = 2 }, 1000, 0, 125000, data, default, Market(data));
-        var trade = Assert.Single(Follow(report).TradeLog);
-        Assert.Equal(119.99m, trade.EntryPrice); Assert.Equal(10, trade.Quantity); // floor(1200 / 119.99)
+        Trades = [new(0, -3, 1, "t", null), .. sells.Select((x, i) => new ReplayTradeEvent(x.Ms, 300000 + i, 1, "t", [new(x.Price, x.Quantity, false)]))]
+    };
+
+    [Fact]
+    public void MakerFillsOnlyAfterTradedVolumeClearsTheQueueAheadAndPaysMakerFeeOnEntry()
+    {
+        var queued = Follow(Run(MakerMarket((120300, 119.99m, 100)), Maker));
+        Assert.Empty(queued.TradeLog); Assert.Equal(1, queued.MakerOrders); Assert.Equal(0, queued.MakerFills);
+
+        // 5 coins after the queue at 120.300 (cancel of the rest sent), a sell through our price at 120.305 completes the order.
+        var scenario = Follow(Run(MakerMarket((120300, 119.99m, 105), (120305, 119.98m, 10)), Maker));
+        var trade = Assert.Single(scenario.TradeLog);
+        Assert.Equal(1, scenario.MakerFills); Assert.Equal(0, scenario.PartialEntries);
+        Assert.Equal(120.305, trade.EntrySeconds, 6); Assert.Equal(119.99m, trade.EntryPrice); Assert.Equal(10, trade.Quantity);
         Assert.Equal(10 * (119.99m * 2 + trade.ExitPrice * 1) / 10000, trade.FeesQuote);
         Assert.Equal(10 * (trade.ExitPrice - 119.99m) - trade.FeesQuote, trade.NetQuote);
+    }
+
+    [Fact]
+    public void PartialMakerFillCancelsRestAndCountsFillsUntilTheCancelArrives()
+    {
+        // 4 coins fill at 120.300; the cancel reaches the exchange at 120.310, so 2 more at 120.305 count and 10 at 120.320 do not.
+        var scenario = Follow(Run(MakerMarket((120300, 119.99m, 104), (120305, 119.99m, 2), (120320, 119.99m, 10)), Maker));
+        var trade = Assert.Single(scenario.TradeLog);
+        Assert.Equal(1, scenario.PartialEntries); Assert.Equal(6, trade.Quantity); Assert.Equal(120.31, trade.EntrySeconds, 6);
+        Assert.Contains(scenario.Journal, x => x.Reason == "Заявка maker исполнена частично; остаток отменяется.");
+    }
+
+    [Fact]
+    public void BuyerInitiatedTradesAndPricesAboveTheBidNeverFillAMakerBuy()
+    {
+        var market = Market() with
+        {
+            Trades = [new(0, -3, 1, "t", null), new(120300, 300000, 1, "t", [new(119.99m, 500, true), new(120m, 500, false)])]
+        };
+        Assert.Empty(Follow(Run(market, Maker)).TradeLog);
+    }
+
+    [Fact]
+    public void TradeStreamGapOrMissingTradesMakeMakerFillUnknown()
+    {
+        var market = MakerMarket((1000, 120m, 1)); market.Trades!.Add(new(120300, 300001, 1, "t", null));
+        var scenario = Follow(Run(market, Maker));
+        Assert.Equal(1, scenario.UnresolvedPositions); Assert.Contains(scenario.Journal, x => x.Reason.Contains("Разрыв потока сделок"));
+        Assert.Equal("no-execution-data", Run(Market(), Maker).Status);
+    }
+
+    [Fact]
+    public void ExitThatNeverFillsAfterHoldLimitDoesNotLoopAndEndsUnresolved()
+    {
+        // Every exit from 120.5 s misses its limit; the hold limit (122.26 s) must not be re-armed with a past timestamp.
+        var market = Market();
+        for (var i = 0; i < market.Books.Count; i++)
+        {
+            var item = market.Books[i];
+            if (item.Ticks >= 120500) market.Books[i] = item with { Update = item.Update! with { Bids = [new(120.5m, 100)] } };
+        }
+        var scenario = Follow(Run(market));
+        Assert.Empty(scenario.TradeLog); Assert.Equal(1, scenario.UnresolvedPositions);
+        Assert.Contains(scenario.Journal, x => x.Reason == "Запись закончилась с открытой позицией.");
     }
 
     [Fact]
