@@ -88,7 +88,8 @@ public sealed class StrategyCatalog
             }
         }
         else if (config.Parameters is not null) errors["parameters"] = ["У этой стратегии нет дополнительных параметров."];
-        if (config.Symbol is null || !Regex.IsMatch(config.Symbol, @"\A[A-Z0-9]{2,16}USDT\z"))
+        // The same tickers the common pair list offers (1-20 characters), so every listed pair can be saved.
+        if (config.Symbol is null || !Regex.IsMatch(config.Symbol, @"\A[A-Z0-9]{1,20}USDT\z"))
             errors["symbol"] = ["Укажите символ USDT-фьючерса, например ARBUSDT."];
         if (config.Budget < 1 || config.Budget > 1_000_000)
             errors["budget"] = ["Выделенный баланс должен быть от 1 до 1 000 000 USDT."];

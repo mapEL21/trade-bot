@@ -64,6 +64,11 @@ test('rejects secrets, unknown versions, nonfinite values and invalid risk limit
   assert.throws(() => validateConfig({ ...config, budget: Infinity }));
   assert.throws(() => validateConfig({ ...config, lossLimit: 11 }));
   assert.throws(() => validateConfig({ ...config, symbol: 'ARBUSDT\n' }));
+  // Tickers from the pair list: one letter (W) up to 20 characters; longer ones are refused.
+  assert.equal(validateConfig({ ...config, symbol: 'WUSDT' }).symbol, 'WUSDT');
+  assert.doesNotThrow(() => validateConfig({ ...config, symbol: 'A'.repeat(20) + 'USDT' }));
+  assert.throws(() => validateConfig({ ...config, symbol: 'A'.repeat(21) + 'USDT' }));
+  assert.throws(() => validateConfig({ ...config, symbol: 'USDT' }));
   assert.throws(() => importConfig('{"schemaVersion":2}'));
   assert.throws(() => importConfig('invalid json'));
   assert.throws(() => importConfig(' '.repeat(32769)));

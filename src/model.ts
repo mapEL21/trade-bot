@@ -237,7 +237,8 @@ export function validateConfig(value: unknown): BotConfig {
   if (
     typeof v.symbol !== 'string' ||
     v.symbol !== v.symbol.trim() ||
-    !/^[A-Z0-9]{2,16}USDT$/.test(v.symbol)
+    // The same tickers the common pair list offers (1-20 characters, e.g. W or T), so every listed pair can be saved.
+    !/^[A-Z0-9]{1,20}USDT$/.test(v.symbol)
   )
     throw new Error('Укажите символ USDT-фьючерса, например ARBUSDT.');
   if (

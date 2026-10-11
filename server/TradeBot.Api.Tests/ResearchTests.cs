@@ -219,6 +219,8 @@ public class ResearchTests
         Assert.Equal(HttpStatusCode.Created, (await client.PostAsJsonAsync("/api/v1/bots", Config(new("Hyperliquid", settings with { OrderNotional = 50 }, Leverage: 5)))).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", Config(new("Hyperliquid", settings, Leverage: 0)))).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", Config(new("Hyperliquid", settings, Leverage: 126)))).StatusCode);
+        // One-letter tickers from the pair list, such as W, must be accepted.
+        Assert.Equal(HttpStatusCode.Created, (await client.PostAsJsonAsync("/api/v1/bots", Config(new("Hyperliquid", settings)) with { Symbol = "WUSDT" })).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots",
             new BotConfig("Импульс", "Binance", "ARBUSDT", 10, 1, "impulse", "0.1.0", new("Hyperliquid", settings)))).StatusCode);
         var created = await client.PostAsJsonAsync("/api/v1/bots", Config(new("Hyperliquid", settings, DelayMs: 25)));
