@@ -23,8 +23,10 @@ public sealed record ReplaySettings(int CalibrationSeconds = 120, decimal Impuls
     }
 }
 public sealed record ReplayDecision(double Seconds, string Action, string Reason, string? Side = null, decimal? Price = null, decimal? NetBps = null, decimal? Quantity = null);
+// MaxFavorableBps / MaxAdverseBps: the best and worst price move in the trade's direction, before fees, by the executable
+// exit price seen while the position was open (including the final exit). Null in records made before they existed.
 public sealed record ReplayTrade(double EntrySeconds, double ExitSeconds, string Side, decimal EntryPrice, decimal ExitPrice, decimal NetBps, string ExitReason,
-    decimal? Quantity = null, decimal? NetQuote = null, decimal? FeesQuote = null);
+    decimal? Quantity = null, decimal? NetQuote = null, decimal? FeesQuote = null, decimal? MaxFavorableBps = null, decimal? MaxAdverseBps = null);
 public sealed record ReplayScenario(string Mode, int DelayMs, int Trades, decimal? MeanNetBps, double? WinPercent,
     decimal SumNetBps, decimal ClosedTradeDrawdownBps, int UnresolvedPositions, int Skipped, int Signals,
     ReplayTrade[] TradeLog, ReplayDecision[] Journal, bool JournalTruncated, int PartialEntries = 0, int PartialExits = 0,

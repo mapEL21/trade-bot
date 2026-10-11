@@ -43,6 +43,13 @@ public class StrategyReplayTests
             Assert.Equal(expectedEntry, trade.EntryPrice); Assert.Equal(expectedExit, trade.ExitPrice);
             Assert.Equal(sign * (expectedExit / expectedEntry - 1) * 10000 - (1 + expectedExit / expectedEntry), trade.NetBps);
             Assert.Contains(scenario.Journal, x => x.Action == "вход отправлен");
+            // The best and worst move bracket the final one; right after entry the exit side is a spread away, so the worst is a loss.
+            var move = Math.Round(sign * (expectedExit / expectedEntry - 1) * 10000, 2);
+            Assert.True(trade.MaxFavorableBps >= move && trade.MaxAdverseBps <= move, $"{trade.MaxAdverseBps} {move} {trade.MaxFavorableBps}");
+            Assert.True(trade.MaxAdverseBps < 0);
+            var spread = Math.Round(-(120.01m / 119.99m - 1) * 10000, 2);
+            Assert.Equal(scenario.Mode == "follow" ? (move, Math.Round((119.99m / 120.01m - 1) * 10000, 2)) : (spread, move),
+                (trade.MaxFavorableBps!.Value, trade.MaxAdverseBps!.Value));
         }
     }
 

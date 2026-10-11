@@ -1,7 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
   Activity,
-  ArrowDownToLine,
   ArrowLeft,
   ArrowRight,
   ArrowUpRight,
@@ -12,7 +11,6 @@ import {
   Copy,
   FlaskConical,
   FolderInput,
-  Gauge,
   LayoutDashboard,
   ListFilter,
   Menu,
@@ -23,8 +21,6 @@ import {
   Search,
   ShieldCheck,
   Trash2,
-  TrendingUp,
-  Wallet,
   Waypoints,
   X,
   Zap,
@@ -32,19 +28,19 @@ import {
 import { api, type InstrumentInfo, type StrategyDefinition } from './api';
 import { Strategies } from './Strategies';
 import { Research } from './Research';
-import { PaperRun, activeStatuses } from './PaperRun';
+import { activeStatuses } from './PaperRun';
+import { strategyView } from './strategyViews';
 import { LeaderLagFields, sizeProblem } from './LeaderLagFields';
 import { defaultFees } from './strategySettings';
-import { Chart, DownloadButton, Empty, Modal, SelectField, Toast, Tooltip } from './components';
+import { DownloadButton, Empty, Modal, SelectField, Toast, download } from './components';
+import { Performance, Stats, TradeQuality, TradesTable } from './TradeAnalysis';
 import {
-  csvCell,
   defaultLeaderLagSettings,
   exchanges,
   exportConfig,
   formatMoney,
   importConfig,
   metrics,
-  net,
   paperExchanges,
   periodTrades,
   statusLabels,
@@ -53,7 +49,6 @@ import {
   type BotConfig,
   type Exchange,
   type Status,
-  type Trade,
   type Workspace,
 } from './model';
 
@@ -99,18 +94,7 @@ function leaderLagConfig(version: string): BotConfig {
 }
 // A running bot is always a live paper simulation, never real trading.
 const statusLabel = (status: Status) => statusLabels[status];
-// Fees and thresholds are stored in basis points and shown in percent.
-const percent = (bps: number) =>
-  `${(bps / 100).toLocaleString('ru-RU', { maximumFractionDigits: 6 })}%`;
 const strategyName = (bot: BotConfig) => (bot.strategy === 'leader-lag' ? 'Поводырь' : 'Импульс');
-function download(name: string, text: string, type = 'application/json') {
-  const url = URL.createObjectURL(new Blob([text], { type }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
 export default function App() {
   const [strategies, setStrategies] = useState<StrategyDefinition[]>([]);
   const [loading, setLoading] = useState(true);
@@ -471,9 +455,9 @@ export default function App() {
                   </button>
                 ))}
               </div>
-              {tab === 'overview' && bot.strategy === 'leader-lag' && bot.parameters && (
+              {tab === 'overview' && (
                 <>
-                  <PaperRun bot={bot} onChanged={quietRefresh} />
+                  {strategyView(bot).live?.(bot, quietRefresh)}
                   <div className="section-line">
                     <span className="section-kicker">
                       <span className="tiny-dot" />
@@ -486,71 +470,18 @@ export default function App() {
                     <Performance trades={trades} pnl={stat.pnl} />
                     <div className="panel bot-facts">
                       <h3>Параметры бота</h3>
-                      <Fact label="Стратегия" value="Поводырь → отстающая биржа" />
-                      <Fact label="Версия" value={bot.strategyVersion} />
-                      <Fact
-                        label="Биржа бота / сигнала"
-                        value={`${bot.exchange} / ${bot.parameters.signalExchange}`}
-                      />
-                      <Fact
-                        label="Размер заявки"
-                        value={
-                          bot.parameters.settings.orderQuantity !== null
-                            ? `${bot.parameters.settings.orderQuantity} ${bot.symbol.replace(/USDT$/, '')}`
-                            : `${formatMoney(bot.parameters.settings.orderNotional)} USDT`
-                        }
-                      />
-                      <Fact
-                        label="Плечо"
-                        value={
-                          bot.parameters.settings.orderQuantity === null
-                            ? `${bot.parameters.leverage}x · маржа ${formatMoney(bot.parameters.settings.orderNotional / bot.parameters.leverage)} USDT`
-                            : `${bot.parameters.leverage}x`
-                        }
-                      />
-                      <Fact label="Лимит убытка" value={`${formatMoney(bot.lossLimit)} USDT`} />
-                      <Fact
-                        label="Вход · исполнение"
-                        value={`${bot.parameters.settings.entryOrder === 'maker' ? 'maker' : 'taker'} · ${bot.parameters.settings.executionModel === 'depth' ? 'по стакану' : 'BBO'} · ${bot.parameters.delayMs} мс`}
-                      />
-                      <Fact
-                        label="Комиссии taker / maker"
-                        value={`${percent(bot.parameters.settings.feeBps)} / ${percent(bot.parameters.settings.makerFeeBps)}`}
-                      />
+                      {strategyView(bot)
+                        .facts(bot)
+                        .map((f) => (
+                          <Fact key={f.label} label={f.label} value={f.value} />
+                        ))}
                       <div className="inline-note">
                         <ShieldCheck size={17} />
-                        <span>
-                          Лимит убытка и размер заявки применяются в симуляции. Реальных позиций и
-                          ордеров нет.
-                        </span>
+                        <span>{strategyView(bot).note}</span>
                       </div>
                     </div>
                   </div>
-                  <TradesTable trades={trades} botName={bot.name} />
-                </>
-              )}
-              {tab === 'overview' && bot.strategy !== 'leader-lag' && (
-                <>
-                  <div className="section-line">
-                    <span className="muted">{'Статистика экземпляра'}</span>
-                    {period}
-                  </div>
-                  <Stats stat={stat} budget={budget} balance={balance} />
-                  <div className="overview-grid">
-                    <Performance trades={trades} pnl={stat.pnl} />
-                    <div className="panel bot-facts">
-                      <h3>Параметры бота</h3>
-                      <Fact label="Стратегия" value={strategyName(bot)} />
-                      <Fact label="Версия" value={`${bot.strategyVersion} · шаблон`} />
-                      <Fact label="Выделено" value={`${formatMoney(bot.budget)} USDT`} />
-                      <Fact label="Лимит убытка" value={`${formatMoney(bot.lossLimit)} USDT`} />
-                      <Fact label="Открытая позиция" value="Нет позиции" />
-                      <div className="inline-note">
-                        <ShieldCheck size={17} />
-                        <span>Настройки риска пока не исполняются: торгового движка нет.</span>
-                      </div>
-                    </div>
-                  </div>
+                  <TradeQuality trades={trades} />
                   <TradesTable trades={trades} botName={bot.name} />
                 </>
               )}
@@ -954,113 +885,6 @@ function Fact({ label, value }: { label: string; value: ReactNode }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
-  );
-}
-function Stats({
-  stat,
-  budget,
-  balance,
-}: {
-  stat: ReturnType<typeof metrics>;
-  budget: number;
-  balance: number;
-}) {
-  return (
-    <div className="stats-grid">
-      <Stat
-        label="Чистый результат"
-        value={`${formatMoney(stat.pnl, true)}`}
-        unit="USDT"
-        icon={<TrendingUp size={18} />}
-        accent={stat.pnl >= 0 ? 'positive' : 'negative'}
-        note={`После комиссий · ${formatMoney(stat.fees)} USDT`}
-      />
-      <Stat
-        label={'Баланс · симуляция'}
-        value={formatMoney(balance)}
-        unit="USDT"
-        icon={<Wallet size={18} />}
-        note={`Выделено ${formatMoney(budget)} USDT, изменение — по закрытым сделкам симуляции`}
-      />
-      <Stat
-        label="Прибыльных сделок"
-        value={stat.winRate === null ? '—' : stat.winRate.toFixed(1).replace('.', ',')}
-        unit={stat.winRate === null ? '' : '%'}
-        icon={<Gauge size={18} />}
-        note={`${stat.count} закрытых ${'сделок'}`}
-      />
-      <Stat
-        label="Макс. просадка"
-        value={formatMoney(stat.drawdown)}
-        unit="USDT"
-        icon={<ShieldCheck size={18} />}
-        note="По закрытым сделкам за период"
-      />
-    </div>
-  );
-}
-function Stat({
-  label,
-  value,
-  unit,
-  icon,
-  note,
-  accent = '',
-}: {
-  label: string;
-  value: string;
-  unit: string;
-  icon: ReactNode;
-  note: string;
-  accent?: string;
-}) {
-  return (
-    <div className="panel stat">
-      <div className="stat-label">
-        {label}
-        {icon}
-      </div>
-      <div className={`stat-value ${accent}`}>
-        {value}
-        <span>{unit}</span>
-      </div>
-      <div className="stat-note">{note}</div>
-    </div>
-  );
-}
-function Performance({ trades, pnl }: { trades: Trade[]; pnl: number }) {
-  return (
-    <section className="panel performance">
-      <div className="section-line">
-        <h3>
-          Динамика результата{' '}
-          <Tooltip
-            text={
-              'Накопленный результат закрытых сделок живой симуляции за выбранный период с учётом комиссий. Это не реальная торговля.'
-            }
-          />
-        </h3>
-        <span className="chart-legend">
-          <span className="tiny-dot" />
-          {'Чистый PnL · симуляция'}
-        </span>
-      </div>
-      <div className="chart-summary">
-        <strong className={pnl >= 0 ? 'positive' : 'negative'}>
-          {formatMoney(pnl, true)} <span>USDT</span>
-        </strong>
-        <span>за выбранный период</span>
-      </div>
-      {trades.length ? (
-        <Chart trades={trades} />
-      ) : (
-        <Empty
-          icon={<TrendingUp size={26} />}
-          title="Здесь появится кривая результата"
-          text={'Закрытых сделок симуляции за выбранный период нет.'}
-        />
-      )}
-    </section>
   );
 }
 function BotCard({
@@ -1490,177 +1314,6 @@ function ImportDialog({
         </button>
       </div>
     </Modal>
-  );
-}
-// Prices keep enough significant digits to show small moves on cheap coins: 0.1234 → 0.12343 is a real 2.4 b.p. move.
-const formatPrice = (n: number) => String(Number(n.toPrecision(7)));
-// Price move in the trade's direction, before fees.
-const tradeMove = (t: Trade) => (t.exit / t.entry - 1) * (t.side === 'long' ? 100 : -100);
-function formatHold(seconds: number) {
-  if (seconds < 60)
-    return `${seconds.toLocaleString('ru-RU', { maximumFractionDigits: seconds < 10 ? 2 : 1 })} с`;
-  const m = Math.floor(seconds / 60);
-  return `${m} мин ${Math.round(seconds - m * 60)} с`;
-}
-const moscowTime = (at: string) =>
-  new Date(at).toLocaleString('ru-RU', {
-    day: '2-digit',
-    month: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    timeZone: 'Europe/Moscow',
-  });
-// Trade history shared by every strategy: instrument and exchange of each trade come from the run that made it.
-// The leader column appears only when some trade has one (a strategy-specific field).
-function TradesTable({
-  trades,
-  botName,
-  showBot = false,
-}: {
-  trades: (Trade & { botName?: string })[];
-  botName?: string;
-  showBot?: boolean;
-}) {
-  const sorted = [...trades].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
-  const withLeader = trades.some((t) => t.leader);
-  function csv() {
-    const rows = [
-      [
-        'Вход UTC',
-        'Выход UTC',
-        'Бот',
-        'Пара',
-        'Биржа',
-        'Поводырь',
-        'Сторона',
-        'Вход',
-        'Выход',
-        'Движение %',
-        'Время в сделке, с',
-        'Размер USDT',
-        'Количество',
-        'Комиссия USDT',
-        'Чистый PnL USDT',
-        'Причина выхода',
-      ],
-      ...sorted.map((t) => [
-        t.openedAt ?? '',
-        t.at,
-        t.botName ?? botName ?? '',
-        t.symbol ?? '',
-        t.exchange ?? '',
-        t.leader ?? '',
-        t.side,
-        t.entry,
-        t.exit,
-        tradeMove(t),
-        t.holdSeconds ?? '',
-        t.notional ?? t.quantity * t.entry,
-        t.quantity,
-        t.fee,
-        net(t),
-        t.exitReason ?? '',
-      ]),
-    ];
-    download(
-      'simulated-trades.csv',
-      '﻿' + rows.map((r) => r.map(csvCell).join(';')).join('\r\n'),
-      'text/csv;charset=utf-8',
-    );
-  }
-  return (
-    <section className="panel trades-panel">
-      <div className="section-line">
-        <h3>
-          История сделок <span className="count-badge">{trades.length}</span>
-        </h3>
-        <button className="text-button" disabled={!trades.length} onClick={csv}>
-          <ArrowDownToLine size={15} />
-          Скачать CSV
-        </button>
-      </div>
-      {!trades.length ? (
-        <Empty
-          icon={<Activity size={26} />}
-          title="Сделок пока нет"
-          text={'Здесь появятся закрытые сделки живой симуляции бота.'}
-        />
-      ) : (
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Вход · МСК</th>
-                {showBot && <th>Бот</th>}
-                <th>Инструмент</th>
-                <th>Биржа</th>
-                {withLeader && <th>Поводырь</th>}
-                <th>Сторона</th>
-                <th>Вход → выход</th>
-                <th>В сделке</th>
-                <th>Размер, USDT</th>
-                <th>Комиссия</th>
-                <th>Чистый PnL</th>
-                <th>Причина выхода</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map((t) => {
-                const move = tradeMove(t);
-                return (
-                  <tr key={t.id}>
-                    <td className="mono">{moscowTime(t.openedAt ?? t.at)}</td>
-                    {showBot && <td>{t.botName ?? botName}</td>}
-                    <td className="table-symbol">
-                      {t.symbol ?? '—'}
-                      {t.simulated && (
-                        <span
-                          className="sim-tag"
-                          title="Сделка живой симуляции, не реальное исполнение"
-                        >
-                          SIM
-                        </span>
-                      )}
-                    </td>
-                    <td>{t.exchange ?? '—'}</td>
-                    {withLeader && <td>{t.leader ?? '—'}</td>}
-                    <td>
-                      <span className={`side ${t.side}`}>
-                        {t.side === 'long' ? 'Лонг' : 'Шорт'}
-                      </span>
-                    </td>
-                    <td className="mono">
-                      {formatPrice(t.entry)} <span className="muted">→</span> {formatPrice(t.exit)}{' '}
-                      <span
-                        className={move >= 0 ? 'positive' : 'negative'}
-                        title="Движение цены в сторону сделки, до комиссий"
-                      >
-                        {move >= 0 ? '+' : ''}
-                        {move.toLocaleString('ru-RU', { maximumFractionDigits: 3 })}%
-                      </span>
-                    </td>
-                    <td>{t.holdSeconds != null ? formatHold(t.holdSeconds) : '—'}</td>
-                    <td>{formatMoney(t.notional ?? t.quantity * t.entry)}</td>
-                    <td>{t.fee.toFixed(3)}</td>
-                    <td className={net(t) >= 0 ? 'positive' : 'negative'}>
-                      {formatMoney(net(t), true)}
-                    </td>
-                    <td className="muted">{t.exitReason ?? '—'}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-      <div className="table-note">
-        {
-          'Сделки живой симуляции: исполнения смоделированы по публичным данным, реальных ордеров не было.'
-        }{' '}
-        Комиссии и результаты указаны в USDT.
-      </div>
-    </section>
   );
 }
 function Events({ events }: { events: Workspace['events'] }) {

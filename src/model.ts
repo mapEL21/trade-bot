@@ -62,6 +62,9 @@ export interface Trade {
   // Position size in USDT at the entry price.
   notional?: number;
   exitReason?: string;
+  // Best and worst price move in the trade's direction while it was open, before fees, b.p.
+  maxFavorableBps?: number;
+  maxAdverseBps?: number;
   // Strategy-specific: the exchange that gave the signal in leader-lag.
   leader?: string;
 }
@@ -212,6 +215,74 @@ export function metrics(trades: Trade[]) {
     count: trades.length,
     winRate: trades.length ? (trades.filter((t) => net(t) > 0).length / trades.length) * 100 : null,
     drawdown,
+  };
+}
+// Price move in the trade's direction before fees, b.p.
+export const tradeMoveBps = (t: Trade) =>
+  (t.exit / t.entry - 1) * (t.side === 'long' ? 10000 : -10000);
+export const tradeNotional = (t: Trade) => t.notional ?? t.quantity * t.entry;
+// Exit reasons are grouped by their kind: a retried exit counts under its original reason, details after a colon
+// (leverage, user action) are dropped.
+export const exitKind = (reason: string) => reason.replace(/^Повтор выхода: /, '').split(':')[0];
+const mean = (values: number[]) =>
+  values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+export interface ExitReasonStats {
+  reason: string;
+  count: number;
+  pnl: number;
+  winRate: number;
+  avgMoveBps: number;
+  avgHoldSeconds: number | null;
+  avgFavorableBps: number | null;
+}
+// Trade quality shared by every strategy: whether losses come from entries (price never moved enough to pay the
+// fees) or from exits (it did, and the gain was given back). Excursions exist only for trades that recorded them.
+export function tradeQuality(trades: Trade[]) {
+  const nets = trades.map(net);
+  const wins = nets.filter((n) => n > 0);
+  const losses = nets.filter((n) => n <= 0);
+  const lost = -losses.reduce((a, b) => a + b, 0);
+  const won = wins.reduce((a, b) => a + b, 0);
+  const measured = trades.filter((t) => t.maxFavorableBps != null && t.maxAdverseBps != null);
+  const feeBps = (t: Trade) => (t.fee / tradeNotional(t)) * 10000;
+  const groups = new Map<string, Trade[]>();
+  for (const t of trades) {
+    const key = exitKind(t.exitReason ?? 'Причина не записана');
+    groups.set(key, [...(groups.get(key) ?? []), t]);
+  }
+  return {
+    count: trades.length,
+    avgNet: mean(nets),
+    avgWin: mean(wins),
+    avgLoss: mean(losses),
+    profitFactor: lost > 0 ? won / lost : null,
+    grossPnl: trades.reduce((s, t) => s + t.gross, 0),
+    fees: trades.reduce((s, t) => s + t.fee, 0),
+    avgMoveBps: mean(trades.map(tradeMoveBps)),
+    avgFeeBps: mean(trades.map(feeBps)),
+    avgHoldSeconds: mean(trades.flatMap((t) => (t.holdSeconds != null ? [t.holdSeconds] : []))),
+    measured: measured.length,
+    avgFavorableBps: mean(measured.map((t) => t.maxFavorableBps!)),
+    avgAdverseBps: mean(measured.map((t) => t.maxAdverseBps!)),
+    // Share of trades where price at some point moved far enough to pay both fees.
+    reachedFeesShare: measured.length
+      ? (measured.filter((t) => t.maxFavorableBps! >= feeBps(t)).length / measured.length) * 100
+      : null,
+    // How much of the best move was given back by the exit, on average.
+    givenBackBps: mean(measured.map((t) => t.maxFavorableBps! - tradeMoveBps(t))),
+    reasons: [...groups]
+      .map(([reason, list]): ExitReasonStats => ({
+        reason,
+        count: list.length,
+        pnl: list.reduce((s, t) => s + net(t), 0),
+        winRate: (list.filter((t) => net(t) > 0).length / list.length) * 100,
+        avgMoveBps: mean(list.map(tradeMoveBps))!,
+        avgHoldSeconds: mean(list.flatMap((t) => (t.holdSeconds != null ? [t.holdSeconds] : []))),
+        avgFavorableBps: mean(
+          list.flatMap((t) => (t.maxFavorableBps != null ? [t.maxFavorableBps] : [])),
+        ),
+      }))
+      .sort((a, b) => b.count - a.count),
   };
 }
 export function periodTrades(trades: Trade[], days: number, now = Date.now()) {
@@ -387,6 +458,9 @@ export function parseWorkspace(text: string): Workspace {
         (t.openedAt != null && !Number.isFinite(Date.parse(t.openedAt))) ||
         [t.holdSeconds, t.notional].some(
           (n) => n != null && (typeof n !== 'number' || !Number.isFinite(n) || n < 0),
+        ) ||
+        [t.maxFavorableBps, t.maxAdverseBps].some(
+          (n) => n != null && (typeof n !== 'number' || !Number.isFinite(n)),
         )
       )
         throw new Error('Invalid trade');

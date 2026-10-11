@@ -14,7 +14,9 @@ const trades: Trade[] = [1, 5, 30, 60, 100].map((hours, i) => ({
   exchange: 'OKX',
   leader: 'Binance',
   notional: 10.2,
-  exitReason: 'Поводырь развернулся',
+  exitReason: i === 4 ? 'Повтор выхода: Ограничение убытка' : 'Поводырь развернулся',
+  maxFavorableBps: 130,
+  maxAdverseBps: -5,
   side: i % 2 ? 'short' : 'long',
   gross: i % 3 ? 0.05 : -0.02,
   fee: 0.01,
@@ -129,6 +131,16 @@ test('overview, trade periods and bot navigation work without console errors', a
   await page.screenshot({ path: 'artifacts/overview-desktop.png', fullPage: true });
   await page.getByRole('button', { name: 'Статистика' }).click();
   await expect(page.getByRole('heading', { name: 'Поводырь · MAGIC' })).toBeVisible();
+  // The common trade quality block groups exit reasons; a retried exit counts under its original reason.
+  const quality = page.locator('.quality-panel');
+  await expect(quality.getByRole('heading', { name: 'Качество сделок' })).toBeVisible();
+  await expect(quality.locator('tbody tr')).toHaveCount(2);
+  await expect(quality.locator('tbody tr').first()).toContainText('Поводырь развернулся');
+  await expect(quality.locator('tbody tr').nth(1)).toContainText('Ограничение убытка');
+  await expect(quality).toContainText('выводы предварительные');
+  // A bot saved before leverage existed shows 1x.
+  await expect(page.locator('.bot-facts')).toContainText('1x · маржа 10,00 USDT');
+  await page.screenshot({ path: 'artifacts/bot-overview-desktop.png', fullPage: true });
   await page.locator('.detail-tabs').getByRole('button', { name: 'Сделки', exact: true }).click();
   await expect(page.locator('.trades-panel tbody tr')).toHaveCount(5);
   await page.getByRole('button', { name: '24 часа', exact: true }).click();

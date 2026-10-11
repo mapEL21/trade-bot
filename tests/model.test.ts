@@ -9,6 +9,7 @@ import {
   net,
   parseWorkspace,
   periodTrades,
+  tradeQuality,
   validateConfig,
   type Bot,
   type Trade,
@@ -197,4 +198,49 @@ test('leader-lag configuration keeps its parameters through export and import, a
   assert.throws(() => validateConfig({ ...impulseConfig, exchange: 'Hyperliquid' }));
   assert.throws(() => validateConfig({ ...impulseConfig, parameters: config.parameters }));
   assert.doesNotThrow(() => validateConfig({ ...impulseConfig, parameters: null }));
+});
+test('trade quality separates entry and exit problems and groups exit reasons', () => {
+  // 10 USDT long trades with 0.01 USDT fees (10 b.p. round trip).
+  const at = (
+    exit: number,
+    reason: string,
+    favorable: number | undefined,
+    adverse: number | undefined,
+  ): Trade => ({
+    ...trade('2026-10-02T00:00:00Z', (exit - 1) * 10, 0.01),
+    entry: 1,
+    exit,
+    quantity: 10,
+    notional: 10,
+    holdSeconds: 0.5,
+    exitReason: reason,
+    maxFavorableBps: favorable,
+    maxAdverseBps: adverse,
+  });
+  const q = tradeQuality([
+    at(1.002, 'Отставание сократилось или сменило знак', 25, -2),
+    at(0.9997, 'Поводырь развернулся', 4, -3),
+    at(0.9997, 'Повтор выхода: Поводырь развернулся', 12, -3),
+    at(0.999, 'Ограничение убытка', undefined, undefined),
+  ]);
+  assert.equal(q.count, 4);
+  assert.equal(q.measured, 3);
+  // 2 of 3 measured trades moved at least the 10 b.p. of fees at some point.
+  assert.ok(Math.abs(q.reachedFeesShare! - 200 / 3) < 1e-9);
+  // Given back: 25 − 20, 4 − (−3), 12 − (−3).
+  assert.ok(Math.abs(q.givenBackBps! - 27 / 3) < 1e-6);
+  assert.ok(Math.abs(q.avgFeeBps! - 10) < 1e-9);
+  // A retried exit counts under its original reason.
+  assert.deepEqual(
+    q.reasons.map((r) => [r.reason, r.count]),
+    [
+      ['Поводырь развернулся', 2],
+      ['Отставание сократилось или сменило знак', 1],
+      ['Ограничение убытка', 1],
+    ],
+  );
+  assert.equal(q.reasons[0].winRate, 0);
+  assert.ok(Math.abs(q.reasons[0].avgFavorableBps! - 8) < 1e-9);
+  assert.ok(Math.abs(q.profitFactor! - 0.01 / 0.046) < 1e-9);
+  assert.equal(tradeQuality([]).avgNet, null);
 });

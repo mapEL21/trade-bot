@@ -75,7 +75,13 @@ public static class LeaderLagEngine
 {
     // Quantity is the open remainder; earlier partial exits are kept so the closed trade gets one weighted exit price.
     private sealed record Position(int Sign, double At, decimal Price, decimal EntryResidual, decimal Quantity = 0,
-        decimal ExitedQuantity = 0, decimal ExitedValue = 0, string? RetryReason = null, decimal? EntryFeeBps = null);
+        decimal ExitedQuantity = 0, decimal ExitedValue = 0, string? RetryReason = null, decimal? EntryFeeBps = null,
+        decimal? Best = null, decimal? Worst = null)
+    {
+        // Price move in the position's direction before fees, in b.p.; Best/Worst track it while the position is open.
+        public decimal Move(decimal exit) => Sign * (exit / Price - 1) * 10000;
+        public Position Seen(decimal exit) { var m = Move(exit); return this with { Best = Math.Max(Best ?? m, m), Worst = Math.Min(Worst ?? m, m) }; }
+    }
     // An order already sent: side, size, limit and the signal's lag are fixed at the decision and cannot be revised in flight.
     private sealed record Pending(int Sign, double Due, string Reason, bool Exit, decimal Quantity = 0, decimal Limit = 0, decimal Residual = 0);
     // A post-only entry resting at its own price from Live until a cancel request (CancelAt) reaches the exchange.
@@ -195,11 +201,11 @@ public static class LeaderLagEngine
                         }
                         total = position.ExitedQuantity; price = position.ExitedValue / total;
                     }
-                    var net = Net(price);
+                    var net = Net(price); position = position!.Seen(price);
                     decimal? fees = depth ? total * (position!.Price * (position.EntryFeeBps ?? s.FeeBps) + price * s.FeeBps) / 10000 : null;
                     decimal? cash = depth ? total * position!.Sign * (price - position.Price) - fees : null;
                     var closed = new ReplayTrade(position!.At / 1000, due / 1000, order.Sign > 0 ? "long" : "short", position.Price, price, net, order.Reason,
-                        depth ? total : null, cash, fees);
+                        depth ? total : null, cash, fees, Math.Round(position.Best!.Value, 2), Math.Round(position.Worst!.Value, 2));
                     trades.Add(closed); observer?.Trade(closed);
                     closedNet += cash ?? 0;
                     // Sum and drawdown in b.p. of the configured nominal; with a size in coins, of this trade's entry nominal.
@@ -321,7 +327,7 @@ public static class LeaderLagEngine
                         insufficient = estimate.Quantity < position.Quantity;
                         if (!insufficient) markPrice = estimate.Price;
                     }
-                    var mark = Net(markPrice);
+                    var mark = Net(markPrice); position = position.Seen(markPrice);
                     if (observer is not null)
                     {
                         var held = position.Quantity > 0 ? position.Quantity : (s.OrderQuantity ?? s.OrderNotional / position.Price);

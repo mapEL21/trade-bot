@@ -30,7 +30,7 @@ public sealed record Bot(string Id, string Name, string Exchange, string Symbol,
 public sealed record BotTrade(string Id, string At, string Side, decimal Gross, decimal Fee, decimal Entry, decimal Exit,
     decimal Quantity, string RunId, bool Simulated = true, string? Symbol = null, string? Exchange = null,
     string? Leader = null, string? OpenedAt = null, double? HoldSeconds = null, decimal? Notional = null,
-    string? ExitReason = null)
+    string? ExitReason = null, decimal? MaxFavorableBps = null, decimal? MaxAdverseBps = null)
 {
     static readonly Dictionary<string, string> ExchangeNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -58,7 +58,7 @@ public sealed record BotTrade(string Id, string At, string Side, decimal Gross, 
                 t.EntryPrice, t.ExitPrice, quantity, run.Id, Symbol: symbol, Exchange: exchange, Leader: leader,
                 OpenedAt: run.StartedUtc.AddSeconds(t.EntrySeconds).ToString("O"),
                 HoldSeconds: Math.Max(0, t.ExitSeconds - t.EntrySeconds), Notional: quantity * t.EntryPrice,
-                ExitReason: t.ExitReason);
+                ExitReason: t.ExitReason, MaxFavorableBps: t.MaxFavorableBps, MaxAdverseBps: t.MaxAdverseBps);
         });
     }
 }

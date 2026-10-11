@@ -259,6 +259,8 @@ public sealed class PaperTradingTests : IDisposable
         Assert.Equal(run.StartedUtc.AddSeconds(source.EntrySeconds).ToString("O"), trade.OpenedAt);
         Assert.Equal(source.Quantity * source.EntryPrice, trade.Notional);
         Assert.Equal(source.ExitReason, trade.ExitReason);
+        Assert.NotNull(trade.MaxFavorableBps);
+        Assert.Equal((source.MaxFavorableBps, source.MaxAdverseBps), (trade.MaxFavorableBps, trade.MaxAdverseBps));
         // The simplified BBO model has no sizes: they follow from the configured nominal and fees.
         var bbo = run with { Settings = Depth with { ExecutionModel = "bbo" }, TradeLog = [source with { Quantity = null, NetQuote = null, FeesQuote = null }] };
         var estimated = Assert.Single(BotTrade.FromRun(bbo));
