@@ -5,7 +5,7 @@ using TradeBot.Recorder;
 namespace TradeBot.Api;
 
 public sealed record RecordingList(AnalysisRecording[] Items, int Unavailable);
-internal sealed record RecordingData(AnalysisRecording Recording, long Frequency, long First, long Last, int Events, int Gaps, List<MarketAnalysis.Input> Points);
+internal sealed record RecordingData(AnalysisRecording Recording, long Frequency, long First, long Last, int Events, int Gaps, List<MarketAnalysis.Input> Points, ReplayMarketData? Market);
 
 public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEnvironment environment) : IDisposable
 {
@@ -90,14 +90,18 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
     {
         settings.Validate();
         return ProcessAsync(id, "strategy-replay-v1.json", (data, token) => StrategyReplay.Run(data.Recording, settings,
-            data.Frequency, data.First, data.Last, data.Points, token), ct);
+            data.Frequency, data.First, data.Last, data.Points, token, data.Market), ct, settings.ExecutionModel == "depth");
     }
 
-    public async Task<ReplayReport> ReadReplayAsync(string id, CancellationToken ct) =>
-        JsonSerializer.Deserialize<ReplayReport>(await File.ReadAllTextAsync(FileFor(DirectoryFor(id), "strategy-replay-v1.json", 8 * 1048576), ct), Json)
+    public async Task<ReplayReport> ReadReplayAsync(string id, CancellationToken ct)
+    {
+        var report = JsonSerializer.Deserialize<ReplayReport>(await File.ReadAllTextAsync(FileFor(DirectoryFor(id), "strategy-replay-v1.json", 8 * 1048576), ct), Json)
             ?? throw new InvalidDataException("Не удалось прочитать отчёт стратегии.");
+        // A saved v0.1 report predates executionModel. Never relabel its BBO fills as depth fills.
+        return report.Version == "0.1.0" ? report with { Settings = report.Settings with { ExecutionModel = "bbo" } } : report;
+    }
 
-    private async Task<T> ProcessAsync<T>(string id, string reportFile, Func<RecordingData, CancellationToken, T> calculate, CancellationToken ct)
+    private async Task<T> ProcessAsync<T>(string id, string reportFile, Func<RecordingData, CancellationToken, T> calculate, CancellationToken ct, bool depth = false)
     {
         var directory = DirectoryFor(id);
         if (!await gate.WaitAsync(0, ct)) throw new InvalidOperationException("Уже выполняется анализ. Дождитесь завершения.");
@@ -113,8 +117,15 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
             {
                 var points = new List<MarketAnalysis.Input>();
                 var ids = new[] { RecorderOptions.QuoteFeedId(recording.SourceExchange), RecorderOptions.QuoteFeedId(recording.Exchange) };
+                ReplayMarketData? market = null;
+                if (depth)
+                {
+                    using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(FileFor(directory, "manifest.json", 8 * 1048576), token));
+                    market = new([ReplayInstrument.Read(manifest.RootElement, recording.SourceExchange, recording.Coin, true),
+                        ReplayInstrument.Read(manifest.RootElement, recording.Exchange, recording.Coin, false)], []);
+                }
                 long first = long.MaxValue, last = 0;
-                int events = 0, gaps = 0;
+                int events = 0, gaps = 0, levels = 0;
                 using var reader = new StreamReader(file);
                 while (await reader.ReadLineAsync(token) is { } line)
                 {
@@ -128,6 +139,13 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
                     first = Math.Min(first, item.ReceivedTicks); last = Math.Max(last, item.ReceivedTicks);
                     if (item.Kind == "gap") gaps++;
                     if (!ids.Contains(item.Source)) continue;
+                    if (market is not null && item.Kind == "market" && ReplayDepthParser.TryRead(item, recording.Coin, out var book))
+                    {
+                        market.Books.Add(new(item.ReceivedTicks, events, Array.IndexOf(ids, item.Source), item.Connection, book));
+                        levels += (book?.Bids.Length ?? 0) + (book?.Asks.Length ?? 0);
+                        if (market.Books.Count > 300000 || levels > 2_000_000) throw new InvalidDataException("Лимит симулятора — 300 тысяч сообщений стакана и 2 миллиона уровней. Используйте более короткую запись.");
+                        continue;
+                    }
                     MarketQuote? quote = null;
                     if (item.Kind is not ("connecting" or "connected" or "gap" or "invalid")
                         && (item.Kind != "market" || !MarketQuote.TryRead(item, out quote))) continue;
@@ -135,7 +153,7 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
                     if (points.Count > MarketAnalysis.MaxPoints) throw new InvalidDataException("Лимит анализатора — 300 тысяч обновлений котировок. Используйте более короткую запись.");
                 }
                 if (events == 0) throw new InvalidDataException("В записи нет событий.");
-                return calculate(new(recording, frequency, first, last, events, gaps, points), token);
+                return calculate(new(recording, frequency, first, last, events, gaps, points, market), token);
             }, token);
             var output = Path.Combine(directory, reportFile);
             if (File.Exists(output)) CheckLink(output);

@@ -666,3 +666,71 @@ test('strategy without a leader explains why no trades were simulated', async ({
   ).toBeVisible();
   await expect(page.getByRole('table', { name: 'Сравнение независимых сценариев' })).toHaveCount(0);
 });
+
+test('depth replay submits size settings and exposes partial fills and remaining position', async ({
+  page,
+}) => {
+  await installFeed(page, idle);
+  await page.route('**/api/v1/research/recordings', (route) =>
+    route.fulfill({ json: { items: [analysisRecording], unavailable: 0 } }),
+  );
+  await page.route('**/api/v1/research/recordings/*/replay', (route) => {
+    if (route.request().method() !== 'POST') return route.fulfill({ status: 404 });
+    const body = route.request().postDataJSON();
+    expect(body.executionModel).toBe('depth');
+    expect(body.orderNotional).toBe(25);
+    expect(body.priceLimitBps).toBe(3);
+    return route.fulfill({
+      json: {
+        ...replayFixture,
+        version: '0.2.0',
+        settings: body,
+        instrument: {
+          quantityStep: 0.1,
+          minimumQuantity: 0.1,
+          minimumNotional: 5,
+          maximumQuantity: 1000,
+          quoteCurrency: 'USDT',
+          ruleSource: 'Метаданные записи',
+        },
+        scenarios: replayFixture.scenarios.map((s) => ({
+          ...s,
+          partialEntries: 1,
+          partialExits: 1,
+          unresolvedQuantity: 0.2,
+          unresolvedPositions: 1,
+          closedNetQuote: 0,
+          trades: 0,
+          tradeLog: [],
+          journal: [
+            {
+              seconds: 125,
+              action: 'частичный выход',
+              reason: 'Недостаточно объёма до предела цены',
+              quantity: 0.1,
+            },
+          ],
+        })),
+      },
+    });
+  });
+  await openResearch(page);
+  await page.getByText('Настройки стратегии', { exact: true }).click();
+  await expect(page.getByLabel('Модель исполнения')).toHaveValue('depth');
+  await page.getByLabel('Модель исполнения').selectOption('bbo');
+  await expect(page.getByLabel('Номинал заявки в валюте расчёта')).toBeDisabled();
+  await page.getByLabel('Модель исполнения').selectOption('depth');
+  await page.getByLabel('Номинал заявки в валюте расчёта').fill('25');
+  await page.getByLabel('Предел отклонения цены заявки, б.п.').fill('3');
+  await page.getByRole('button', { name: 'Проверить первую стратегию' }).click();
+  await expect(page.getByRole('heading', { name: 'Результат стратегии v0.2.0' })).toBeVisible();
+  await expect(page.getByText(/Незакрытый остаток:/)).toContainText('0,2 монет');
+  await expect(page.getByText(/Частичных входов:/)).toContainText('Частичных выходов: 1');
+  await page.getByText('Причины входов, пропусков и выходов', { exact: true }).click();
+  await expect(page.getByText('Недостаточно объёма до предела цены')).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect((await new AxeBuilder({ page }).include('.strategy-replay').analyze()).violations).toEqual(
+    [],
+  );
+});

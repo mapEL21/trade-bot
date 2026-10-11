@@ -6,8 +6,8 @@ namespace TradeBot.Api.Tests;
 public class StrategyReplayTests
 {
     private static readonly AnalysisRecording Recording = new("fixture", "SOL", "hyperliquid", "binance", DateTimeOffset.UnixEpoch, "completed", 0, false);
-    private static readonly ReplaySettings Settings = new(FeeBps: 1, SlippageBps: 0, MinEdgeBps: 1);
-    private static List<MarketAnalysis.Input> Data()
+    private static readonly ReplaySettings Settings = new(FeeBps: 1, SlippageBps: 0, MinEdgeBps: 1, ExecutionModel: "bbo");
+    internal static List<MarketAnalysis.Input> Data()
     {
         List<MarketAnalysis.Input> input = [new(0, -2, "hyperliquid", "c", "connected", null), new(0, -1, "binance-public", "c", "connected", null)];
         for (var ms = 0; ms <= 125000; ms += 50)

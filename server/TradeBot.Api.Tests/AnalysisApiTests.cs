@@ -98,5 +98,56 @@ public sealed class AnalysisApiTests : IDisposable
         Assert.Equal("too-short", saved!.Status);
         Assert.Equal(Id, saved.Recording.Id);
     }
+
+    [Fact]
+    public async Task DepthReplayLoadsRawBooksAndRecordedRulesThroughApi()
+    {
+        await Seed(); var dir = Path.Combine(root, Id);
+        using var metadata = JsonDocument.Parse("""{"symbols":[{"symbol":"SOLUSDT","baseAsset":"SOL","quoteAsset":"USDT","contractType":"PERPETUAL","filters":[{"filterType":"MARKET_LOT_SIZE","stepSize":"1","minQty":"1","maxQty":"10000"},{"filterType":"MIN_NOTIONAL","notional":"5"},{"filterType":"PRICE_FILTER","tickSize":"0.01"}]}]}""");
+        await File.WriteAllTextAsync(Path.Combine(dir, "manifest.json"), JsonSerializer.Serialize(new {
+            schemaVersion = 3, startedUtc = DateTimeOffset.UnixEpoch, stopwatchFrequency = 1000,
+            options = new { Coin = "SOL" }, exchangeMetadata = metadata.RootElement
+        }));
+        var events = new List<CaptureEvent>();
+        static string S(decimal n) => n.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        foreach (var input in StrategyReplayTests.Data())
+        {
+            var payload = "";
+            if (input.Quote is { } q)
+            {
+                payload = input.Source == "hyperliquid"
+                    ? JsonSerializer.Serialize(new { channel = "bbo", data = new { time = input.Ticks, bbo = new[] { new { px = S(q.Bid), sz = "100" }, new { px = S(q.Ask), sz = "100" } } } })
+                    : JsonSerializer.Serialize(new { stream = "solusdt@bookTicker", data = new Dictionary<string, object> { ["e"] = "bookTicker", ["u"] = input.Ticks, ["b"] = S(q.Bid), ["B"] = "100", ["a"] = S(q.Ask), ["A"] = "100" } });
+                if (input.Source == "binance-public") events.Add(new(input.Source, "c", "market", DateTimeOffset.UnixEpoch, input.Ticks,
+                    JsonSerializer.Serialize(new { stream = "solusdt@depth20@100ms", data = new { e = "depthUpdate", s = "SOLUSDT", u = input.Ticks,
+                        b = new[] { new[] { S(q.Bid), "100" } }, a = new[] { new[] { S(q.Ask), "100" } } } })));
+            }
+            events.Add(new(input.Source, "c", input.Kind, DateTimeOffset.UnixEpoch, input.Ticks, payload));
+        }
+        await File.WriteAllLinesAsync(Path.Combine(dir, "events.ndjson"), events.Select(x => JsonSerializer.Serialize(x)));
+        using var factory = Factory(); using var client = Client(factory);
+        var response = await client.PostAsJsonAsync($"/api/v1/research/recordings/{Id}/replay", new ReplaySettings(OrderNotional: 1200, FeeBps: 1, SlippageBps: 0, MinEdgeBps: 1));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var report = (await response.Content.ReadFromJsonAsync<ReplayReport>())!;
+        Assert.Equal("evaluated", report.Status); Assert.Equal("depth", report.Settings.ExecutionModel);
+        Assert.Equal(1, report.Instrument!.QuantityStep);
+        Assert.All(report.Scenarios, s => Assert.NotNull(Assert.Single(s.TradeLog).NetQuote));
+        var saved = (await client.GetFromJsonAsync<ReplayReport>($"/api/v1/research/recordings/{Id}/replay"))!;
+        Assert.Equal(report.Scenarios[0].TradeLog, saved.Scenarios[0].TradeLog);
+    }
+
+    [Fact]
+    public async Task LegacySavedReplayIsExplicitlyLabelledBbo()
+    {
+        await Seed(); using var factory = Factory(); using var client = Client(factory);
+        var response = await client.PostAsJsonAsync($"/api/v1/research/recordings/{Id}/replay", new ReplaySettings());
+        response.EnsureSuccessStatusCode();
+        var path = Path.Combine(root, Id, "strategy-replay-v1.json");
+        var json = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(path))!;
+        json["version"] = "0.1.0"; json["settings"]!.AsObject().Remove("executionModel");
+        await File.WriteAllTextAsync(path, json.ToJsonString());
+        var saved = (await client.GetFromJsonAsync<ReplayReport>($"/api/v1/research/recordings/{Id}/replay"))!;
+        Assert.Equal("bbo", saved.Settings.ExecutionModel);
+    }
     public void Dispose() { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); if (Directory.Exists(root)) Directory.Delete(root, true); }
 }

@@ -12,6 +12,8 @@ const initial = {
   stopLossBps: 20,
   maxHoldMs: 2000,
   leaderAdvantageBps: 0.5,
+  orderNotional: 10,
+  priceLimitBps: 5,
 };
 type Settings = typeof initial;
 interface Scenario {
@@ -26,6 +28,10 @@ interface Scenario {
   skipped: number;
   signals: number;
   journalTruncated: boolean;
+  partialEntries?: number;
+  partialExits?: number;
+  closedNetQuote?: number | null;
+  unresolvedQuantity?: number | null;
   tradeLog: {
     entrySeconds: number;
     exitSeconds: number;
@@ -34,6 +40,9 @@ interface Scenario {
     exitPrice: number;
     netBps: number;
     exitReason: string;
+    quantity?: number | null;
+    netQuote?: number | null;
+    feesQuote?: number | null;
   }[];
   journal: {
     seconds: number;
@@ -42,6 +51,7 @@ interface Scenario {
     side: string | null;
     price: number | null;
     netBps: number | null;
+    quantity?: number | null;
   }[];
 }
 interface Report {
@@ -52,7 +62,15 @@ interface Report {
   executionExchange: string | null;
   normalBasisBps: number | null;
   durationSeconds: number;
-  settings: Settings;
+  settings: Settings & { executionModel?: string };
+  instrument?: {
+    quantityStep: number;
+    minimumQuantity: number;
+    minimumNotional: number;
+    maximumQuantity: number | null;
+    quoteCurrency: string;
+    ruleSource: string;
+  } | null;
   scenarios: Scenario[];
   notes: string[];
   candidates: {
@@ -68,20 +86,23 @@ const fields: [keyof Settings, string, number, number, number][] = [
   ['windowMs', 'Окно движения, мс', 10, 5000, 1],
   ['maxAgeMs', 'Свежесть котировки, мс', 10, 5000, 1],
   ['feeBps', 'Комиссия стратегии за сторону, б.п.', 0, 100, 0.1],
-  ['slippageBps', 'Проскальзывание стратегии, б.п.', 0, 100, 0.1],
+  ['slippageBps', 'Дополнительное проскальзывание, б.п.', 0, 100, 0.1],
   ['minEdgeBps', 'Запас сверх расходов, б.п.', 0, 100, 0.1],
   ['stopLossBps', 'Порог убытка сделки, б.п.', 1, 1000, 0.1],
   ['maxHoldMs', 'Максимальное удержание, мс', 100, 10000, 1],
   ['leaderAdvantageBps', 'Преимущество поводыря, б.п.', 0.1, 100, 0.1],
+  ['orderNotional', 'Номинал заявки в валюте расчёта', 1, 100000, 0.01],
+  ['priceLimitBps', 'Предел отклонения цены заявки, б.п.', 0, 100, 0.1],
 ];
-const n = (value: number | null) =>
+const n = (value: number | null | undefined) =>
   value == null ? '—' : value.toLocaleString('ru-RU', { maximumFractionDigits: 3 });
-const price = (value: number | null) =>
+const price = (value: number | null | undefined) =>
   value == null ? '—' : value.toLocaleString('ru-RU', { maximumSignificantDigits: 12 });
 const mode = (value: string) => (value === 'follow' ? 'По импульсу' : 'Против импульса');
 
 export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean }) {
   const [settings, setSettings] = useState(initial);
+  const [executionModel, setExecutionModel] = useState('depth');
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -118,7 +139,7 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
     try {
       const result = await request<Report>(`/research/recordings/${id}/replay`, {
         method: 'POST',
-        body: JSON.stringify(settings),
+        body: JSON.stringify({ ...settings, executionModel }),
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(70000)]),
       });
       if (!controller.signal.aborted) setReport(result);
@@ -149,6 +170,22 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
             1 б.п. = 0,01%. Комиссия по умолчанию — пример, не тариф аккаунта. Порог убытка не
             гарантирует цену выхода: к ней тоже применяется задержка.
           </p>
+          <label>
+            Модель исполнения
+            <select
+              value={executionModel}
+              disabled={busy}
+              onChange={(e) => setExecutionModel(e.target.value)}
+            >
+              <option value="depth">По записанному стакану и объёму</option>
+              <option value="bbo">Упрощённая: только лучшие цены BBO</option>
+            </select>
+          </label>
+          <p className="field-hint">
+            Номинал — размер сделки в USDT (USDC для Hyperliquid), а не баланс или маржа. Предел
+            цены отсчитывается от котировки при решении отправить заявку и действует на вход и
+            выход. В модели BBO номинал и предел цены не используются.
+          </p>
           <div className="analysis-settings">
             {fields.map(([key, label, min, max, step]) => (
               <label key={key}>
@@ -159,7 +196,11 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
                   min={min}
                   max={max}
                   step={step}
-                  disabled={busy}
+                  disabled={
+                    busy ||
+                    (executionModel === 'bbo' &&
+                      (key === 'orderNotional' || key === 'priceLimitBps'))
+                  }
                   value={Number.isNaN(settings[key]) ? '' : settings[key]}
                   onChange={(e) => setSettings((s) => ({ ...s, [key]: e.target.valueAsNumber }))}
                 />
@@ -188,6 +229,13 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
           </p>
           <details>
             <summary>Параметры сохранённого результата</summary>
+            <p>
+              Модель:{' '}
+              {report.settings.executionModel === 'depth'
+                ? 'По записанному стакану и объёму'
+                : 'Упрощённая BBO, без проверки объёма'}
+              .
+            </p>
             <ul>
               {fields.map(([key, label]) => (
                 <li key={key}>
@@ -196,6 +244,14 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
               ))}
             </ul>
             <p>Изменение настроек формы требует повторной проверки.</p>
+            {report.instrument && (
+              <p>
+                Шаг количества: {price(report.instrument.quantityStep)} монет. Минимум:{' '}
+                {price(report.instrument.minimumQuantity)} монет; минимальный номинал:{' '}
+                {n(report.instrument.minimumNotional)} {report.instrument.quoteCurrency}.{' '}
+                {report.instrument.ruleSource}.
+              </p>
+            )}
           </details>
           <div className="analysis-table" tabIndex={0}>
             <table>
@@ -243,6 +299,9 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
                       <th>Сумма, б.п.</th>
                       <th>Просадка закрытых, б.п.</th>
                       <th>Не оценено позиций</th>
+                      {report.instrument && (
+                        <th>Итог закрытых, {report.instrument.quoteCurrency}</th>
+                      )}
                     </tr>
                   </thead>
                   <tbody>
@@ -256,6 +315,7 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
                         <td>{n(s.sumNetBps)}</td>
                         <td>{n(s.closedTradeDrawdownBps)}</td>
                         <td>{s.unresolvedPositions}</td>
+                        {report.instrument && <td>{price(s.closedNetQuote)}</td>}
                       </tr>
                     ))}
                   </tbody>
@@ -281,6 +341,19 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
                     Сигналов: {selected.signals}. Пропущено: {selected.skipped}. Закрыто сделок:{' '}
                     {selected.trades}.
                   </p>
+                  {report.instrument && (
+                    <p>
+                      Частичных входов: {selected.partialEntries ?? 0}. Частичных выходов:{' '}
+                      {selected.partialExits ?? 0}.
+                      {selected.unresolvedQuantity != null && (
+                        <>
+                          {' '}
+                          Незакрытый остаток: {price(selected.unresolvedQuantity)} монет.
+                          Незавершённая сделка не включена в денежный итог.
+                        </>
+                      )}
+                    </p>
+                  )}
                   {selected.trades === 0 && (
                     <p>
                       Закрытых сделок нет. Причины пропусков показаны в журнале; параметры не
@@ -305,6 +378,7 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
                             <th>Сторона</th>
                             <th>Цена</th>
                             <th>Итог, б.п.</th>
+                            {report.instrument && <th>Объём, монет</th>}
                           </tr>
                         </thead>
                         <tbody>
@@ -316,6 +390,7 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
                               <td>{row.side ?? '—'}</td>
                               <td>{price(row.price)}</td>
                               <td>{n(row.netBps)}</td>
+                              {report.instrument && <td>{price(row.quantity)}</td>}
                             </tr>
                           ))}
                         </tbody>
@@ -335,6 +410,13 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
                             <th>Цена выхода</th>
                             <th>Итог, б.п.</th>
                             <th>Причина выхода</th>
+                            {report.instrument && (
+                              <>
+                                <th>Объём, монет</th>
+                                <th>Комиссии, {report.instrument.quoteCurrency}</th>
+                                <th>Итог, {report.instrument.quoteCurrency}</th>
+                              </>
+                            )}
                           </tr>
                         </thead>
                         <tbody>
@@ -347,6 +429,13 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
                               <td>{price(row.exitPrice)}</td>
                               <td>{n(row.netBps)}</td>
                               <td>{row.exitReason}</td>
+                              {report.instrument && (
+                                <>
+                                  <td>{price(row.quantity)}</td>
+                                  <td>{price(row.feesQuote)}</td>
+                                  <td>{price(row.netQuote)}</td>
+                                </>
+                              )}
                             </tr>
                           ))}
                         </tbody>
