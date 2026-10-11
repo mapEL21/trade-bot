@@ -53,7 +53,7 @@ public sealed class StrategyCatalog
                 try { (p.Settings ?? throw new ArgumentException("Укажите настройки стратегии.")).Validate(); }
                 catch (ArgumentException e) { errors["settings"] = [e.Message]; }
                 if (p.DelayMs is < 1 or > 1000) errors["delayMs"] = ["Задержка заявки — от 1 до 1000 мс."];
-                if (p.Settings is not null && p.Settings.OrderNotional > config.Budget)
+                if (p.Settings is { OrderQuantity: null } && p.Settings.OrderNotional > config.Budget)
                     errors["orderNotional"] = ["Номинал заявки не может превышать выделенный баланс."];
             }
         }

@@ -19,6 +19,8 @@ export interface LeaderLagSettings {
   makerWaitMs: number;
   executionModel: 'depth' | 'bbo';
   entryOrder: 'taker' | 'maker';
+  // A fixed size in coins; null means the size is orderNotional in USDT.
+  orderQuantity: number | null;
 }
 // The bot trades (virtually) on its own exchange; the signal exchange must turn out to be the leader.
 export interface LeaderLagParameters {
@@ -97,6 +99,7 @@ export const defaultLeaderLagSettings: LeaderLagSettings = {
   makerWaitMs: 1000,
   executionModel: 'depth',
   entryOrder: 'taker',
+  orderQuantity: null,
 };
 const settingKeys = Object.keys(defaultLeaderLagSettings) as (keyof LeaderLagSettings)[];
 // Shape and obvious limits only; the server applies the full strategy validation.
@@ -137,13 +140,17 @@ function validateParameters(
     } else if (key === 'entryOrder') {
       if (v !== 'taker' && v !== 'maker') throw new Error('Вход: taker или maker.');
       settings.entryOrder = v;
+    } else if (key === 'orderQuantity') {
+      if (v !== null && v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v <= 0))
+        throw new Error('Размер заявки в монетах должен быть больше нуля.');
+      settings.orderQuantity = (v as number | null | undefined) ?? null;
     } else {
       if (typeof v !== 'number' || !Number.isFinite(v))
         throw new Error('Все настройки стратегии должны быть числами.');
       settings[key] = v;
     }
   }
-  if (settings.orderNotional > budget)
+  if (settings.orderQuantity === null && settings.orderNotional > budget)
     throw new Error('Номинал заявки не может превышать выделенный баланс.');
   return {
     signalExchange: p.signalExchange as Exchange,

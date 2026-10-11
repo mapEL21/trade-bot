@@ -2438,3 +2438,29 @@ tbody tr:hover {
 .paper-run h2 {
   font-size: 15px;
 }
+.unit-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 14px;
+  font-size: 11px;
+  color: #9fb0c6;
+}
+.unit-switch button {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.unit-switch button.active {
+  border-color: #b5a2ed;
+  color: #e6edf6;
+}
+.config-form .field small.field-hint {
+  display: block;
+  margin-top: 4px;
+  line-height: 1.45;
+}

@@ -6,7 +6,7 @@ public sealed record ReplaySettings(int CalibrationSeconds = 120, decimal Impuls
     int MaxAgeMs = 500, decimal FeeBps = 5, decimal SlippageBps = 1, decimal MinEdgeBps = 2,
     decimal StopLossBps = 20, int MaxHoldMs = 2000, decimal LeaderAdvantageBps = .5m,
     string ExecutionModel = "depth", decimal OrderNotional = 10, decimal PriceLimitBps = 5,
-    string EntryOrder = "taker", decimal MakerFeeBps = 2, int MakerWaitMs = 1000)
+    string EntryOrder = "taker", decimal MakerFeeBps = 2, int MakerWaitMs = 1000, decimal? OrderQuantity = null)
 {
     public void Validate()
     {
@@ -18,6 +18,8 @@ public sealed record ReplaySettings(int CalibrationSeconds = 120, decimal Impuls
             throw new ArgumentException("Модель исполнения: depth или bbo; номинал заявки 1–100000, предел цены 0–100 б.п.");
         if (EntryOrder is not ("taker" or "maker") || MakerFeeBps is < -10 or > 100 || MakerWaitMs is < 10 or > 60000)
             throw new ArgumentException("Вход: taker или maker; комиссия maker от −10 до 100 б.п., ожидание исполнения 10–60000 мс.");
+        if (OrderQuantity is <= 0 or > 1_000_000_000)
+            throw new ArgumentException("Размер заявки в монетах должен быть больше нуля.");
     }
 }
 public sealed record ReplayDecision(double Seconds, string Action, string Reason, string? Side = null, decimal? Price = null, decimal? NetBps = null, decimal? Quantity = null);

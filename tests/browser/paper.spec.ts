@@ -59,6 +59,35 @@ const trade = {
 async function server(page: Page) {
   const state = { status: 'draft', started: 0, paused: 0, stopped: 0, created: null as unknown };
   await page.route('**/api/v1/strategies', (route) => route.fulfill({ json: catalog }));
+  await page.route('**/api/v1/research/markets*', (route) => {
+    const url = new URL(route.request().url());
+    const exchange = url.searchParams.get('exchange')!;
+    const symbol = (coin: string) => (exchange === 'okx' ? `${coin}-USDT-SWAP` : `${coin}USDT`);
+    return route.fulfill({
+      json: {
+        exchange,
+        sourceExchange: url.searchParams.get('sourceExchange'),
+        updatedUtc: '2026-10-11T10:00:00Z',
+        instruments: ['ARB', 'MAGIC', 'SOL'].map((coin) => ({ coin, symbol: symbol(coin) })),
+      },
+    });
+  });
+  await page.route('**/api/v1/research/instrument*', (route) =>
+    route.fulfill({
+      json: {
+        exchange: 'okx',
+        coin: new URL(route.request().url()).searchParams.get('coin'),
+        quantityStep: 1,
+        minimumQuantity: 1,
+        minimumNotional: 5,
+        maximumQuantity: null,
+        lastPrice: 0.4,
+        minimumOrderNotional: 5.2,
+        quoteCurrency: 'USDT',
+        ruleSource: 'Текущие правила биржи',
+      },
+    }),
+  );
   await page.route('**/api/v1/workspace', (route) =>
     route.fulfill({
       json: { schemaVersion: 1, bots: [{ ...bot, status: state.status }], events: [] },
@@ -177,19 +206,43 @@ test('leader-lag bot is created with its strategy parameters', async ({ page }) 
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByRole('radio', { name: /Поводырь/ })).toBeChecked();
   await dialog.getByLabel('Название бота').fill('Поводырь · MAGIC');
-  await dialog.getByLabel('USDT-фьючерс').fill('MAGICUSDT');
   await dialog.getByLabel('Биржа бота (исполнение)').selectOption('OKX');
   await dialog.getByLabel('Биржа сигнала').selectOption('Binance');
-  await dialog.getByLabel('Комиссия taker за сторону, б.п.').fill('2.75');
+  // Fees default to the bot exchange's table and are shown in percent.
+  await expect(dialog.getByLabel('Комиссия taker, %')).toHaveValue('0.05');
+  const pair = dialog.getByRole('combobox', { name: 'Торговая пара' });
+  await pair.click();
+  await pair.fill('mag');
+  await pair.press('Enter');
+  await expect(dialog.getByRole('status').filter({ hasText: 'шаг 1' })).toContainText(
+    'минимальная заявка ≈ 5,2 USDT',
+  );
+  await dialog.getByLabel('Размер заявки задаётся').selectOption('coins');
+  await dialog.getByLabel('Размер заявки, MAGIC').fill('30');
+  await expect(dialog.getByText(/больше выделенного баланса/)).toBeVisible();
+  await dialog.getByLabel('Размер заявки, MAGIC').fill('10');
+  await expect(dialog.getByText(/меньше минимальной/)).toBeVisible();
+  await dialog.getByLabel('Размер заявки, MAGIC').fill('20');
+  await dialog.getByLabel('Комиссия taker, %').fill('0.0275');
   await dialog.getByLabel('Вход в сделку').selectOption('maker');
+  await dialog.getByText('Остальные параметры стратегии').click();
+  await expect(dialog.getByLabel('Порог импульса, %')).toHaveValue('0.03');
+  await dialog.getByRole('button', { name: 'б.п.', exact: true }).click();
+  await expect(dialog.getByLabel('Порог импульса, б.п.')).toHaveValue('3');
   expect((await new AxeBuilder({ page }).include('dialog.modal').analyze()).violations).toEqual([]);
   await dialog.getByRole('button', { name: 'Создать бота', exact: true }).click();
   await expect.poll(() => state.created).not.toBeNull();
   const created = state.created as {
     strategy: string;
     exchange: string;
-    parameters: { signalExchange: string; settings: { feeBps: number; entryOrder: string } };
+    symbol: string;
+    parameters: {
+      signalExchange: string;
+      settings: { feeBps: number; entryOrder: string; orderQuantity: number | null };
+    };
   };
+  expect(created.symbol).toBe('MAGICUSDT');
+  expect(created.parameters.settings.orderQuantity).toBe(20);
   expect(created.strategy).toBe('leader-lag');
   expect(created.exchange).toBe('OKX');
   expect(created.parameters.signalExchange).toBe('Binance');

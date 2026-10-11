@@ -97,6 +97,20 @@ api.MapGet("/research/markets", async (string exchange, string? sourceExchange, 
         return Results.Problem(statusCode: 503, title: "Не удалось загрузить инструменты с бирж. Повторите загрузку.");
     }
 });
+api.MapGet("/research/instrument", async (string exchange, string coin, ResearchMarkets markets, HttpContext context) =>
+{
+    try
+    {
+        return await markets.InstrumentAsync(exchange, coin, context.RequestAborted) is { } info
+            ? Results.Ok(info) : Results.Problem(statusCode: 404, title: "Инструмент не найден среди бессрочных USDT-контрактов биржи.");
+    }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+    catch (Exception e) when (e is HttpRequestException or JsonException or KeyNotFoundException or InvalidOperationException
+        || e is OperationCanceledException && !context.RequestAborted.IsCancellationRequested)
+    {
+        return Results.Problem(statusCode: 503, title: "Не удалось загрузить правила инструмента с биржи. Повторите позже.");
+    }
+});
 api.MapPost("/research", (ResearchRequest request, MarketResearch research) =>
 {
     try { return Results.Accepted("/api/v1/research", new { id = research.Start(request) }); }

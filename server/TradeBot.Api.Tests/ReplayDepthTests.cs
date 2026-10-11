@@ -175,6 +175,16 @@ public class ReplayDepthTests
     }
 
     [Fact]
+    public void SizeInCoinsIsUsedAsIsAndSumsUseThatTradesNominal()
+    {
+        var scenario = Follow(Run(Market(), Settings with { OrderQuantity = 5.7m }));
+        var trade = Assert.Single(scenario.TradeLog);
+        Assert.Equal(5, trade.Quantity); // rounded down to the step of 1
+        Assert.Equal(trade.NetQuote!.Value / (5 * trade.EntryPrice) * 10000, scenario.SumNetBps);
+        Assert.Throws<ArgumentException>(() => (Settings with { OrderQuantity = 0 }).Validate());
+    }
+
+    [Fact]
     public void QuantityBelowExchangeMinimumIsSkippedAndReported()
     {
         var result = Follow(Run(Market(), Settings with { OrderNotional = 10 }));

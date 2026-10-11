@@ -6,7 +6,9 @@ namespace TradeBot.Api;
 // which a live session needs so that orders come due even when the market is quiet.
 public sealed record EngineEvent(double Ms, int Venue, MarketQuote? Quote, bool Reset, int Sequence, string Connection, bool IsBook = false,
     ReplayBookUpdate? Book = null, bool IsTrade = false, ReplayPrint[]? Prints = null, bool IsClock = false);
-public sealed record EngineSetup(int Leader, decimal Basis, ReplaySettings Settings, int DelayMs, bool Counter, ReplayInstrument? Instrument);
+// MaxNotional caps one order (a bot's allocated balance); OrderQuantity in the settings fixes the size in coins instead of USDT.
+public sealed record EngineSetup(int Leader, decimal Basis, ReplaySettings Settings, int DelayMs, bool Counter, ReplayInstrument? Instrument,
+    decimal? MaxNotional = null);
 // Receives every decision and closed trade as it happens (the report keeps only the first 500); called on the engine thread.
 public interface IEngineObserver
 {
@@ -74,7 +76,7 @@ public static class LeaderLagEngine
     // Events must arrive in time order. A null end means "the last event seen", which is how a live session stops.
     public static ReplayScenario Run(IEnumerable<EngineEvent> events, EngineSetup setup, CancellationToken ct, double? end = null, IEngineObserver? observer = null)
     {
-        var (leader, basis, s, delay, counter, instrument) = setup; double lastMs = 0; var reportedExposure = false;
+        var (leader, basis, s, delay, counter, instrument, _) = setup; double lastMs = 0; var reportedExposure = false;
         var q = new[] { new VenueQuotes(), new VenueQuotes() }; var journal = new List<ReplayDecision>(); var trades = new List<ReplayTrade>();
         var depth = s.ExecutionModel == "depth"; var book = new ReplayBook(); string? bookConnection = null, tradeConnection = null;
         Position? position = null; Pending? pending = null; int skipped = 0, signals = 0, unresolved = 0, journalCount = 0;
@@ -102,14 +104,15 @@ public static class LeaderLagEngine
             {
                 // Post-only price: our own best bid for a buy, best ask for a sell, fixed at the decision.
                 var own = sign > 0 ? q[1 - leader].Current!.Bid : q[1 - leader].Current!.Ask;
-                return new(sign, at + delay, reason, false, depth ? instrument!.RoundQuantity(s.OrderNotional / own) : 0, own);
+                return new(sign, at + delay, reason, false, depth ? instrument!.RoundQuantity(s.OrderQuantity ?? s.OrderNotional / own) : 0, own);
             }
             if (!depth) return new(sign, at + delay, reason, exit);
             var buy = exit ? sign < 0 : sign > 0; var quote = q[1 - leader].Current!;
             var reference = buy ? quote.Ask : quote.Bid;
             var limit = instrument!.Limit(reference, buy, s.PriceLimitBps);
             // For buys, size against the worst allowed price so the configured nominal is a ceiling.
-            var quantity = exit ? position!.Quantity : limit <= 0 ? 0 : instrument.RoundQuantity(s.OrderNotional / (buy ? limit : reference));
+            var quantity = exit ? position!.Quantity : s.OrderQuantity is { } fixedSize ? instrument.RoundQuantity(fixedSize)
+                : limit <= 0 ? 0 : instrument.RoundQuantity(s.OrderNotional / (buy ? limit : reference));
             return new(sign, at + delay, reason, exit, quantity, limit);
         }
         void LosePosition(double at, string reason = "Потеря данных при открытой позиции: сценарий остановлен.")
@@ -187,7 +190,8 @@ public static class LeaderLagEngine
                         depth ? total : null, cash, fees);
                     trades.Add(closed); observer?.Trade(closed);
                     closedNet += cash ?? 0;
-                    sum += depth ? cash!.Value / s.OrderNotional * 10000 : net; peak = Math.Max(peak, sum); drawdown = Math.Max(drawdown, peak - sum);
+                    // Sum and drawdown in b.p. of the configured nominal; with a size in coins, of this trade's entry nominal.
+                    sum += depth ? cash!.Value / (s.OrderQuantity is null ? s.OrderNotional : total * position.Price) * 10000 : net; peak = Math.Max(peak, sum); drawdown = Math.Max(drawdown, peak - sum);
                     Log(due, "выход", order.Reason, order.Sign, price, net, depth ? total : null); position = null;
                 }
                 else
@@ -329,6 +333,8 @@ public static class LeaderLagEngine
             var order = Order(counter ? -sign : sign, tick.Ms, "Импульс и отставание", false) with { Residual = residual };
             if (depth && !SizeAllowed(order.Quantity, maker ? order.Limit : Math.Min(order.Limit, q[1 - leader].Current!.Mid)))
             { skipped++; Log(tick.Ms, "пропуск", "Размер заявки после округления не проходит минимальный номинал или ограничения количества.", quantity: order.Quantity); continue; }
+            if (depth && setup.MaxNotional is { } cap && order.Quantity * order.Limit > cap)
+            { skipped++; Log(tick.Ms, "пропуск", "Размер заявки по предельной цене превышает выделенный боту баланс.", quantity: order.Quantity); continue; }
             if (observer?.EntryBlock(tick.Ms) is { } blocked) { skipped++; Log(tick.Ms, "пропуск", blocked); continue; }
             pending = order; sent++; Log(tick.Ms, "вход отправлен", pending.Reason, pending.Sign, depth ? pending.Limit : null, quantity: depth ? pending.Quantity : null);
         }

@@ -210,6 +210,16 @@ public sealed class PaperTradingTests : IDisposable
     }
 
     [Fact]
+    public void OrderLargerThanTheBotBalanceIsNotSent()
+    {
+        // 9 coins at about 120 USDT need over 1000 USDT; a 100 USDT balance must refuse the entry before it is sent.
+        var (session, _) = Drive(new("SOL", "hyperliquid", "binance", 600, Depth, Budget: 100), Events(), long.MaxValue, _ => { });
+        var result = session.Snapshot().Result!;
+        Assert.Equal(0, result.OrdersSent);
+        Assert.Contains(result.Journal, x => x.Reason.Contains("выделенный боту баланс"));
+    }
+
+    [Fact]
     public void BotRunRefusesWhenItsOwnExchangeLeads()
     {
         // The fixture leader is Hyperliquid; a bot trading on Hyperliquid with a Binance signal has nothing to follow.

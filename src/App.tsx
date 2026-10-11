@@ -30,11 +30,12 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { api, type StrategyDefinition } from './api';
+import { api, type InstrumentInfo, type StrategyDefinition } from './api';
 import { Strategies } from './Strategies';
 import { Research } from './Research';
 import { PaperRun, activeStatuses } from './PaperRun';
-import { strategyFields } from './StrategyReplay';
+import { LeaderLagFields, sizeProblem } from './LeaderLagFields';
+import { defaultFees } from './strategySettings';
 import { Chart, DownloadButton, Empty, Modal, SelectField, Toast, Tooltip } from './components';
 import {
   createDemo,
@@ -56,8 +57,6 @@ import {
   type Bot,
   type BotConfig,
   type Exchange,
-  type LeaderLagParameters,
-  type LeaderLagSettings,
   type Status,
   type Trade,
   type Workspace,
@@ -1351,7 +1350,6 @@ function BotCard({
     </article>
   );
 }
-const mainLeaderLagFields = ['orderNotional', 'feeBps', 'makerFeeBps'] as const;
 function ConfigForm({
   config,
   onSave,
@@ -1381,13 +1379,7 @@ function ConfigForm({
   const leaderLag = form.strategy === 'leader-lag';
   const leaderLagDefinition = strategies.find((s) => s.id === 'leader-lag' && s.canCreate);
   const params = form.parameters;
-  const setParams = (next: Partial<LeaderLagParameters>) =>
-    setForm((f) => ({ ...f, parameters: { ...f.parameters!, ...next } }));
-  const setSetting = (key: keyof LeaderLagSettings, value: number | string) =>
-    setForm((f) => ({
-      ...f,
-      parameters: { ...f.parameters!, settings: { ...f.parameters!.settings, [key]: value } },
-    }));
+  const [instrument, setInstrument] = useState<InstrumentInfo | null>(null);
   function chooseStrategy(id: BotConfig['strategy']) {
     if (id === form.strategy) return;
     if (id === 'leader-lag' && leaderLagDefinition)
@@ -1403,11 +1395,19 @@ function ConfigForm({
     setForm((f) => ({
       ...f,
       exchange,
-      // The signal must come from the other exchange.
-      parameters:
-        f.parameters && f.parameters.signalExchange === exchange
-          ? { ...f.parameters, signalExchange: paperExchanges.find((x) => x !== exchange)! }
-          : f.parameters,
+      // The signal must come from the other exchange; fees default to the new exchange's tariff.
+      parameters: f.parameters && {
+        ...f.parameters,
+        signalExchange:
+          f.parameters.signalExchange === exchange
+            ? paperExchanges.find((x) => x !== exchange)!
+            : f.parameters.signalExchange,
+        settings: {
+          ...f.parameters.settings,
+          feeBps: defaultFees[exchange].taker,
+          makerFeeBps: defaultFees[exchange].maker,
+        },
+      },
     }));
   }
   async function submit(e: FormEvent) {
@@ -1418,6 +1418,11 @@ function ConfigForm({
     try {
       const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion, parameters } =
         form;
+      const tooSmall =
+        parameters &&
+        strategy === 'leader-lag' &&
+        sizeProblem(parameters.settings, budget, instrument);
+      if (tooSmall) throw new Error(tooSmall);
       await onSave(
         validateConfig({
           name,
@@ -1503,15 +1508,17 @@ function ConfigForm({
             <option key={x}>{x}</option>
           ))}
         </SelectField>
-        <label className="field">
-          <span>USDT-фьючерс</span>
-          <input
-            value={form.symbol}
-            onChange={(e) => setForm({ ...form, symbol: e.target.value.toUpperCase() })}
-            placeholder="ARBUSDT"
-            required
-          />
-        </label>
+        {!leaderLag && (
+          <label className="field">
+            <span>USDT-фьючерс</span>
+            <input
+              value={form.symbol}
+              onChange={(e) => setForm({ ...form, symbol: e.target.value.toUpperCase() })}
+              placeholder="ARBUSDT"
+              required
+            />
+          </label>
+        )}
         <label className="field">
           <span>{demoMode ? 'Демо-баланс, USDT' : 'Выделенный баланс, USDT'}</span>
           <input
@@ -1536,101 +1543,9 @@ function ConfigForm({
             required
           />
         </label>
-        {leaderLag && params && (
-          <>
-            <SelectField
-              label="Биржа сигнала"
-              value={params.signalExchange}
-              onChange={(signalExchange) =>
-                setParams({ signalExchange: signalExchange as Exchange })
-              }
-            >
-              {paperExchanges
-                .filter((x) => x !== form.exchange)
-                .map((x) => (
-                  <option key={x}>{x}</option>
-                ))}
-            </SelectField>
-            <label className="field">
-              <span>Задержка заявки, мс</span>
-              <input
-                type="number"
-                min="1"
-                max="1000"
-                step="1"
-                value={Number.isNaN(params.delayMs) ? '' : params.delayMs}
-                onChange={(e) => setParams({ delayMs: e.target.valueAsNumber })}
-                required
-              />
-            </label>
-            <SelectField
-              label="Модель исполнения"
-              value={params.settings.executionModel}
-              onChange={(v) => setSetting('executionModel', v)}
-            >
-              <option value="depth">По стакану и объёму</option>
-              <option value="bbo">Упрощённая: только BBO</option>
-            </SelectField>
-            <SelectField
-              label="Вход в сделку"
-              value={params.settings.entryOrder}
-              onChange={(v) => setSetting('entryOrder', v)}
-            >
-              <option value="taker">Taker: по встречной цене</option>
-              <option value="maker">Maker: заявка по своей цене</option>
-            </SelectField>
-            {mainLeaderLagFields.map((key) => {
-              const [, label, min, max, step] = strategyFields.find(([k]) => k === key)!;
-              return (
-                <label className="field" key={key}>
-                  <span>{label}</span>
-                  <input
-                    type="number"
-                    min={min}
-                    max={max}
-                    step={step}
-                    value={Number.isNaN(params.settings[key]) ? '' : params.settings[key]}
-                    onChange={(e) => setSetting(key, e.target.valueAsNumber)}
-                    required
-                  />
-                </label>
-              );
-            })}
-          </>
-        )}
       </div>
       {leaderLag && params && (
-        <>
-          <label className="checkbox-field">
-            <input
-              type="checkbox"
-              checked={params.counter}
-              onChange={(e) => setParams({ counter: e.target.checked })}
-            />
-            Контрольный вариант: входить против импульса
-          </label>
-          <details className="strategy-details">
-            <summary>Остальные параметры стратегии</summary>
-            <div className="form-grid">
-              {strategyFields
-                .filter(([key]) => !(mainLeaderLagFields as readonly string[]).includes(key))
-                .map(([key, label, min, max, step]) => (
-                  <label className="field" key={key}>
-                    <span>{label}</span>
-                    <input
-                      type="number"
-                      min={min}
-                      max={max}
-                      step={step}
-                      value={Number.isNaN(params.settings[key]) ? '' : params.settings[key]}
-                      onChange={(e) => setSetting(key, e.target.valueAsNumber)}
-                      required
-                    />
-                  </label>
-                ))}
-            </div>
-          </details>
-        </>
+        <LeaderLagFields form={form} setForm={setForm} onInstrument={setInstrument} />
       )}
       {historyLocked && (
         <p className="field-hint">

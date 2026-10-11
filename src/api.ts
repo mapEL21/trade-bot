@@ -18,6 +18,20 @@ export interface ResearchMarketList {
   instruments: { coin: string; symbol: string }[];
 }
 
+// Order size rules of a perpetual in coins, with the last price for converting sizes (not a trading quote).
+export interface InstrumentInfo {
+  exchange: string;
+  coin: string;
+  quantityStep: number;
+  minimumQuantity: number;
+  minimumNotional: number;
+  maximumQuantity: number | null;
+  lastPrice: number | null;
+  minimumOrderNotional: number | null;
+  quoteCurrency: string;
+  ruleSource: string;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -63,6 +77,11 @@ export const api = {
       {
         signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]),
       },
+    ),
+  instrument: (exchange: string, coin: string, signal: AbortSignal) =>
+    request<InstrumentInfo>(
+      `/research/instrument?exchange=${encodeURIComponent(exchange)}&coin=${encodeURIComponent(coin)}`,
+      { signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]) },
     ),
   startResearch: (config: {
     coin: string;

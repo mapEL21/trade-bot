@@ -42,7 +42,8 @@ public static class StrategySeries
                 decimal sum = 0, peak = 0, drawdown = 0;
                 foreach (var trade in scenarios.SelectMany(s => s.TradeLog))
                 {
-                    sum += depth && trade.NetQuote is { } cash ? cash / settings.OrderNotional * 10000 : trade.NetBps;
+                    sum += depth && trade.NetQuote is { } cash
+                        ? cash / (settings.OrderQuantity is null ? settings.OrderNotional : (trade.Quantity ?? 0) * trade.EntryPrice) * 10000 : trade.NetBps;
                     peak = Math.Max(peak, sum); drawdown = Math.Max(drawdown, peak - sum);
                 }
                 return new SeriesTotal(key.Mode, key.DelayMs, scenarios.Count, scenarios.Count(s => s.SumNetBps > 0),

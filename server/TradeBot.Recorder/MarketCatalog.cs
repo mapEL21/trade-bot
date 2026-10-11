@@ -45,6 +45,38 @@ public static class MarketCatalog
         }
         throw new HttpRequestException("Не удалось полностью загрузить каталог Bybit.");
     }
+    // Last traded price from the public ticker, used only to convert between coins and USDT in the bot form.
+    public static async Task<decimal?> LastPriceAsync(HttpClient http, string exchange, string coin, CancellationToken ct)
+    {
+        var symbol = Symbol(exchange, coin);
+        string? text;
+        if (exchange == "hyperliquid")
+        {
+            using var response = await http.PostAsJsonAsync("https://api.hyperliquid.xyz/info", new { type = "allMids" }, ct);
+            response.EnsureSuccessStatusCode();
+            using var mids = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            text = mids.RootElement.TryGetProperty(coin, out var mid) ? mid.GetString() : null;
+        }
+        else
+        {
+            var url = exchange switch
+            {
+                "binance" => "https://fapi.binance.com/fapi/v1/ticker/price?symbol=" + Uri.EscapeDataString(symbol),
+                "okx" => "https://www.okx.com/api/v5/market/ticker?instId=" + Uri.EscapeDataString(symbol),
+                _ => "https://api.bybit.com/v5/market/tickers?category=linear&symbol=" + Uri.EscapeDataString(symbol)
+            };
+            using var doc = JsonDocument.Parse(await http.GetStringAsync(url, ct));
+            var root = doc.RootElement;
+            text = exchange switch
+            {
+                "binance" => root.GetProperty("price").GetString(),
+                "okx" => root.GetProperty("data").EnumerateArray().FirstOrDefault() is { ValueKind: JsonValueKind.Object } row ? row.GetProperty("last").GetString() : null,
+                _ => root.GetProperty("result").GetProperty("list").EnumerateArray().FirstOrDefault() is { ValueKind: JsonValueKind.Object } item ? item.GetProperty("lastPrice").GetString() : null
+            };
+        }
+        return decimal.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var price) && price > 0 ? price : null;
+    }
+
     public static async Task<string> HyperliquidMetadataAsync(HttpClient http, CancellationToken ct)
     {
         using var response = await http.PostAsJsonAsync("https://api.hyperliquid.xyz/info", new { type = "meta" }, ct);
