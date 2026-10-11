@@ -215,6 +215,10 @@ public class ResearchTests
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", Config(null))).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", Config(new("Binance", settings)))).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", Config(new("Hyperliquid", settings with { OrderNotional = 50 })))).StatusCode);
+        // 10 USDT at 5x covers a 50 USDT order; leverage outside 1-125 is refused.
+        Assert.Equal(HttpStatusCode.Created, (await client.PostAsJsonAsync("/api/v1/bots", Config(new("Hyperliquid", settings with { OrderNotional = 50 }, Leverage: 5)))).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", Config(new("Hyperliquid", settings, Leverage: 0)))).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", Config(new("Hyperliquid", settings, Leverage: 126)))).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots",
             new BotConfig("Импульс", "Binance", "ARBUSDT", 10, 1, "impulse", "0.1.0", new("Hyperliquid", settings)))).StatusCode);
         var created = await client.PostAsJsonAsync("/api/v1/bots", Config(new("Hyperliquid", settings, DelayMs: 25)));

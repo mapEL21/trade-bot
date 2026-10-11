@@ -93,6 +93,7 @@ function leaderLagConfig(version: string): BotConfig {
       settings: { ...defaultLeaderLagSettings },
       delayMs: 50,
       counter: false,
+      leverage: 1,
     },
   };
 }
@@ -499,6 +500,14 @@ export default function App() {
                           bot.parameters.settings.orderQuantity !== null
                             ? `${bot.parameters.settings.orderQuantity} ${bot.symbol.replace(/USDT$/, '')}`
                             : `${formatMoney(bot.parameters.settings.orderNotional)} USDT`
+                        }
+                      />
+                      <Fact
+                        label="Плечо"
+                        value={
+                          bot.parameters.settings.orderQuantity === null
+                            ? `${bot.parameters.leverage}x · маржа ${formatMoney(bot.parameters.settings.orderNotional / bot.parameters.leverage)} USDT`
+                            : `${bot.parameters.leverage}x`
                         }
                       />
                       <Fact label="Лимит убытка" value={`${formatMoney(bot.lossLimit)} USDT`} />
@@ -1144,6 +1153,11 @@ function BotCard({
     </article>
   );
 }
+// Bots saved before leverage existed trade at 1x; the form must not open with an empty required field.
+const withLeverage = (config: BotConfig): BotConfig =>
+  config.parameters
+    ? { ...config, parameters: { ...config.parameters, leverage: config.parameters.leverage ?? 1 } }
+    : config;
 function ConfigForm({
   config,
   onSave,
@@ -1161,13 +1175,13 @@ function ConfigForm({
   strategies?: StrategyDefinition[];
   strategyLocked?: boolean;
 }) {
-  const [form, setForm] = useState(config);
+  const [form, setForm] = useState(() => withLeverage(config));
   const [submitting, setSubmitting] = useState(false);
   const pending = useRef(false);
   const [error, setError] = useState('');
   const errorId = useId();
   useEffect(() => {
-    setForm(config);
+    setForm(withLeverage(config));
     setError('');
   }, [config]);
   const leaderLag = form.strategy === 'leader-lag';
@@ -1215,7 +1229,7 @@ function ConfigForm({
       const tooSmall =
         parameters &&
         strategy === 'leader-lag' &&
-        sizeProblem(parameters.settings, budget, instrument);
+        sizeProblem(parameters.settings, budget, instrument, parameters.leverage);
       if (tooSmall) throw new Error(tooSmall);
       await onSave(
         validateConfig({

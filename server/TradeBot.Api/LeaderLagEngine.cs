@@ -7,8 +7,9 @@ namespace TradeBot.Api;
 public sealed record EngineEvent(double Ms, int Venue, MarketQuote? Quote, bool Reset, int Sequence, string Connection, bool IsBook = false,
     ReplayBookUpdate? Book = null, bool IsTrade = false, ReplayPrint[]? Prints = null, bool IsClock = false);
 // MaxNotional caps one order (a bot's allocated balance); OrderQuantity in the settings fixes the size in coins instead of USDT.
+// With Leverage above 1, MaxNotional is the balance times leverage and a position whose loss nears its isolated margin is closed.
 public sealed record EngineSetup(int Leader, decimal Basis, ReplaySettings Settings, int DelayMs, bool Counter, ReplayInstrument? Instrument,
-    decimal? MaxNotional = null);
+    decimal? MaxNotional = null, int Leverage = 1);
 // Receives every decision and closed trade as it happens (the report keeps only the first 500); called on the engine thread.
 public interface IEngineObserver
 {
@@ -84,7 +85,10 @@ public static class LeaderLagEngine
     // Events must arrive in time order. A null end means "the last event seen", which is how a live session stops.
     public static ReplayScenario Run(IEnumerable<EngineEvent> events, EngineSetup setup, CancellationToken ct, double? end = null, IEngineObserver? observer = null)
     {
-        var (leader, basis, s, delay, counter, instrument, _) = setup; double lastMs = 0; bool reportedExposure = false, reportedPosition = false;
+        var (leader, basis, s, delay, counter, instrument, _, leverage) = setup;
+        // Loss after fees, in b.p. of the entry nominal, at which an isolated position nears liquidation: its margin minus a
+        // maintenance margin assumed at 0.5% (exchanges use roughly 0.4-0.5% for small positions). Unreachable at 1x.
+        var liquidationBps = leverage > 1 ? 10000m / leverage - 50 : decimal.MaxValue; double lastMs = 0; bool reportedExposure = false, reportedPosition = false;
         var q = new[] { new VenueQuotes(), new VenueQuotes() }; var journal = new List<ReplayDecision>(); var trades = new List<ReplayTrade>();
         var depth = s.ExecutionModel == "depth"; var book = new ReplayBook(); string? bookConnection = null, tradeConnection = null;
         Position? position = null; Pending? pending = null; int skipped = 0, signals = 0, unresolved = 0, journalCount = 0;
@@ -328,6 +332,7 @@ public static class LeaderLagEngine
                     var direction = Math.Sign(position.EntryResidual);
                     var reason = position.RetryReason is { } retry ? "Повтор выхода: " + retry
                         : observer?.ExitNow(tick.Ms) == true ? "Остановка пользователем: закрытие позиции"
+                        : mark <= -liquidationBps ? $"Риск ликвидации: убыток подошёл к марже позиции при плече {leverage}x"
                         : insufficient ? "Недостаточно видимой ликвидности для полного выхода" : mark <= -s.StopLossBps ? "Ограничение убытка" : direction * residual <= s.MinEdgeBps ? "Отставание сократилось или сменило знак" : null;
                     var prior = q[leader].Before(tick.Ms - s.WindowMs, s.MaxAgeMs);
                     if (reason is null && prior is not null && direction * (q[leader].Current!.Mid / prior.Mid - 1) * 10000 <= -s.ImpulseBps)
@@ -353,7 +358,12 @@ public static class LeaderLagEngine
             if (depth && !SizeAllowed(order.Quantity, maker ? order.Limit : Math.Min(order.Limit, q[1 - leader].Current!.Mid)))
             { skipped++; Log(tick.Ms, "пропуск", "Размер заявки после округления не проходит минимальный номинал или ограничения количества.", quantity: order.Quantity); continue; }
             if (depth && setup.MaxNotional is { } cap && order.Quantity * order.Limit > cap)
-            { skipped++; Log(tick.Ms, "пропуск", "Размер заявки по предельной цене превышает выделенный боту баланс.", quantity: order.Quantity); continue; }
+            {
+                skipped++;
+                Log(tick.Ms, "пропуск", leverage > 1 ? $"Размер заявки по предельной цене превышает выделенный боту баланс с плечом {leverage}x."
+                    : "Размер заявки по предельной цене превышает выделенный боту баланс.", quantity: order.Quantity);
+                continue;
+            }
             if (observer?.EntryBlock(tick.Ms) is { } blocked) { skipped++; Log(tick.Ms, "пропуск", blocked); continue; }
             pending = order; sent++; Log(tick.Ms, "вход отправлен", pending.Reason, pending.Sign, depth ? pending.Limit : null, quantity: depth ? pending.Quantity : null);
         }

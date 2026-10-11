@@ -30,6 +30,8 @@ export interface InstrumentInfo {
   minimumOrderNotional: number | null;
   quoteCurrency: string;
   ruleSource: string;
+  // Top leverage the exchange publishes for the instrument; Binance only to signed requests.
+  maxLeverage?: number | null;
 }
 
 export class ApiError extends Error {

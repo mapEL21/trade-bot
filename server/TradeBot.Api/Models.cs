@@ -3,7 +3,12 @@ using System.Text.RegularExpressions;
 namespace TradeBot.Api;
 
 // Exchange is where the bot trades; for leader-lag the signal comes from SignalExchange, which must turn out to be the leader.
-public sealed record LeaderLagParameters(string SignalExchange, ReplaySettings Settings, int DelayMs = 50, bool Counter = false);
+// Leverage only changes the margin an order needs (nominal / leverage) and how close a loss may come to that margin.
+public sealed record LeaderLagParameters(string SignalExchange, ReplaySettings Settings, int DelayMs = 50, bool Counter = false,
+    int Leverage = 1)
+{
+    public const int MaxLeverage = 125;
+}
 
 public record BotConfig(string Name, string Exchange, string Symbol, decimal Budget,
     decimal LossLimit, string Strategy, string StrategyVersion, LeaderLagParameters? Parameters = null);
@@ -76,8 +81,10 @@ public sealed class StrategyCatalog
                 try { (p.Settings ?? throw new ArgumentException("Укажите настройки стратегии.")).Validate(); }
                 catch (ArgumentException e) { errors["settings"] = [e.Message]; }
                 if (p.DelayMs is < 1 or > 1000) errors["delayMs"] = ["Задержка заявки — от 1 до 1000 мс."];
-                if (p.Settings is { OrderQuantity: null } && p.Settings.OrderNotional > config.Budget)
-                    errors["orderNotional"] = ["Номинал заявки не может превышать выделенный баланс."];
+                if (p.Leverage is < 1 or > LeaderLagParameters.MaxLeverage)
+                    errors["leverage"] = [$"Плечо — целое число от 1 до {LeaderLagParameters.MaxLeverage}."];
+                else if (p.Settings is { OrderQuantity: null } && p.Settings.OrderNotional > config.Budget * p.Leverage)
+                    errors["orderNotional"] = ["Номинал заявки не может превышать выделенный баланс, умноженный на плечо."];
             }
         }
         else if (config.Parameters is not null) errors["parameters"] = ["У этой стратегии нет дополнительных параметров."];

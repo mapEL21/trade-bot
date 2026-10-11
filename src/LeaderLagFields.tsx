@@ -2,7 +2,13 @@ import { useEffect, useState } from 'react';
 import { api, type InstrumentInfo, type ResearchMarketList } from './api';
 import { MarketPairPicker } from './MarketPairPicker';
 import { SelectField } from './components';
-import { paperExchanges, type BotConfig, type Exchange, type LeaderLagSettings } from './model';
+import {
+  maxLeverage,
+  paperExchanges,
+  type BotConfig,
+  type Exchange,
+  type LeaderLagSettings,
+} from './model';
 import {
   defaultFees,
   fromDisplay,
@@ -22,7 +28,10 @@ export function sizeProblem(
   settings: LeaderLagSettings,
   budget: number,
   info: InstrumentInfo | null,
+  leverage = 1,
 ): string | null {
+  if (info?.maxLeverage && leverage > info.maxLeverage)
+    return `Биржа допускает для ${info.coin} плечо не больше ${info.maxLeverage}x.`;
   if (!info?.lastPrice) return null;
   const price = info.lastPrice;
   const quantity = floorToStep(
@@ -36,8 +45,11 @@ export function sizeProblem(
     return `Заявка меньше минимальной: после округления до шага ${n(info.quantityStep)} это ${n(quantity)} ${info.coin} ≈ ${n(notional, 4)} USDT, а биржа принимает от ≈ ${n(minimum, 4)} USDT.`;
   if (info.maximumQuantity && quantity > info.maximumQuantity)
     return `Заявка больше максимальной: ${n(quantity)} при пределе ${n(info.maximumQuantity)} ${info.coin}.`;
-  if (notional > budget)
-    return `Заявка ≈ ${n(notional, 2)} USDT больше выделенного баланса ${n(budget, 2)} USDT.`;
+  // The margin, not the nominal, has to fit in the allocated balance.
+  if (notional > budget * leverage)
+    return leverage > 1
+      ? `Заявка ≈ ${n(notional, 2)} USDT при плече ${leverage}x требует маржи ≈ ${n(notional / leverage, 2)} USDT — больше выделенного баланса ${n(budget, 2)} USDT.`
+      : `Заявка ≈ ${n(notional, 2)} USDT больше выделенного баланса ${n(budget, 2)} USDT. Увеличьте баланс или плечо.`;
   return null;
 }
 
@@ -108,7 +120,16 @@ export function LeaderLagFields({
   const inCoins = settings.orderQuantity !== null;
   const price = info?.lastPrice ?? null;
   const listed = !markets || markets.instruments.some((x) => x.coin === coin);
-  const problem = sizeProblem(settings, form.budget, info);
+  const problem = sizeProblem(settings, form.budget, info, params.leverage);
+  const leverage = Number.isNaN(params.leverage) ? 1 : params.leverage;
+  // The nominal the form will send, for the margin hint: rounded coins at today's price, or the USDT nominal.
+  const nominal =
+    price && info
+      ? floorToStep(settings.orderQuantity ?? settings.orderNotional / price, info.quantityStep) *
+        price
+      : settings.orderQuantity === null
+        ? settings.orderNotional
+        : null;
   // Fees are always shown in percent; other thresholds follow the unit switch.
   function numberField(key: NumericSetting, alwaysPercent = false) {
     const meta = settingMeta.find((m) => m.key === key)!;
@@ -214,6 +235,27 @@ export function LeaderLagFields({
             />
           </label>
         )}
+        <label className="field">
+          <span>Плечо, x</span>
+          <input
+            type="number"
+            min="1"
+            max={info?.maxLeverage ?? maxLeverage}
+            step="1"
+            value={Number.isNaN(params.leverage) ? '' : params.leverage}
+            onChange={(e) => setParams({ leverage: e.target.valueAsNumber })}
+            required
+          />
+          <small className="field-hint">
+            {nominal !== null
+              ? `Маржа ≈ ${n(nominal / leverage, 2)} USDT из ${n(form.budget, 2)} USDT баланса.`
+              : 'Маржа = номинал заявки ÷ плечо.'}{' '}
+            {info?.maxLeverage
+              ? `${form.exchange} допускает до ${info.maxLeverage}x.`
+              : `Предел биржи не опубликован в открытых данных; допускается до ${maxLeverage}x.`}{' '}
+            При убытке, близком к марже, симуляция закроет позицию как риск ликвидации.
+          </small>
+        </label>
       </div>
       <p className="field-hint" role="status">
         {info

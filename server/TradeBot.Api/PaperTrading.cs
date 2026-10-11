@@ -8,7 +8,7 @@ namespace TradeBot.Api;
 // For a bot, SourceExchange is its signal exchange and RequireSourceLeader refuses a run in which the bot's own exchange leads.
 public sealed record PaperRequest(string Coin, string SourceExchange, string Exchange, int Seconds, ReplaySettings Settings,
     int DelayMs = 50, bool Counter = false, int MaxMb = 256, string? BotId = null, string? BotName = null, decimal? LossLimit = null,
-    bool RequireSourceLeader = false, decimal? Budget = null);
+    bool RequireSourceLeader = false, decimal? Budget = null, int Leverage = 1);
 public sealed record PaperSnapshot(string? Id, string State, string Explanation, string? Coin, string? SourceExchange, string? Exchange,
     ReplaySettings? Settings, int DelayMs, bool Counter, string? RecordingDirectory, double SessionSeconds, string? Leader,
     string? ExecutionExchange, decimal? NormalBasisBps, ReplayLeader[] Candidates, ReplayDecision[] Decisions, ReplayTrade[] Trades,
@@ -299,7 +299,8 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
         feed = new();
         foreach (var tick in initial) Feed(tick);
         lastClockMs = initial.Count == 0 ? double.NegativeInfinity : initial[^1].Ms;
-        var setup = new EngineSetup(leader, normal, settings, request.DelayMs, request.Counter, instrument, request.Budget);
+        var setup = new EngineSetup(leader, normal, settings, request.DelayMs, request.Counter, instrument, request.Budget * request.Leverage,
+            request.Leverage);
         engine = Task.Factory.StartNew(() => LeaderLagEngine.Run(Consume(), setup, CancellationToken.None, null, this),
             CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         inputs.Clear(); quoteEvents.Clear(); books.Clear(); trades.Clear();
@@ -373,7 +374,7 @@ public sealed class PaperTrading(MarketResearch research, PaperRunStore runs, IL
         if (bot.Strategy != "leader-lag" || bot.Parameters is not { } p)
             throw new InvalidOperationException("Для этой стратегии запуск недоступен: алгоритм ещё не реализован.");
         return Start(new(bot.Symbol[..^4], p.SignalExchange.ToLowerInvariant(), bot.Exchange.ToLowerInvariant(), options.Seconds, p.Settings,
-            p.DelayMs, p.Counter, BotId: bot.Id, BotName: bot.Name, LossLimit: bot.LossLimit, RequireSourceLeader: true, Budget: bot.Budget));
+            p.DelayMs, p.Counter, BotId: bot.Id, BotName: bot.Name, LossLimit: bot.LossLimit, RequireSourceLeader: true, Budget: bot.Budget, Leverage: p.Leverage));
     }
 
     public string Start(PaperRequest request)
@@ -381,6 +382,8 @@ public sealed class PaperTrading(MarketResearch research, PaperRunStore runs, IL
         if (request.Settings is null) throw new ArgumentException("Укажите настройки стратегии.");
         request.Settings.Validate();
         if (request.DelayMs is < 1 or > 1000) throw new ArgumentException("Задержка заявки — от 1 до 1000 мс.");
+        if (request.Leverage is < 1 or > LeaderLagParameters.MaxLeverage)
+            throw new ArgumentException($"Плечо — от 1 до {LeaderLagParameters.MaxLeverage}.");
         if (request.Seconds < request.Settings.CalibrationSeconds + 60 || request.Seconds > 3600)
             throw new ArgumentException($"Длительность — от {request.Settings.CalibrationSeconds + 60} до 3600 с: сначала идёт калибровка {request.Settings.CalibrationSeconds} с.");
         lock (gate)

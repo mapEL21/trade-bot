@@ -107,6 +107,7 @@ async function server(page: Page) {
         minimumOrderNotional: 5.2,
         quoteCurrency: 'USDT',
         ruleSource: 'Текущие правила биржи',
+        maxLeverage: 50,
       },
     }),
   );
@@ -249,6 +250,13 @@ test('leader-lag bot is created with its strategy parameters', async ({ page }) 
   await dialog.getByLabel('Размер заявки задаётся').selectOption('coins');
   await dialog.getByLabel('Размер заявки, MAGIC').fill('30');
   await expect(dialog.getByText(/больше выделенного баланса/)).toBeVisible();
+  // 30 MAGIC ≈ 12 USDT on a 10 USDT balance fits at 2x, with about 6 USDT of margin.
+  await dialog.getByLabel('Плечо, x').fill('2');
+  await expect(dialog.getByText(/больше выделенного баланса/)).toHaveCount(0);
+  await expect(dialog.getByText(/Маржа ≈ 6 USDT из 10 USDT баланса/)).toBeVisible();
+  await dialog.getByLabel('Плечо, x').fill('60');
+  await expect(dialog.getByText(/плечо не больше 50x/)).toBeVisible();
+  await dialog.getByLabel('Плечо, x').fill('2');
   await dialog.getByLabel('Размер заявки, MAGIC').fill('10');
   await expect(dialog.getByText(/меньше минимальной/)).toBeVisible();
   await dialog.getByLabel('Размер заявки, MAGIC').fill('20');
@@ -272,6 +280,7 @@ test('leader-lag bot is created with its strategy parameters', async ({ page }) 
   };
   expect(created.symbol).toBe('MAGICUSDT');
   expect(created.parameters.settings.orderQuantity).toBe(20);
+  expect((created.parameters as unknown as { leverage: number }).leverage).toBe(2);
   expect(created.strategy).toBe('leader-lag');
   expect(created.exchange).toBe('OKX');
   expect(created.parameters.signalExchange).toBe('Binance');

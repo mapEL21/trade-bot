@@ -155,6 +155,20 @@ test('leader-lag configuration keeps its parameters through export and import, a
       parameters: { ...config.parameters, settings: { ...defaultLeaderLagSettings, apiKey: 'x' } },
     }),
   );
+  // Leverage lets the nominal reach balance x leverage: 50 USDT on 20 USDT needs at least 3x; old bots default to 1x.
+  const sized = (leverage: number) => ({
+    ...config,
+    parameters: {
+      ...config.parameters,
+      leverage,
+      settings: { ...defaultLeaderLagSettings, orderNotional: 50 },
+    },
+  });
+  assert.equal(validateConfig(sized(3)).parameters!.leverage, 3);
+  assert.throws(() => validateConfig(sized(2)), /умноженный на плечо/);
+  assert.throws(() => validateConfig(sized(0)));
+  assert.throws(() => validateConfig(sized(126)));
+  assert.equal(validateConfig(config).parameters!.leverage, 1);
   // A size in coins is not limited by the USDT nominal check, which needs a price.
   assert.equal(
     validateConfig({

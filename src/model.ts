@@ -28,7 +28,10 @@ export interface LeaderLagParameters {
   settings: LeaderLagSettings;
   delayMs: number;
   counter: boolean;
+  // Margin is nominal / leverage; the order nominal may be up to balance x leverage.
+  leverage: number;
 }
+export const maxLeverage = 125;
 export interface BotConfig {
   name: string;
   exchange: Exchange;
@@ -112,7 +115,11 @@ function validateParameters(
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Укажите параметры стратегии.');
   const p = value as Record<string, unknown>;
-  if (Object.keys(p).some((k) => !['signalExchange', 'settings', 'delayMs', 'counter'].includes(k)))
+  if (
+    Object.keys(p).some(
+      (k) => !['signalExchange', 'settings', 'delayMs', 'counter', 'leverage'].includes(k),
+    )
+  )
     throw new Error('В параметрах стратегии есть неизвестные поля.');
   if (!paperExchanges.includes(p.signalExchange as Exchange) || p.signalExchange === exchange)
     throw new Error('Биржа сигнала должна отличаться от биржи бота.');
@@ -124,6 +131,15 @@ function validateParameters(
   )
     throw new Error('Задержка заявки — целое число от 1 до 1000 мс.');
   if (typeof p.counter !== 'boolean') throw new Error('Укажите направление входа.');
+  // Bots saved before leverage existed trade at 1x.
+  const leverage = p.leverage ?? 1;
+  if (
+    typeof leverage !== 'number' ||
+    !Number.isInteger(leverage) ||
+    leverage < 1 ||
+    leverage > maxLeverage
+  )
+    throw new Error(`Плечо — целое число от 1 до ${maxLeverage}.`);
   const s = p.settings as Record<string, unknown> | null;
   if (
     !s ||
@@ -151,13 +167,14 @@ function validateParameters(
       settings[key] = v;
     }
   }
-  if (settings.orderQuantity === null && settings.orderNotional > budget)
-    throw new Error('Номинал заявки не может превышать выделенный баланс.');
+  if (settings.orderQuantity === null && settings.orderNotional > budget * leverage)
+    throw new Error('Номинал заявки не может превышать выделенный баланс, умноженный на плечо.');
   return {
     signalExchange: p.signalExchange as Exchange,
     settings,
     delayMs: p.delayMs,
     counter: p.counter,
+    leverage,
   };
 }
 export const formatMoney = (n: number, signed = false) =>

@@ -269,6 +269,45 @@ public sealed class PaperTradingTests : IDisposable
     }
 
     [Fact]
+    public void LeverageLetsAnOrderExceedTheBalanceUpToBalanceTimesLeverage()
+    {
+        // About 1080 USDT of SOL: refused with 100 USDT at 10x, sent at 20x.
+        var (refused, _) = Drive(new("SOL", "hyperliquid", "binance", 600, Depth, Budget: 100, Leverage: 10), Events(), long.MaxValue, _ => { });
+        Assert.Contains(refused.Snapshot().Result!.Journal, x => x.Reason.Contains("с плечом 10x"));
+        var (sent, _) = Drive(new("SOL", "hyperliquid", "binance", 600, Depth, Budget: 100, Leverage: 20), Events(), long.MaxValue, _ => { });
+        Assert.Equal(1, sent.Snapshot().Result!.OrdersSent);
+        Assert.Single(sent.Snapshot().Result!.TradeLog);
+    }
+
+    [Fact]
+    public void LossNearingTheMarginClosesThePositionAsLiquidationRisk()
+    {
+        // The follower falls instead of catching up: about -45 b.p. after fees. At 125x the margin is 80 b.p.,
+        // minus the assumed 50 b.p. maintenance: the position must be closed before that loss, whatever the stop.
+        var falling = Events(data: StrategyReplayTests.Data().Select(x =>
+            x.Ticks >= 120500 && x.Source == "binance-public" && x.Quote is { } q ? x with { Quote = q with { Bid = 119.49m, Ask = 119.51m } } : x).ToList());
+        var settings = Depth with { StopLossBps = 1000 };
+        var (session, _) = Drive(new("SOL", "hyperliquid", "binance", 600, settings, Budget: 100, Leverage: 125), falling, long.MaxValue, _ => { });
+        var trade = Assert.Single(session.Snapshot().Result!.TradeLog);
+        Assert.StartsWith("Риск ликвидации", trade.ExitReason);
+        // Without leverage the same loss is held until another exit rule fires.
+        var (plain, _) = Drive(new("SOL", "hyperliquid", "binance", 600, settings, Budget: 2000), falling, long.MaxValue, _ => { });
+        Assert.DoesNotContain("ликвидации", Assert.Single(plain.Snapshot().Result!.TradeLog).ExitReason);
+    }
+
+    [Fact]
+    public void MaximumLeverageIsReadFromPublicExchangeMetadata()
+    {
+        using var okx = JsonDocument.Parse("""{"data":[{"instId":"SOL-USDT-SWAP","lever":"50"}]}""");
+        using var bybit = JsonDocument.Parse("""{"result":{"list":[{"symbol":"SOLUSDT","leverageFilter":{"maxLeverage":"75.00"}}]}}""");
+        using var hyperliquid = JsonDocument.Parse("""{"universe":[{"name":"SOL","maxLeverage":20}]}""");
+        Assert.Equal(50, ResearchMarkets.MaxLeverage(okx.RootElement, "okx", "SOL"));
+        Assert.Equal(75, ResearchMarkets.MaxLeverage(bybit.RootElement, "bybit", "SOL"));
+        Assert.Equal(20, ResearchMarkets.MaxLeverage(hyperliquid.RootElement, "hyperliquid", "SOL"));
+        Assert.Null(ResearchMarkets.MaxLeverage(okx.RootElement, "okx", "ETH"));
+        Assert.Null(ResearchMarkets.MaxLeverage(okx.RootElement, "binance", "SOL"));
+    }
+    [Fact]
     public void BotRunRefusesWhenItsOwnExchangeLeads()
     {
         // The fixture leader is Hyperliquid; a bot trading on Hyperliquid with a Binance signal has nothing to follow.
