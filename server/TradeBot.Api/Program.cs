@@ -140,6 +140,8 @@ api.MapGet("/strategies", (StrategyCatalog catalog) => Results.Ok(catalog.Items)
 api.MapGet("/research/recordings/{id}/replay", (string id, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReadReplayAsync(id, ct)));
 api.MapPost("/research/recordings/{id}/replay", (string id, ReplaySettings settings, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReplayAsync(id, settings, ct)));
 api.MapGet("/paper", (PaperTrading paper) => Results.Ok(paper.Snapshot()));
+api.MapGet("/paper/sessions", (PaperTrading paper) => Results.Ok(paper.Active()));
+api.MapGet("/bots/{id:guid}/paper", (Guid id, PaperTrading paper) => Results.Ok(paper.SnapshotFor(id.ToString())));
 api.MapPost("/paper", (PaperRequest request, PaperTrading paper) =>
 {
     try { return Results.Accepted("/api/v1/paper", new { id = paper.Start(request) }); }

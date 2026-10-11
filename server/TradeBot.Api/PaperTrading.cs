@@ -355,17 +355,35 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
 
 public sealed record PaperStart(int Seconds = 1800);
 
-// Runs at most one live paper session, on top of the market recorder (which also allows one recording at a time).
+// Runs up to MaxSessions live paper sessions at once, at most one per bot. Each has its own background recording, so
+// every run can still be checked against the replay of its own recording.
 public sealed class PaperTrading(MarketResearch research, PaperRunStore runs, ILogger<PaperTrading> logger) : IDisposable
 {
+    // Every session holds WebSocket feeds of two exchanges and writes its own recording; a few keep that light.
+    public const int MaxSessions = 4;
     private readonly object gate = new();
     private readonly CancellationTokenSource shutdown = new();
-    private PaperSession? current;
+    // Oldest first; finished sessions stay for their final state until the same bot starts again or the list grows.
+    private readonly List<PaperSession> sessions = [];
 
+    private static PaperSnapshot Idle() => new(null, "idle", "Симуляция не запущена.", null, null, null, null, 0, false, null, 0, null, null,
+        null, [], [], [], 0, 0, null, 0, null, StrategyReplay.Version);
+
+    // The most recently started session, kept for the original single-session endpoint.
     public PaperSnapshot Snapshot()
     {
-        lock (gate) return current?.Snapshot() ?? new(null, "idle", "Симуляция не запущена.", null, null, null, null, 0, false, null, 0, null, null,
-            null, [], [], [], 0, 0, null, 0, null, StrategyReplay.Version);
+        lock (gate) return sessions.LastOrDefault()?.Snapshot() ?? Idle();
+    }
+
+    public PaperSnapshot[] Active()
+    {
+        lock (gate) return sessions.Where(s => !s.Done).Select(s => s.Snapshot()).ToArray();
+    }
+
+    // The bot's latest session, also after it ended, so its page can show the final state.
+    public PaperSnapshot SnapshotFor(string botId)
+    {
+        lock (gate) return sessions.LastOrDefault(s => s.BotId == botId)?.Snapshot() ?? Idle();
     }
 
     // A leader-lag bot trades on its own exchange; the signal exchange must turn out to be the leader.
@@ -388,11 +406,15 @@ public sealed class PaperTrading(MarketResearch research, PaperRunStore runs, IL
             throw new ArgumentException($"Длительность — от {request.Settings.CalibrationSeconds + 60} до 3600 с: сначала идёт калибровка {request.Settings.CalibrationSeconds} с.");
         lock (gate)
         {
-            if (current is { Done: false }) throw new InvalidOperationException("Симуляция уже идёт. Остановите её перед новым запуском.");
+            if (request.BotId is not null && sessions.Any(s => !s.Done && s.BotId == request.BotId))
+                throw new InvalidOperationException("Этот бот уже работает в симуляции.");
+            if (sessions.Count(s => !s.Done) >= MaxSessions)
+                throw new InvalidOperationException($"Одновременно работает не больше {MaxSessions} симуляций. Остановите одну из них.");
             var session = new PaperSession(Guid.NewGuid().ToString(), request, Stopwatch.GetTimestamp);
             var recording = research.Start(new ResearchRequest(request.Coin, request.Seconds, request.MaxMb, request.Exchange, request.SourceExchange), session);
             session.StopRecording = () => research.Stop(recording);
-            current = session;
+            sessions.RemoveAll(s => s.Done && (s.BotId == request.BotId || sessions.Count > 20));
+            sessions.Add(session);
             _ = Task.Run(() => RunAsync(session));
             return session.Id;
         }
@@ -421,8 +443,8 @@ public sealed class PaperTrading(MarketResearch research, PaperRunStore runs, IL
         catch (Exception e) { logger.LogError(e, "Paper session failed"); }
     }
 
-    private PaperSession? Find(string id) { lock (gate) return current?.Id == id ? current : null; }
-    public PaperSession? ForBot(string botId) { lock (gate) return current is { Done: false } s && s.BotId == botId ? s : null; }
+    private PaperSession? Find(string id) { lock (gate) return sessions.FirstOrDefault(s => s.Id == id); }
+    public PaperSession? ForBot(string botId) { lock (gate) return sessions.FirstOrDefault(s => !s.Done && s.BotId == botId); }
 
     public bool Pause(string id, bool paused)
     {

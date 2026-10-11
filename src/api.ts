@@ -121,7 +121,9 @@ export const api = {
   // leaving anything open unresolved.
   stopPaper: (bot: Bot, mode: 'wait' | 'close' | 'force') =>
     request<void>(`/bots/${bot.id}/stop?mode=${mode}`, { method: 'POST' }),
-  paper: (signal?: AbortSignal) => request<PaperSnapshot>('/paper', { signal }),
+  // The bot's latest session, also after it ended; several bots can run their simulations at once.
+  paper: (bot: Bot, signal?: AbortSignal) =>
+    request<PaperSnapshot>(`/bots/${bot.id}/paper`, { signal }),
   paperRuns: (bot: Bot, signal?: AbortSignal) =>
     request<PaperRunRecord[]>(`/bots/${bot.id}/runs`, { signal }),
 };

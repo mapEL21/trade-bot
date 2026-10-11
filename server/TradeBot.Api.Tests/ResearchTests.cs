@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
@@ -172,7 +173,7 @@ public class ResearchTests
     }
 
     [Fact]
-    public async Task PaperApiRunsOneSessionOnTheRecorderAndStopsDuringCalibration()
+    public async Task PaperApiRunsSeveralSessionsBesideAManualRecordingAndStopsDuringCalibration()
     {
         var runner = new ControlledRunner(withManifest: true);
         using var factory = Factory(runner);
@@ -182,25 +183,43 @@ public class ResearchTests
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/paper", new PaperRequest("ARB", "hyperliquid", "binance", 100, settings))).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/paper", new PaperRequest("ARB", "hyperliquid", "binance", 600, settings, DelayMs: 0))).StatusCode);
         Assert.Equal(0, runner.Runs);
-        var start = await client.PostAsJsonAsync("/api/v1/paper", new PaperRequest("ARB", "hyperliquid", "binance", 600, settings));
-        Assert.Equal(HttpStatusCode.Accepted, start.StatusCode);
+        async Task<string> Start(string coin)
+        {
+            var response = await client.PostAsJsonAsync("/api/v1/paper", new PaperRequest(coin, "hyperliquid", "binance", 600, settings));
+            Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+            return (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString()!;
+        }
+        // Up to four sessions run at once, each on its own recording, and a manual recording can run beside them.
+        string[] ids = [await Start("ARB"), await Start("SOL"), await Start("ETH"), await Start("BTC")];
         await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/v1/paper", new PaperRequest("ARB", "hyperliquid", "binance", 600, settings))).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/v1/paper", new PaperRequest("DOGE", "hyperliquid", "binance", 600, settings))).StatusCode);
+        var manual = await client.PostAsJsonAsync("/api/v1/research", new ResearchRequest("ARB", 60, 5));
+        Assert.Equal(HttpStatusCode.Accepted, manual.StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/v1/research", new ResearchRequest("ARB", 60, 5))).StatusCode);
-        PaperSnapshot paper;
-        do paper = (await client.GetFromJsonAsync<PaperSnapshot>("/api/v1/paper"))!; while (paper.State == "starting");
-        Assert.Equal("calibrating", paper.State); Assert.False(paper.ExecutionEnabled);
+        PaperSnapshot[] active;
+        do active = (await client.GetFromJsonAsync<PaperSnapshot[]>("/api/v1/paper/sessions"))!; while (active.Any(x => x.State == "starting"));
+        Assert.Equal(ids.Order(), active.Select(x => x.Id!).Order());
+        Assert.All(active, x => { Assert.Equal("calibrating", x.State); Assert.False(x.ExecutionEnabled); });
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref runner.Runs) == 5, 5000));
         Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsync($"/api/v1/paper/{Guid.NewGuid()}/stop", null)).StatusCode);
-        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/paper/{paper.Id}/stop", null)).StatusCode);
-        await runner.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // Stopping one session leaves the others running.
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/paper/{ids[0]}/stop", null)).StatusCode);
         using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        do paper = (await client.GetFromJsonAsync<PaperSnapshot>("/api/v1/paper", wait.Token))!; while (paper.State == "calibrating");
-        Assert.Equal("stopped", paper.State); Assert.Null(paper.Result); Assert.Equal(1, runner.Runs);
+        do active = (await client.GetFromJsonAsync<PaperSnapshot[]>("/api/v1/paper/sessions", wait.Token))!; while (active.Length == 4);
+        Assert.Equal(ids[1..].Order(), active.Select(x => x.Id!).Order());
+        var doge = await Start("DOGE");
         // The final record is written right after the session completes; wait for it before the database is removed.
         var runs = factory.Services.GetRequiredService<PaperRunStore>();
-        PaperRunRecord[] saved;
-        do saved = await runs.ListAsync(null, 5, wait.Token); while (saved.FirstOrDefault()?.State != "stopped");
-        Assert.Equal(paper.Id, saved[0].Id); Assert.NotNull(saved[0].EndedUtc);
+        PaperRunRecord? saved;
+        do saved = (await runs.ListAsync(null, 10, wait.Token)).FirstOrDefault(x => x.Id == ids[0]); while (saved?.State != "stopped");
+        Assert.NotNull(saved.EndedUtc);
+        // Stop everything and wait for the final records, so nothing writes while the test database is removed.
+        foreach (var id in ids[1..].Append(doge)) Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/paper/{id}/stop", null)).StatusCode);
+        var manualId = (await manual.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString();
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/research/{manualId}/stop", null)).StatusCode);
+        do active = (await client.GetFromJsonAsync<PaperSnapshot[]>("/api/v1/paper/sessions", wait.Token))!; while (active.Length > 0);
+        PaperRunRecord[] all;
+        do all = await runs.ListAsync(null, 10, wait.Token); while (all.Length < 5 || all.Any(x => x.EndedUtc is null));
     }
 
     [Fact]
@@ -235,10 +254,13 @@ public class ResearchTests
         await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
         async Task<string> Status() => (await client.GetFromJsonAsync<Workspace>("/api/v1/workspace"))!.Bots.Single(x => x.Id == bot.Id).Status;
         Assert.Equal("calibrating", await Status());
+        // One session per bot: a second start of the same bot is refused.
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync($"/api/v1/bots/{bot.Id}/start", new PaperStart(600))).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync($"/api/v1/bots/{bot.Id}", Config(new("OKX", settings)))).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await client.DeleteAsync($"/api/v1/bots/{bot.Id}")).StatusCode);
         Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/bots/{bot.Id}/pause", null)).StatusCode);
-        Assert.True((await client.GetFromJsonAsync<PaperSnapshot>("/api/v1/paper"))!.Paused);
+        var own = (await client.GetFromJsonAsync<PaperSnapshot>($"/api/v1/bots/{bot.Id}/paper"))!;
+        Assert.True(own.Paused); Assert.Equal(bot.Id, own.BotId);
         Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/bots/{bot.Id}/stop", null)).StatusCode);
         await runner.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
 

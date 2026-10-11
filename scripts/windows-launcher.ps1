@@ -123,6 +123,21 @@ try {
             if ($owners -notcontains $server.ProcessId -or @($owners | Where-Object { $_ -ne $server.ProcessId }).Count -gt 0) {
                 throw 'Не удалось подтвердить сервер на порту 5080. Автоматическая остановка отменена.'
             }
+            # Running simulations each have their own recording: stop them first so their results are saved.
+            # ForEach-Object unrolls the JSON array: Windows PowerShell 5.1 passes it as one object.
+            $sessions = @((Request-Local "$api/paper/sessions") | ConvertFrom-Json | ForEach-Object { $_ })
+            if ($sessions.Count -gt 0) {
+                Write-Host "Останавливаем симуляции ($($sessions.Count)) и ждём сохранения результатов..."
+                foreach ($session in $sessions) { Request-Local "$api/paper/$($session.id)/stop?mode=force" 'POST' | Out-Null }
+                $deadline = [DateTime]::UtcNow.AddSeconds(45)
+                do {
+                    Start-Sleep -Milliseconds 500
+                    $sessions = @((Request-Local "$api/paper/sessions") | ConvertFrom-Json | ForEach-Object { $_ })
+                } while ($sessions.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)
+                if ($sessions.Count -gt 0) { throw 'Симуляции ещё сохраняются. Сервер оставлен работающим; повторите остановку позже.' }
+                # The final record is written right after a session ends.
+                Start-Sleep -Seconds 1
+            }
             $snapshot = (Request-Local "$api/research") | ConvertFrom-Json
             if ($snapshot.active) {
                 Write-Host 'Завершаем запись и ждём сохранения событий...'

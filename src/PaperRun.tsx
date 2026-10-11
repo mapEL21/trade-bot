@@ -123,7 +123,7 @@ export function PaperRun({ bot, onChanged }: { bot: Bot; onChanged: () => void }
       while (!stopped) {
         controller = new AbortController();
         try {
-          const data = await api.paper(controller.signal);
+          const data = await api.paper(bot, controller.signal);
           if (stopped) return;
           if (data.botId === bot.id) setSnapshot(data);
           // The run ended on the server: reload the workspace so the card shows the final status.
@@ -183,7 +183,8 @@ export function PaperRun({ bot, onChanged }: { bot: Bot; onChanged: () => void }
         (здесь он виртуально торгует), {bot.parameters?.signalExchange} — биржа сигнала. Первые{' '}
         {calibration} с он определяет, какая из них ведёт. Если ведёт биржа сигнала, бот входит на
         бирже бота, пока та отстаёт; если ведёт биржа бота, запуск останавливается с объяснением.
-        Все исполнения считаются моделью; одновременно возможна одна симуляция или запись рынка.
+        Все исполнения считаются моделью. Одновременно могут работать до 4 симуляций разных ботов, у
+        каждой своя запись рынка.
       </p>
       <div className="paper-controls">
         {!active && (

@@ -86,9 +86,6 @@ async function server(page: Page) {
   await page.route('**/api/v1/workspace', (route) =>
     route.fulfill({ json: { schemaVersion: 1, bots, events } }),
   );
-  await page.route('**/api/v1/paper', (route) =>
-    route.fulfill({ json: { id: null, state: 'idle', botId: null } }),
-  );
   await page.route('**/api/v1/bots', (route) => {
     const bot = {
       ...route.request().postDataJSON(),
@@ -118,6 +115,9 @@ async function server(page: Page) {
     return route.fulfill({ json: bots[index] });
   });
   await page.route('**/api/v1/bots/*/runs', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/v1/bots/*/paper', (route) =>
+    route.fulfill({ json: { id: null, state: 'idle', botId: null } }),
+  );
   return bots;
 }
 

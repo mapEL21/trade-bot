@@ -175,7 +175,8 @@ async function server(page: Page) {
     }
     return route.fulfill({ status: 202, json: { id: 'session' } });
   });
-  await page.route('**/api/v1/paper', (route) =>
+  // Registered after the generic bot route, so it takes precedence for the bot's own session state.
+  await page.route(`**/api/v1/bots/${bot.id}/paper`, (route) =>
     route.fulfill({
       json: {
         id: 'session',
