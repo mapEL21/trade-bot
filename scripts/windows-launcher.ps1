@@ -125,7 +125,9 @@ try {
             }
             # Running simulations each have their own recording: stop them first so their results are saved.
             # ForEach-Object unrolls the JSON array: Windows PowerShell 5.1 passes it as one object.
-            $sessions = @((Request-Local "$api/paper/sessions") | ConvertFrom-Json | ForEach-Object { $_ })
+            # A server started before several simulations existed has no such endpoint; its one simulation is stopped below
+            # together with its recording, as before.
+            try { $sessions = @((Request-Local "$api/paper/sessions") | ConvertFrom-Json | ForEach-Object { $_ }) } catch { $sessions = @() }
             if ($sessions.Count -gt 0) {
                 Write-Host "Останавливаем симуляции ($($sessions.Count)) и ждём сохранения результатов..."
                 foreach ($session in $sessions) { Request-Local "$api/paper/$($session.id)/stop?mode=force" 'POST' | Out-Null }
