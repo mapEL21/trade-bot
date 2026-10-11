@@ -14,6 +14,8 @@ const initial = {
   leaderAdvantageBps: 0.5,
   orderNotional: 10,
   priceLimitBps: 5,
+  makerFeeBps: 2,
+  makerWaitMs: 1000,
 };
 type Settings = typeof initial;
 interface Scenario {
@@ -32,6 +34,8 @@ interface Scenario {
   partialExits?: number;
   closedNetQuote?: number | null;
   unresolvedQuantity?: number | null;
+  makerOrders?: number | null;
+  makerFills?: number | null;
   tradeLog: {
     entrySeconds: number;
     exitSeconds: number;
@@ -62,7 +66,7 @@ interface Report {
   executionExchange: string | null;
   normalBasisBps: number | null;
   durationSeconds: number;
-  settings: Settings & { executionModel?: string };
+  settings: Settings & { executionModel?: string; entryOrder?: string };
   instrument?: {
     quantityStep: number;
     minimumQuantity: number;
@@ -85,7 +89,7 @@ const fields: [keyof Settings, string, number, number, number][] = [
   ['impulseBps', 'Порог импульса, б.п.', 0.1, 1000, 0.1],
   ['windowMs', 'Окно движения, мс', 10, 5000, 1],
   ['maxAgeMs', 'Свежесть котировки, мс', 10, 5000, 1],
-  ['feeBps', 'Комиссия стратегии за сторону, б.п.', 0, 100, 0.1],
+  ['feeBps', 'Комиссия taker за сторону, б.п.', 0, 100, 0.1],
   ['slippageBps', 'Дополнительное проскальзывание, б.п.', 0, 100, 0.1],
   ['minEdgeBps', 'Запас сверх расходов, б.п.', 0, 100, 0.1],
   ['stopLossBps', 'Порог убытка сделки, б.п.', 1, 1000, 0.1],
@@ -93,7 +97,10 @@ const fields: [keyof Settings, string, number, number, number][] = [
   ['leaderAdvantageBps', 'Преимущество поводыря, б.п.', 0.1, 100, 0.1],
   ['orderNotional', 'Номинал заявки в валюте расчёта', 1, 100000, 0.01],
   ['priceLimitBps', 'Предел отклонения цены заявки, б.п.', 0, 100, 0.1],
+  ['makerFeeBps', 'Комиссия maker за вход, б.п.', -10, 100, 0.1],
+  ['makerWaitMs', 'Ожидание исполнения maker, мс', 10, 60000, 1],
 ];
+const makerFields: (keyof Settings)[] = ['makerFeeBps', 'makerWaitMs'];
 const n = (value: number | null | undefined) =>
   value == null ? '—' : value.toLocaleString('ru-RU', { maximumFractionDigits: 3 });
 const price = (value: number | null | undefined) =>
@@ -103,6 +110,7 @@ const mode = (value: string) => (value === 'follow' ? 'По импульсу' : 
 export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean }) {
   const [settings, setSettings] = useState(initial);
   const [executionModel, setExecutionModel] = useState('depth');
+  const [entryOrder, setEntryOrder] = useState('taker');
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -139,7 +147,7 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
     try {
       const result = await request<Report>(`/research/recordings/${id}/replay`, {
         method: 'POST',
-        body: JSON.stringify({ ...settings, executionModel }),
+        body: JSON.stringify({ ...settings, executionModel, entryOrder }),
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(70000)]),
       });
       if (!controller.signal.aborted) setReport(result);
@@ -151,6 +159,7 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
     }
   }
   const selected = report?.scenarios.find((s) => `${s.mode}-${s.delayMs}` === selection);
+  const maker = report?.scenarios.some((s) => s.makerOrders != null) ?? false;
   return (
     <section className="strategy-replay" aria-labelledby="replay-title">
       <h3 id="replay-title">Первая стратегия: поводырь → отстающая биржа</h3>
@@ -186,6 +195,21 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
             цены отсчитывается от котировки при решении отправить заявку и действует на вход и
             выход. В модели BBO номинал и предел цены не используются.
           </p>
+          <label>
+            Вход в сделку
+            <select
+              value={entryOrder}
+              disabled={busy}
+              onChange={(e) => setEntryOrder(e.target.value)}
+            >
+              <option value="taker">Taker: сразу по встречной цене</option>
+              <option value="maker">Maker: заявка по своей лучшей цене</option>
+            </select>
+          </label>
+          <p className="field-hint">
+            Maker-заявка платит меньшую комиссию и не платит спред, но исполняется, только если цена
+            сама придёт к ней — часто это значит, что рынок пошёл против сделки. Выход всегда taker.
+          </p>
           <div className="analysis-settings">
             {fields.map(([key, label, min, max, step]) => (
               <label key={key}>
@@ -199,7 +223,8 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
                   disabled={
                     busy ||
                     (executionModel === 'bbo' &&
-                      (key === 'orderNotional' || key === 'priceLimitBps'))
+                      (key === 'orderNotional' || key === 'priceLimitBps')) ||
+                    (entryOrder !== 'maker' && makerFields.includes(key))
                   }
                   value={Number.isNaN(settings[key]) ? '' : settings[key]}
                   onChange={(e) => setSettings((s) => ({ ...s, [key]: e.target.valueAsNumber }))}
@@ -234,14 +259,18 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
               {report.settings.executionModel === 'depth'
                 ? 'По записанному стакану и объёму'
                 : 'Упрощённая BBO, без проверки объёма'}
-              .
+              . Вход: {report.settings.entryOrder === 'maker' ? 'maker' : 'taker'}.
             </p>
             <ul>
-              {fields.map(([key, label]) => (
-                <li key={key}>
-                  {label}: {n(report.settings[key])}
-                </li>
-              ))}
+              {fields
+                .filter(
+                  ([key]) => report.settings.entryOrder === 'maker' || !makerFields.includes(key),
+                )
+                .map(([key, label]) => (
+                  <li key={key}>
+                    {label}: {n(report.settings[key])}
+                  </li>
+                ))}
             </ul>
             <p>Изменение настроек формы требует повторной проверки.</p>
             {report.instrument && (
@@ -299,6 +328,7 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
                       <th>Сумма, б.п.</th>
                       <th>Просадка закрытых, б.п.</th>
                       <th>Не оценено позиций</th>
+                      {maker && <th>Исполнено maker-заявок</th>}
                       {report.instrument && (
                         <th>Итог закрытых, {report.instrument.quoteCurrency}</th>
                       )}
@@ -315,6 +345,11 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
                         <td>{n(s.sumNetBps)}</td>
                         <td>{n(s.closedTradeDrawdownBps)}</td>
                         <td>{s.unresolvedPositions}</td>
+                        {maker && (
+                          <td>
+                            {s.makerFills ?? 0} из {s.makerOrders ?? 0}
+                          </td>
+                        )}
                         {report.instrument && <td>{price(s.closedNetQuote)}</td>}
                       </tr>
                     ))}

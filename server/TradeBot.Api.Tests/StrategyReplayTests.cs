@@ -101,6 +101,45 @@ public class StrategyReplayTests
         Assert.All(result.Scenarios, s => { Assert.Equal(1, s.UnresolvedPositions); Assert.Empty(s.TradeLog); });
     }
 
+    // Target dips for one tick so that its ask reaches the maker bid placed at 120.25 s.
+    internal static List<MarketAnalysis.Input> DipData() => Data().Select(x => x.Ticks == 120300 && x.Source == "binance-public" && x.Quote is { } q
+        ? x with { Quote = q with { Bid = 119.96m, Ask = 119.98m } } : x).ToList();
+
+    [Fact]
+    public void MakerEntryFollowingTheImpulseIsNotFilledWhenPriceRunsAway()
+    {
+        var result = StrategyReplay.Run(Recording, Settings with { EntryOrder = "maker" }, 1000, 0, 125000, Data(), default);
+        var follow = result.Scenarios.Where(x => x.Mode == "follow").ToArray();
+        Assert.All(follow, s =>
+        {
+            Assert.Empty(s.TradeLog); Assert.Equal(1, s.MakerOrders); Assert.Equal(0, s.MakerFills);
+            Assert.Contains(s.Journal, x => x.Reason == "Заявка maker не исполнилась и снята.");
+        });
+        Assert.Null(Run(Data()).Scenarios[0].MakerOrders);
+    }
+
+    [Fact]
+    public void MakerEntryFillsOnlyWhenOppositePriceReachesItsLevelAndPaysMakerFee()
+    {
+        var result = StrategyReplay.Run(Recording, Settings with { EntryOrder = "maker", MakerFeeBps = 2 }, 1000, 0, 125000, DipData(), default);
+        var fast = result.Scenarios.Single(x => x.Mode == "follow" && x.DelayMs == 10); var trade = Assert.Single(fast.TradeLog);
+        Assert.Equal(1, fast.MakerFills); Assert.Equal(120.3, trade.EntrySeconds, 6); Assert.Equal(119.99m, trade.EntryPrice);
+        Assert.Equal(120.99m, trade.ExitPrice);
+        Assert.Equal((120.99m / 119.99m - 1) * 10000 - 2 - 1 * 120.99m / 119.99m, trade.NetBps);
+        // With 100 ms delay the order arrives after the dip: post-only must reject it rather than fill as taker.
+        var slow = result.Scenarios.Single(x => x.Mode == "follow" && x.DelayMs == 100);
+        Assert.Empty(slow.TradeLog); Assert.Equal(0, slow.MakerOrders);
+        Assert.Contains(slow.Journal, x => x.Reason.StartsWith("Post-only заявка отклонена"));
+    }
+
+    [Fact]
+    public void GapOnExecutionVenueWhileMakerOrderRestsLeavesItUnresolved()
+    {
+        var data = Data(); data.Add(new(120400, 999999, "binance-public", "c", "gap", null));
+        var result = StrategyReplay.Run(Recording, Settings with { EntryOrder = "maker" }, 1000, 0, 125000, data, default);
+        Assert.All(result.Scenarios.Where(x => x.Mode == "follow"), s => { Assert.Equal(1, s.UnresolvedPositions); Assert.Empty(s.TradeLog); });
+    }
+
     [Fact]
     public void TooSmallResidualIsLoggedAsSkippedRatherThanForcedTrade()
     {

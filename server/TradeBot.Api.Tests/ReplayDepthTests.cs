@@ -10,7 +10,7 @@ public class ReplayDepthTests
     private static readonly ReplayInstrument Instrument = new(1, 1, 5, 10000, 1, .01m, "USDT", "fixture");
     private static readonly AnalysisRecording Recording = new("fixture", "SOL", "hyperliquid", "binance", DateTimeOffset.UnixEpoch, "completed", 0, false);
     private static readonly ReplaySettings Settings = new(FeeBps: 1, SlippageBps: 0, MinEdgeBps: 1, OrderNotional: 1200);
-    private static ReplayMarketData Market() => new([null, Instrument], StrategyReplayTests.Data()
+    private static ReplayMarketData Market(List<MarketAnalysis.Input>? data = null) => new([null, Instrument], (data ?? StrategyReplayTests.Data())
         .Where(x => x.Source == "binance-public" && x.Quote is not null)
         .Select(x => new ReplayBookEvent(x.Ticks, x.Sequence + 1, 1, "c", new(true, x.Ticks,
             [new(x.Quote!.Bid, 100), new(x.Quote.Bid - .02m, 100)],
@@ -86,13 +86,24 @@ public class ReplayDepthTests
     public void ReplayUsesVolumeWeightedPricesAndActualRoundTripFees()
     {
         var report = Run(Market()); var scenario = Follow(report); var trade = Assert.Single(scenario.TradeLog);
-        Assert.Equal("evaluated", report.Status); Assert.Equal("0.2.1", report.Version);
+        Assert.Equal("evaluated", report.Status); Assert.Equal("0.3.0", report.Version);
         Assert.Equal(9, trade.Quantity); Assert.Equal((2 * 120.01m + 7 * 120.03m) / 9, trade.EntryPrice);
         Assert.Equal(120.99m, trade.ExitPrice);
         Assert.Equal(9 * (trade.EntryPrice + trade.ExitPrice) / 10000, trade.FeesQuote);
         Assert.Equal(9 * (trade.ExitPrice - trade.EntryPrice) - trade.FeesQuote, trade.NetQuote);
         Assert.Equal(trade.NetQuote, scenario.ClosedNetQuote);
         Assert.Equal(trade.NetQuote / 1200 * 10000, scenario.SumNetBps);
+    }
+
+    [Fact]
+    public void MakerFillUsesOrderPriceRoundedQuantityAndMakerFeeOnEntryOnly()
+    {
+        var data = StrategyReplayTests.DipData();
+        var report = StrategyReplay.Run(Recording, Settings with { EntryOrder = "maker", MakerFeeBps = 2 }, 1000, 0, 125000, data, default, Market(data));
+        var trade = Assert.Single(Follow(report).TradeLog);
+        Assert.Equal(119.99m, trade.EntryPrice); Assert.Equal(10, trade.Quantity); // floor(1200 / 119.99)
+        Assert.Equal(10 * (119.99m * 2 + trade.ExitPrice * 1) / 10000, trade.FeesQuote);
+        Assert.Equal(10 * (trade.ExitPrice - 119.99m) - trade.FeesQuote, trade.NetQuote);
     }
 
     [Fact]

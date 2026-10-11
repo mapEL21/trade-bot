@@ -734,3 +734,39 @@ test('depth replay submits size settings and exposes partial fills and remaining
     [],
   );
 });
+
+test('maker entry submits its settings and shows how many resting orders filled', async ({
+  page,
+}) => {
+  await installFeed(page, idle);
+  await page.route('**/api/v1/research/recordings', (route) =>
+    route.fulfill({ json: { items: [analysisRecording], unavailable: 0 } }),
+  );
+  await page.route('**/api/v1/research/recordings/*/replay', (route) => {
+    if (route.request().method() !== 'POST') return route.fulfill({ status: 404 });
+    const body = route.request().postDataJSON();
+    expect(body.entryOrder).toBe('maker');
+    expect(body.makerFeeBps).toBe(1.5);
+    return route.fulfill({
+      json: {
+        ...replayFixture,
+        version: '0.3.0',
+        settings: body,
+        scenarios: replayFixture.scenarios.map((s) => ({ ...s, makerOrders: 7, makerFills: 2 })),
+      },
+    });
+  });
+  await openResearch(page);
+  await page.getByText('Настройки стратегии', { exact: true }).click();
+  await expect(page.getByLabel('Комиссия maker за вход, б.п.')).toBeDisabled();
+  await page.getByLabel('Вход в сделку').selectOption('maker');
+  await page.getByLabel('Комиссия maker за вход, б.п.').fill('1.5');
+  await page.getByRole('button', { name: 'Проверить первую стратегию' }).click();
+  await expect(page.getByRole('heading', { name: 'Результат стратегии v0.3.0' })).toBeVisible();
+  const table = page.getByRole('table', { name: 'Сравнение независимых сценариев' });
+  await expect(table.getByRole('columnheader', { name: 'Исполнено maker-заявок' })).toBeVisible();
+  await expect(table.getByRole('cell', { name: '2 из 7' }).first()).toBeVisible();
+  expect((await new AxeBuilder({ page }).include('.strategy-replay').analyze()).violations).toEqual(
+    [],
+  );
+});

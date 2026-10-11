@@ -5,7 +5,8 @@ namespace TradeBot.Api;
 public sealed record ReplaySettings(int CalibrationSeconds = 120, decimal ImpulseBps = 3, int WindowMs = 250,
     int MaxAgeMs = 500, decimal FeeBps = 5, decimal SlippageBps = 1, decimal MinEdgeBps = 2,
     decimal StopLossBps = 20, int MaxHoldMs = 2000, decimal LeaderAdvantageBps = .5m,
-    string ExecutionModel = "depth", decimal OrderNotional = 10, decimal PriceLimitBps = 5)
+    string ExecutionModel = "depth", decimal OrderNotional = 10, decimal PriceLimitBps = 5,
+    string EntryOrder = "taker", decimal MakerFeeBps = 2, int MakerWaitMs = 1000)
 {
     public void Validate()
     {
@@ -15,6 +16,8 @@ public sealed record ReplaySettings(int CalibrationSeconds = 120, decimal Impuls
             throw new ArgumentException("Проверьте параметры стратегии: обучение 30–1800 с, запас 0–100 б.п., стоп 1–1000 б.п., преимущество лидера 0,1–100 б.п.");
         if (ExecutionModel is not ("depth" or "bbo") || OrderNotional is < 1 or > 100000 || PriceLimitBps is < 0 or > 100)
             throw new ArgumentException("Модель исполнения: depth или bbo; номинал заявки 1–100000, предел цены 0–100 б.п.");
+        if (EntryOrder is not ("taker" or "maker") || MakerFeeBps is < -10 or > 100 || MakerWaitMs is < 10 or > 60000)
+            throw new ArgumentException("Вход: taker или maker; комиссия maker от −10 до 100 б.п., ожидание исполнения 10–60000 мс.");
     }
 }
 public sealed record ReplayDecision(double Seconds, string Action, string Reason, string? Side = null, decimal? Price = null, decimal? NetBps = null, decimal? Quantity = null);
@@ -23,7 +26,7 @@ public sealed record ReplayTrade(double EntrySeconds, double ExitSeconds, string
 public sealed record ReplayScenario(string Mode, int DelayMs, int Trades, decimal? MeanNetBps, double? WinPercent,
     decimal SumNetBps, decimal ClosedTradeDrawdownBps, int UnresolvedPositions, int Skipped, int Signals,
     ReplayTrade[] TradeLog, ReplayDecision[] Journal, bool JournalTruncated, int PartialEntries = 0, int PartialExits = 0,
-    decimal? ClosedNetQuote = null, decimal? UnresolvedQuantity = null);
+    decimal? ClosedNetQuote = null, decimal? UnresolvedQuantity = null, int? MakerOrders = null, int? MakerFills = null);
 public sealed record ReplayLeader(string SourceExchange, string Exchange, int Samples, decimal? ResponseBps);
 public sealed record ReplayReport(string Strategy, string Version, AnalysisRecording Recording, ReplaySettings Settings,
     string Status, string Explanation, string? Leader, string? ExecutionExchange, decimal? NormalBasisBps,
@@ -35,8 +38,10 @@ public static class StrategyReplay
     private sealed record Tick(double Ms, int Venue, MarketQuote? Quote, bool Reset, int Sequence, string Connection, bool IsBook = false, ReplayBookUpdate? Book = null);
     // Quantity is the open remainder; earlier partial exits are kept so the closed trade gets one weighted exit price.
     private sealed record Position(int Sign, double At, decimal Price, decimal EntryResidual, decimal Quantity = 0,
-        decimal ExitedQuantity = 0, decimal ExitedValue = 0, string? RetryReason = null);
+        decimal ExitedQuantity = 0, decimal ExitedValue = 0, string? RetryReason = null, decimal? EntryFeeBps = null);
     private sealed record Pending(int Sign, double Due, string Reason, bool Exit, decimal Quantity = 0, decimal Limit = 0);
+    // A post-only entry resting at its own price from Live until a cancel request (CancelAt) reaches the exchange.
+    private sealed record Resting(int Sign, double Live, decimal Price, decimal Quantity, double Expires, double? CancelAt, decimal Residual);
     private sealed class Quotes
     {
         public readonly List<(double Ms, MarketQuote Quote)> History = [];
@@ -72,7 +77,7 @@ public static class StrategyReplay
         var candidates = analysis.Directions.Select(d => new ReplayLeader(d.SourceExchange, d.Exchange,
             d.Horizons[0].Samples, d.Horizons[0].MeanMoveBps)).ToArray();
         string[] notes = [
-            "Исследовательская стратегия v0.2.1: поводырь выбран только на начальном участке и зафиксирован. Это предварительная гипотеза лидерства по реакции через 100 мс, не доказанная причинность.",
+            "Исследовательская стратегия v0.3.0: поводырь выбран только на начальном участке и зафиксирован. Это предварительная гипотеза лидерства по реакции через 100 мс, не доказанная причинность.",
             settings.ExecutionModel == "depth"
                 ? "Исполнение по видимому стакану: условная немедленная заявка с пределом цены от bid/ask в момент решения. Размер округляется вниз. Цена — средняя по уровням плюс заданное дополнительное проскальзывание; комиссия за обе стороны. Это модель IOC, а не точная эмуляция правил брокера."
                 : "Упрощённая модель BBO: последние свежие bid/ask, проскальзывание и комиссия. Объём, минимальная заявка и частичные исполнения не учитываются. Номинал и предел цены в этой модели не используются.",
@@ -80,9 +85,10 @@ public static class StrategyReplay
             "В модели стакана сумма и просадка в б.п. нормированы на заданный номинал, средний итог — на фактический объём каждой закрытой сделки. Если выход не уложился в предел цены, остаток закрывается новой заявкой после следующего обновления котировок, а сделка получает среднюю цену всех частей выхода. Если исполнение за записанной глубиной неизвестно, остаток не закрывается выдуманной ценой: сценарий прекращается, вся незавершённая сделка исключена из итогов закрытых сделок.",
             "Используется только записанная глубина, без скрытых заявок и очереди maker. Если при входе неизвестно исполнение за последним уровнем, вход пропускается. Запись не отражает влияние нашего бота на дальнейший рынок. Плечо, маржа, funding, ликвидация, ценовые коридоры биржи и персональные лимиты не моделируются; тариф 5 б.п. — пример.",
             "Контрольный вход против импульса использует те же первоначальные сигналы отбора, но не гарантирует доступного движения в обратную сторону. Сценарии независимы; результаты нельзя складывать.",
-            "Выбор лучшей задержки на этой записи требует новой независимой проверки. Положительный результат не подтверждает прибыльность. Живая симуляция и торговое исполнение ещё не подключены."
+            "Выбор лучшей задержки на этой записи требует новой независимой проверки. Положительный результат не подтверждает прибыльность. Живая симуляция и торговое исполнение ещё не подключены.",
+            .. (settings.EntryOrder == "maker" ? new[] { "Вход maker: post-only заявка по своей лучшей цене (bid для покупки, ask для продажи) на момент решения, с той же задержкой доставки. Заявка отклоняется, если к моменту выставления цена уже дошла до её уровня. Исполнение засчитывается только когда встречная лучшая цена дошла до уровня заявки: тогда весь уровень гарантированно съеден, независимо от места в очереди. Сделки по нашей цене без этого не учитываются, поэтому доля исполнений занижена, а исполняются в основном заявки, против которых цена пошла. Отмена по сроку или сокращению отставания доходит до биржи с той же задержкой. Выход — taker, как раньше." } : Array.Empty<string>())
         ];
-        ReplayReport Empty(string status, string reason) => new("leader-lag", "0.2.1", recording, settings, status, reason,
+        ReplayReport Empty(string status, string reason) => new("leader-lag", "0.3.0", recording, settings, status, reason,
             null, null, null, duration, candidates, [], notes);
         if (recording.Status != "completed") return Empty("incomplete", "Нужна запись без ошибок и разрывов: текущая сессия завершена неполно.");
         if (duration <= settings.CalibrationSeconds + settings.MaxHoldMs / 1000.0 + .2)
@@ -116,7 +122,7 @@ public static class StrategyReplay
         var scenarios = new List<ReplayScenario>();
         foreach (var delay in new[] { 10, 25, 50, 100 })
             foreach (var counter in new[] { false, true }) scenarios.Add(Simulate(ticks, leader, basis, duration * 1000, settings, delay, counter, ct, instrument));
-        return new("leader-lag", "0.2.1", recording, settings, "evaluated", "Поводырь выбран на начальном участке. Результаты ниже относятся только к последующей части записи.",
+        return new("leader-lag", "0.3.0", recording, settings, "evaluated", "Поводырь выбран на начальном участке. Результаты ниже относятся только к последующей части записи.",
             best.SourceExchange, best.Exchange, basis, duration, candidates, scenarios.ToArray(), notes, settings.ExecutionModel == "depth" ? instrument : null);
     }
 
@@ -143,7 +149,8 @@ public static class StrategyReplay
         var q = new[] { new Quotes(), new Quotes() }; var journal = new List<ReplayDecision>(); var trades = new List<ReplayTrade>();
         var depth = s.ExecutionModel == "depth"; var book = new ReplayBook(); string? bookConnection = null;
         Position? position = null; Pending? pending = null; int skipped = 0, signals = 0, unresolved = 0, journalCount = 0;
-        int partialEntries = 0, partialExits = 0;
+        int partialEntries = 0, partialExits = 0, makerOrders = 0, makerFills = 0;
+        var maker = s.EntryOrder == "maker"; Resting? resting = null;
         decimal sum = 0, peak = 0, drawdown = 0, closedNet = 0; double nextSignal = s.CalibrationSeconds * 1000; bool halted = false;
         void Log(double at, string action, string reason, int sign = 0, decimal? price = null, decimal? net = null, decimal? quantity = null)
         { journalCount++; if (journal.Count < 500) journal.Add(new(at / 1000, action, reason, sign == 0 ? null : sign > 0 ? "long" : "short", price, net, quantity)); }
@@ -151,9 +158,20 @@ public static class StrategyReplay
         decimal Residual() => (q[leader].Current!.Mid / q[1 - leader].Current!.Mid - 1) * 10000 - basis;
         decimal Price(int sign, bool exit)
         { var buy = exit ? sign < 0 : sign > 0; var quote = q[1 - leader].Current!; return buy ? quote.Ask * (1 + s.SlippageBps / 10000) : quote.Bid * (1 - s.SlippageBps / 10000); }
-        decimal Net(decimal exit) => position!.Sign * (exit / position.Price - 1) * 10000 - s.FeeBps * (1 + exit / position.Price);
+        decimal Net(decimal exit) => position!.Sign * (exit / position.Price - 1) * 10000 - (position.EntryFeeBps ?? s.FeeBps) - s.FeeBps * exit / position.Price;
+        // A maker entry rests on its own side of the book, so mid-to-mid lag pays no spread; the taker exit still pays fee and slippage.
+        decimal Costs() => maker ? s.MakerFeeBps + s.FeeBps + s.SlippageBps + s.MinEdgeBps
+            : 2 * (s.FeeBps + s.SlippageBps) + q[1 - leader].Current!.SpreadBps + s.MinEdgeBps;
+        bool SizeAllowed(decimal quantity, decimal price) => quantity > 0 && quantity >= instrument!.MinimumQuantity
+            && (instrument.MaximumQuantity is not { } max || quantity <= max) && quantity * price >= instrument.MinimumNotional;
         Pending Order(int sign, double at, string reason, bool exit)
         {
+            if (maker && !exit)
+            {
+                // Post-only price: our own best bid for a buy, best ask for a sell, fixed at the decision.
+                var own = sign > 0 ? q[1 - leader].Current!.Bid : q[1 - leader].Current!.Ask;
+                return new(sign, at + delay, reason, false, depth ? instrument!.RoundQuantity(s.OrderNotional / own) : 0, own);
+            }
             if (!depth) return new(sign, at + delay, reason, exit);
             var buy = exit ? sign < 0 : sign > 0; var quote = q[1 - leader].Current!;
             var reference = buy ? quote.Ask : quote.Bid;
@@ -168,16 +186,24 @@ public static class StrategyReplay
         {
             while (!halted)
             {
-                var due = pending?.Due ?? (position is not null ? position.At + s.MaxHoldMs : double.PositiveInfinity);
+                var due = pending?.Due ?? (position is not null ? position.At + s.MaxHoldMs
+                    : resting is not null ? resting.CancelAt is { } cancel ? cancel + delay : resting.Expires : double.PositiveInfinity);
                 var staleAt = position is null ? double.PositiveInfinity : Math.Min(q[0].At, q[1].At) + s.MaxAgeMs + .001;
                 if (depth && position is not null) staleAt = Math.Min(staleAt, book.At + s.MaxAgeMs + .001);
                 if (staleAt <= to && staleAt < due) { LosePosition(staleAt); break; }
                 if (due > to) break;
+                if (resting is not null)
+                {
+                    // The cancel request needs the same delay to reach the exchange; the order can still fill meanwhile.
+                    if (resting.CancelAt is null) { resting = resting with { CancelAt = due }; Log(due, "отмена запрошена", "Срок ожидания заявки maker истёк."); }
+                    else { resting = null; skipped++; Log(due, "пропуск", "Заявка maker не исполнилась и снята."); }
+                    continue;
+                }
                 if (pending is null) { pending = Order(position!.Sign, due, "Лимит времени удержания", true); Log(due, "выход запрошен", pending.Reason); continue; }
                 var order = pending; pending = null;
                 if (!Fresh(due))
                 { if (position is not null) LosePosition(due); else { skipped++; Log(due, "пропуск", "К моменту входа котировки устарели."); } continue; }
-                if (depth && !book.Fresh(due, s.MaxAgeMs))
+                if (depth && (order.Exit || !maker) && !book.Fresh(due, s.MaxAgeMs))
                 { if (position is not null) LosePosition(due); else { skipped++; Log(due, "пропуск", "Нет свежего восстановленного стакана для исполнения."); } continue; }
                 if (order.Exit)
                 {
@@ -202,7 +228,7 @@ public static class StrategyReplay
                         total = position.ExitedQuantity; price = position.ExitedValue / total;
                     }
                     var net = Net(price);
-                    decimal? fees = depth ? total * (position!.Price + price) * s.FeeBps / 10000 : null;
+                    decimal? fees = depth ? total * (position!.Price * (position.EntryFeeBps ?? s.FeeBps) + price * s.FeeBps) / 10000 : null;
                     decimal? cash = depth ? total * position!.Sign * (price - position.Price) - fees : null;
                     trades.Add(new(position!.At / 1000, due / 1000, order.Sign > 0 ? "long" : "short", position.Price, price, net, order.Reason,
                         depth ? total : null, cash, fees));
@@ -213,15 +239,23 @@ public static class StrategyReplay
                 else
                 {
                     var direction = counter ? -order.Sign : order.Sign;
-                    var costs = 2 * (s.FeeBps + s.SlippageBps) + q[1 - leader].Current!.SpreadBps + s.MinEdgeBps;
-                    if (direction * Residual() <= costs) { skipped++; Log(due, "пропуск", "Отставание исчезло до исполнения."); continue; }
+                    if (direction * Residual() <= Costs()) { skipped++; Log(due, "пропуск", "Отставание исчезло до исполнения."); continue; }
+                    if (depth && !SizeAllowed(order.Quantity, maker ? order.Limit : Math.Min(order.Limit, q[1 - leader].Current!.Mid)))
+                    { skipped++; Log(due, "пропуск", "Размер заявки после округления не проходит минимальный номинал или ограничения количества.", quantity: order.Quantity); continue; }
+                    if (maker)
+                    {
+                        var quote = q[1 - leader].Current!;
+                        if (order.Sign > 0 ? quote.Ask <= order.Limit : quote.Bid >= order.Limit)
+                        { skipped++; Log(due, "пропуск", "Post-only заявка отклонена: цена уже дошла до её уровня, и она исполнилась бы как taker."); continue; }
+                        makerOrders++; resting = new(order.Sign, due, order.Limit, order.Quantity, due + s.MakerWaitMs, null, Residual());
+                        Log(due, "заявка maker выставлена", counter ? "Контрольный вход против импульса" : "Отставание покрывает заданный порог расходов",
+                            order.Sign, order.Limit, quantity: depth ? order.Quantity : null);
+                        continue;
+                    }
                     var price = Price(order.Sign, false); decimal quantity = 0;
                     if (depth)
                     {
-                        if (order.Quantity < instrument!.MinimumQuantity || order.Quantity == 0 || (instrument.MaximumQuantity is { } max && order.Quantity > max)
-                            || order.Quantity * Math.Min(order.Limit, q[1 - leader].Current!.Mid) < instrument.MinimumNotional)
-                        { skipped++; Log(due, "пропуск", "Размер заявки после округления не проходит минимальный номинал или ограничения количества.", quantity: order.Quantity); continue; }
-                        var fill = book.Fill(order.Sign > 0, order.Quantity, order.Limit, s.SlippageBps, instrument.QuantityStep, false);
+                        var fill = book.Fill(order.Sign > 0, order.Quantity, order.Limit, s.SlippageBps, instrument!.QuantityStep, false);
                         if (fill.BeyondVisibleDepth)
                         { skipped++; Log(due, "пропуск", "Для объёма заявки не хватает записанной глубины; исполнение за последним уровнем неизвестно.", quantity: order.Quantity); continue; }
                         if (fill.Quantity == 0)
@@ -251,10 +285,32 @@ public static class StrategyReplay
                 if (tick.Venue == 1 - leader) { book.Reset(); bookConnection = tick.Connection; }
                 if (position is not null) { LosePosition(tick.Ms); break; }
                 if (pending is not null) { pending = null; skipped++; Log(tick.Ms, "пропуск", "Разрыв данных до исполнения."); }
+                if (resting is not null && tick.Venue == 1 - leader)
+                {
+                    // Without the execution venue's prices we cannot know whether the resting order filled.
+                    unresolved++; halted = true; Log(tick.Ms, "не оценено", "Разрыв данных при выставленной заявке maker: исполнение неизвестно.", quantity: depth ? resting.Quantity : null);
+                    break;
+                }
+                if (resting is { CancelAt: null }) { resting = resting with { CancelAt = tick.Ms }; Log(tick.Ms, "отмена запрошена", "Разрыв данных поводыря."); }
                 continue;
+            }
+            // Conservative maker fill: only when the opposite best price reaches our level. Then every order at that price,
+            // ours included whatever its queue place, must have traded. Prints at our price without that are ignored.
+            if (resting is not null && tick.Venue == 1 - leader && tick.Quote is { } own && tick.Ms >= resting.Live
+                && (resting.Sign > 0 ? own.Ask <= resting.Price : own.Bid >= resting.Price))
+            {
+                makerFills++; position = new(resting.Sign, tick.Ms, resting.Price, resting.Residual, resting.Quantity, EntryFeeBps: s.MakerFeeBps);
+                Log(tick.Ms, "вход", "Заявка maker исполнена: встречная цена дошла до её уровня", resting.Sign, resting.Price, quantity: depth ? resting.Quantity : null);
+                resting = null;
             }
             if (tick.Ms < s.CalibrationSeconds * 1000 || !Fresh(tick.Ms)) continue;
             var residual = Residual();
+            if (resting is not null)
+            {
+                if (resting.CancelAt is null && Math.Sign(resting.Residual) * residual <= s.MinEdgeBps)
+                { resting = resting with { CancelAt = tick.Ms }; Log(tick.Ms, "отмена запрошена", "Отставание сократилось до исполнения заявки maker."); }
+                continue;
+            }
             if (position is not null)
             {
                 if (pending is null)
@@ -284,17 +340,18 @@ public static class StrategyReplay
             var impulse = (q[leader].Current!.Mid / baseline.Mid - 1) * 10000;
             if (Math.Abs(impulse) < s.ImpulseBps) continue;
             signals++; nextSignal = tick.Ms + Math.Max(250, s.WindowMs);
-            var sign = Math.Sign(impulse); var threshold = 2 * (s.FeeBps + s.SlippageBps) + q[1 - leader].Current!.SpreadBps + s.MinEdgeBps;
-            if (sign * residual <= threshold) { skipped++; Log(tick.Ms, "пропуск", "Оставшееся отставание меньше порога расходов и запаса."); continue; }
+            var sign = Math.Sign(impulse);
+            if (sign * residual <= Costs()) { skipped++; Log(tick.Ms, "пропуск", "Оставшееся отставание меньше порога расходов и запаса."); continue; }
             pending = Order(counter ? -sign : sign, tick.Ms, "Импульс и отставание", false);
             Log(tick.Ms, "вход запрошен", pending.Reason, pending.Sign);
         }
         if (!halted) Advance(end);
         if (!halted && position is not null) { unresolved++; Log(end, "не оценено", "Запись закончилась с открытой позицией."); }
-        else if (!halted && pending is not null) { skipped++; Log(end, "пропуск", "Запись закончилась до входа."); }
+        else if (!halted && (pending is not null || resting is not null)) { skipped++; Log(end, "пропуск", "Запись закончилась до входа."); }
         return new(counter ? "counter" : "follow", delay, trades.Count, trades.Count == 0 ? null : trades.Average(x => x.NetBps),
             trades.Count == 0 ? null : 100.0 * trades.Count(x => x.NetBps > 0) / trades.Count, sum, drawdown, unresolved, skipped, signals,
             trades.Take(500).ToArray(), journal.ToArray(), journalCount > 500 || trades.Count > 500, partialEntries, partialExits,
-            depth ? closedNet : null, depth && unresolved > 0 ? position?.Quantity : null);
+            depth ? closedNet : null, depth && unresolved > 0 ? position?.Quantity ?? resting?.Quantity : null,
+            maker ? makerOrders : null, maker ? makerFills : null);
     }
 }
