@@ -424,20 +424,6 @@ test('choosing the other exchange swaps the pair and Escape preserves the select
   await expect(page.getByRole('listbox')).toHaveCount(0);
 });
 
-test('demo research cannot launch real recording', async ({ page }) => {
-  let requests = 0;
-  page.on('request', (request) => {
-    if (request.url().includes('/api/v1/research')) requests++;
-  });
-  await page.goto('/?demo=1');
-  await page.getByRole('button', { name: 'Исследование рынка', exact: true }).click();
-  await expect(
-    page.getByRole('heading', { name: 'Исследование работает на сервере' }),
-  ).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Начать запись' })).toHaveCount(0);
-  expect(requests).toBe(0);
-});
-
 const analysisRecording = {
   id: '20261010T100000Z-11111111111111111111111111111111',
   coin: 'SOL',

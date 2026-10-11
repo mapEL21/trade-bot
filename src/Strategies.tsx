@@ -3,11 +3,9 @@ import type { StrategyDefinition } from './api';
 
 export function Strategies({
   items,
-  demo,
   onCreate,
 }: {
   items: StrategyDefinition[];
-  demo: boolean;
   onCreate: (item: StrategyDefinition) => void;
 }) {
   return (
@@ -49,9 +47,7 @@ export function Strategies({
             <p className="field-hint">
               {item.implementationStatus === 'paper'
                 ? 'Бот работает в живой симуляции по публичным данным; реальные заявки не отправляются.'
-                : demo
-                  ? 'Настройки останутся в демопространстве браузера.'
-                  : 'Сохраним черновик на сервере. Запуск станет доступен после реализации алгоритма.'}
+                : 'Сохраним черновик на сервере. Запуск станет доступен после реализации алгоритма.'}
             </p>
           </article>
         ))}

@@ -71,13 +71,11 @@ export interface Workspace {
   bots: Bot[];
   events: Event[];
 }
-export const STORAGE_KEY = 'trade-bot.workspace.v1';
-export const DEMO_NOW = Date.parse('2026-10-07T18:00:00Z');
 export const exchanges: Exchange[] = ['Binance', 'Bybit', 'OKX'];
 // Exchanges the leader-lag research and simulation support; Hyperliquid is one of them, with no fixed role.
 export const paperExchanges: Exchange[] = ['Binance', 'Bybit', 'OKX', 'Hyperliquid'];
 export const statusLabels: Record<Status, string> = {
-  running: 'Демо запущено',
+  running: 'Симуляция идёт',
   paused: 'На паузе',
   draft: 'Черновик',
   stopped: 'Остановлен',
@@ -189,7 +187,7 @@ export function metrics(trades: Trade[]) {
     drawdown,
   };
 }
-export function periodTrades(trades: Trade[], days: number, now = DEMO_NOW) {
+export function periodTrades(trades: Trade[], days: number, now = Date.now()) {
   return trades.filter((t) => Date.parse(t.at) >= now - days * 86400000 && Date.parse(t.at) <= now);
 }
 export function validateConfig(value: unknown): BotConfig {
@@ -231,7 +229,7 @@ export function validateConfig(value: unknown): BotConfig {
     v.budget < 1 ||
     v.budget > 1000000
   )
-    throw new Error('Демо-баланс должен быть от 1 до 1 000 000 USDT.');
+    throw new Error('Выделенный баланс должен быть от 1 до 1 000 000 USDT.');
   if (
     typeof v.lossLimit !== 'number' ||
     !Number.isFinite(v.lossLimit) ||
@@ -307,63 +305,7 @@ export function importConfig(text: string): BotConfig {
     throw new Error('Нужен пакет настроек версии 1, экспортированный из Trade Bot.');
   return validateConfig(v.config);
 }
-export function makeBot(config: BotConfig): Bot {
-  return {
-    ...validateConfig(config),
-    id: crypto.randomUUID(),
-    createdAt: new Date().toISOString(),
-    status: 'draft',
-    trades: [],
-  };
-}
-export function createDemo(): Workspace {
-  const values = [
-    0.05, 0.09, -0.03, 0.07, 0.1, -0.04, 0.06, 0.08, 0.04, -0.02, 0.11, 0.07, -0.03, 0.06, 0.09,
-    0.04,
-  ];
-  const trades: Trade[] = values.map((gross, i) => {
-    const entry = 0.4,
-      quantity = 10,
-      side = i % 3 === 0 ? 'short' : 'long';
-    return {
-      id: `demo-trade-${i}`,
-      at: new Date(DEMO_NOW - (values.length - 1 - i) * 12 * 3600000).toISOString(),
-      side,
-      gross,
-      fee: 0.004,
-      entry,
-      exit: entry + (gross / quantity) * (side === 'long' ? 1 : -1),
-      quantity,
-    };
-  });
-  return {
-    schemaVersion: 1,
-    bots: [
-      {
-        id: 'demo-impulse',
-        name: 'Импульс · ARB',
-        exchange: 'Binance',
-        symbol: 'ARBUSDT',
-        budget: 10,
-        lossLimit: 1,
-        strategy: 'impulse',
-        strategyVersion: '0.1.0',
-        status: 'paused',
-        trades,
-        createdAt: '2026-09-30T00:00:00Z',
-      },
-    ],
-    events: [
-      {
-        id: 'welcome',
-        at: new Date(DEMO_NOW).toISOString(),
-        botName: 'Рабочее пространство',
-        text: 'Загружен демонстрационный пример. Все сделки и цены вымышлены.',
-      },
-    ],
-  };
-}
-// Stored data is untrusted too: a corrupt record must not crash the UI.
+// Server data is checked too: a corrupt record must not crash the UI.
 export function parseWorkspace(text: string): Workspace {
   const v = JSON.parse(text) as Workspace;
   if (

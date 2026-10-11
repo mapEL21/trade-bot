@@ -22,7 +22,6 @@ import {
   Radio,
   Search,
   ShieldCheck,
-  Square,
   Trash2,
   TrendingUp,
   Wallet,
@@ -38,22 +37,17 @@ import { LeaderLagFields, sizeProblem } from './LeaderLagFields';
 import { defaultFees } from './strategySettings';
 import { Chart, DownloadButton, Empty, Modal, SelectField, Toast, Tooltip } from './components';
 import {
-  createDemo,
   csvCell,
-  DEMO_NOW,
   defaultLeaderLagSettings,
   exchanges,
   exportConfig,
   formatMoney,
   importConfig,
-  makeBot,
   metrics,
   net,
   paperExchanges,
-  parseWorkspace,
   periodTrades,
   statusLabels,
-  STORAGE_KEY,
   validateConfig,
   type Bot,
   type BotConfig,
@@ -63,7 +57,6 @@ import {
   type Workspace,
 } from './model';
 
-const demoMode = new URLSearchParams(location.search).get('demo') === '1';
 const emptyWorkspace: Workspace = { schemaVersion: 1, bots: [], events: [] };
 
 type Page = 'strategies' | 'overview' | 'bots' | 'trades' | 'events' | 'connections' | 'research';
@@ -103,9 +96,8 @@ function leaderLagConfig(version: string): BotConfig {
     },
   };
 }
-// Outside the demo a running bot is a live paper simulation, never real trading.
-const statusLabel = (status: Status) =>
-  !demoMode && status === 'running' ? 'Симуляция идёт' : statusLabels[status];
+// A running bot is always a live paper simulation, never real trading.
+const statusLabel = (status: Status) => statusLabels[status];
 // Fees and thresholds are stored in basis points and shown in percent.
 const percent = (bps: number) =>
   `${(bps / 100).toLocaleString('ru-RU', { maximumFractionDigits: 6 })}%`;
@@ -118,27 +110,13 @@ function download(name: string, text: string, type = 'application/json') {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-function load() {
-  try {
-    const text = localStorage.getItem(STORAGE_KEY);
-    return { workspace: text ? parseWorkspace(text) : createDemo(), error: '' };
-  } catch {
-    return {
-      workspace: createDemo(),
-      error:
-        'Сохранённые данные недоступны или повреждены. Показан демопример; сохранение отключено до сброса в разделе «Подключения».',
-    };
-  }
-}
 export default function App() {
-  const [initial] = useState(() => (demoMode ? load() : { workspace: emptyWorkspace, error: '' }));
   const [strategies, setStrategies] = useState<StrategyDefinition[]>([]);
-  const [loading, setLoading] = useState(!demoMode);
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const mutation = useRef(false);
-  const [workspace, setWorkspace] = useState<Workspace>(initial.workspace);
-  const [storageError, setStorageError] = useState(initial.error);
-  const [storageEnabled, setStorageEnabled] = useState(!initial.error);
+  const [workspace, setWorkspace] = useState<Workspace>(emptyWorkspace);
+  const [serverError, setServerError] = useState('');
   const [page, setPage] = useState<Page>('overview');
   const [selected, setSelected] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('overview');
@@ -151,18 +129,14 @@ export default function App() {
     id?: string;
   } | null>(null);
   const [importing, setImporting] = useState(false);
-  const [confirm, setConfirm] = useState<{
-    type: 'delete' | 'stop' | 'reset';
-    id?: string;
-  } | null>(null);
+  const [confirm, setConfirm] = useState<{ type: 'delete'; id: string } | null>(null);
   const [toast, setToast] = useState('');
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bot = workspace.bots.find((b) => b.id === selected);
   const allTrades = workspace.bots.flatMap((b) =>
     b.trades.map((t) => ({ ...t, botName: b.name, symbol: b.symbol })),
   );
-  // The demo history is fixed in the past; server statistics count back from now.
-  const now = demoMode ? DEMO_NOW : Date.now();
+  const now = Date.now();
   const trades = periodTrades(bot?.trades ?? allTrades, days, now);
   const stat = metrics(trades);
   const budget = bot?.budget ?? workspace.bots.reduce((s, b) => s + b.budget, 0);
@@ -173,17 +147,6 @@ export default function App() {
       `${b.name} ${b.symbol} ${b.exchange}`.toLowerCase().includes(query.toLowerCase()) &&
       (filter === 'all' || b.status === filter),
   );
-  useEffect(() => {
-    if (!demoMode || !storageEnabled) return;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
-      setStorageError('');
-    } catch {
-      setStorageError(
-        'Не удалось сохранить изменения в браузере. Экспортируйте настройки перед закрытием вкладки.',
-      );
-    }
-  }, [workspace, storageEnabled]);
   useEffect(
     () => () => {
       if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -191,18 +154,17 @@ export default function App() {
     [],
   );
   useEffect(() => {
-    if (demoMode) return;
     let active = true;
     Promise.all([api.workspace(), api.strategies()])
       .then(([data, catalog]) => {
         if (active) {
           setWorkspace(data);
           setStrategies(catalog);
-          setStorageError('');
+          setServerError('');
         }
       })
       .catch((error) => {
-        if (active) setStorageError(error.message);
+        if (active) setServerError(error.message);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -214,7 +176,7 @@ export default function App() {
   // While a simulation runs, keep bot statuses current without the loading indicator.
   const anyActive = workspace.bots.some((b) => activeStatuses.includes(b.status));
   useEffect(() => {
-    if (demoMode || !anyActive) return;
+    if (!anyActive) return;
     const timer = setInterval(() => {
       if (!mutation.current)
         void api
@@ -228,7 +190,7 @@ export default function App() {
     void api
       .workspace()
       .then(setWorkspace)
-      .catch((error) => setStorageError((error as Error).message));
+      .catch((error) => setServerError((error as Error).message));
   }
   async function refreshServer() {
     setLoading(true);
@@ -236,9 +198,9 @@ export default function App() {
       const [data, catalog] = await Promise.all([api.workspace(), api.strategies()]);
       setWorkspace(data);
       setStrategies(catalog);
-      setStorageError('');
+      setServerError('');
     } catch (error) {
-      setStorageError((error as Error).message);
+      setServerError((error as Error).message);
       throw error;
     } finally {
       setLoading(false);
@@ -248,21 +210,6 @@ export default function App() {
     setToast(message);
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(''), 4500);
-  }
-  function log(state: Workspace, name: string, text: string, botId: string) {
-    return {
-      ...state,
-      events: [
-        {
-          id: crypto.randomUUID(),
-          at: new Date().toISOString(),
-          botName: name,
-          botId,
-          text,
-        },
-        ...state.events,
-      ].slice(0, 200),
-    };
   }
   function go(p: Page) {
     setPage(p);
@@ -276,136 +223,57 @@ export default function App() {
     setTab('overview');
     setPage('bots');
   }
-  function setStatus(b: Bot, status: Status) {
-    if (!demoMode) {
-      notify('Алгоритм ещё не реализован. Запуск недоступен.');
-      return;
-    }
-    setWorkspace((s) =>
-      log(
-        {
-          ...s,
-          bots: s.bots.map((x) => (x.id === b.id ? { ...x, status } : x)),
-        },
-        b.name,
-        `${statusLabels[status]}. Изменён только статус интерфейса; торговый движок не подключён.`,
-        b.id,
-      ),
-    );
-    notify(
-      status === 'running'
-        ? 'Демо запущено. Реальные заявки не отправляются.'
-        : 'Статус демобота обновлён.',
-    );
-  }
   async function save(config: BotConfig, id?: string) {
-    if (!demoMode) {
-      if (mutation.current) throw new Error('Дождитесь завершения предыдущего запроса.');
-      mutation.current = true;
-      setBusy(true);
-      let saved = false;
-      try {
-        const existing = workspace.bots.find((b) => b.id === id);
-        if (id && !existing) throw new Error('Бот больше не существует. Обновите данные.');
-        const result = existing ? await api.update(existing, config) : await api.create(config);
-        saved = true;
-        setEditor(null);
-        setImporting(false);
-        openBot(result.id);
-        await refreshServer();
-        notify('Настройки экземпляра сохранены на сервере');
-      } catch (error) {
-        const message = saved
-          ? 'Настройки сохранены, но обновить список не удалось. Нажмите «Обновить данные».'
-          : (error as Error).message;
-        setStorageError(message);
-        throw new Error(message);
-      } finally {
-        mutation.current = false;
-        setBusy(false);
-      }
-      return;
+    if (mutation.current) throw new Error('Дождитесь завершения предыдущего запроса.');
+    mutation.current = true;
+    setBusy(true);
+    let saved = false;
+    try {
+      const existing = workspace.bots.find((b) => b.id === id);
+      if (id && !existing) throw new Error('Бот больше не существует. Обновите данные.');
+      const result = existing ? await api.update(existing, config) : await api.create(config);
+      saved = true;
+      setEditor(null);
+      setImporting(false);
+      openBot(result.id);
+      await refreshServer();
+      notify('Настройки экземпляра сохранены на сервере');
+    } catch (error) {
+      const message = saved
+        ? 'Настройки сохранены, но обновить список не удалось. Нажмите «Обновить данные».'
+        : (error as Error).message;
+      setServerError(message);
+      throw new Error(message);
+    } finally {
+      mutation.current = false;
+      setBusy(false);
     }
-    if (!id && workspace.bots.length >= 100)
-      throw new Error('В демопространстве можно создать до 100 ботов.');
-    const existing = workspace.bots.find((b) => b.id === id);
-    if (
-      existing &&
-      existing.trades.length &&
-      (config.exchange !== existing.exchange ||
-        config.symbol !== existing.symbol ||
-        config.budget !== existing.budget)
-    )
-      throw new Error(
-        'У бота есть история. Создайте копию для смены биржи, инструмента или начального баланса.',
-      );
-    const next = existing ? { ...existing, ...config } : makeBot(config);
-    setWorkspace((s) =>
-      log(
-        {
-          ...s,
-          bots: existing ? s.bots.map((b) => (b.id === id ? next : b)) : [...s.bots, next],
-        },
-        next.name,
-        existing ? 'Настройки демобота обновлены.' : 'Создан черновик бота.',
-        next.id,
-      ),
-    );
-    setEditor(null);
-    setImporting(false);
-    openBot(next.id);
-    notify(existing ? 'Настройки сохранены' : 'Бот добавлен в рабочее пространство');
   }
   async function runConfirm() {
-    if (!demoMode) {
-      if (mutation.current || confirm?.type !== 'delete') return;
-      const target = workspace.bots.find((b) => b.id === confirm.id);
-      if (!target) return;
-      mutation.current = true;
-      setBusy(true);
-      try {
-        await api.remove(target);
-        setConfirm(null);
-        go('bots');
-        await refreshServer();
-        notify('Экземпляр удалён с сервера');
-      } catch (error) {
-        setStorageError((error as Error).message);
-        setConfirm(null);
-      } finally {
-        mutation.current = false;
-        setBusy(false);
-      }
-      return;
+    if (mutation.current || !confirm) return;
+    const target = workspace.bots.find((b) => b.id === confirm.id);
+    if (!target) return;
+    mutation.current = true;
+    setBusy(true);
+    try {
+      await api.remove(target);
+      setConfirm(null);
+      go('bots');
+      await refreshServer();
+      notify('Экземпляр удалён с сервера');
+    } catch (error) {
+      setServerError((error as Error).message);
+      setConfirm(null);
+    } finally {
+      mutation.current = false;
+      setBusy(false);
     }
-    if (confirm?.type === 'reset') {
-      setWorkspace(createDemo());
-      setStorageEnabled(true);
-      setStorageError('');
-      go('overview');
-      notify('Демонстрационные данные восстановлены');
-    } else {
-      const b = workspace.bots.find((x) => x.id === confirm?.id);
-      if (b && confirm?.type === 'delete') {
-        setWorkspace((s) =>
-          log(
-            { ...s, bots: s.bots.filter((x) => x.id !== b.id) },
-            b.name,
-            'Демобот и его локальная история удалены.',
-            b.id,
-          ),
-        );
-        if (selected === b.id) go('bots');
-        notify('Бот удалён');
-      } else if (b) setStatus(b, 'stopped');
-    }
-    setConfirm(null);
   }
   const actions = (
     <>
       <button
         className="button secondary"
-        disabled={!demoMode && (loading || !strategies.length)}
+        disabled={loading || !strategies.length}
         onClick={() => setImporting(true)}
       >
         <FolderInput size={17} />
@@ -413,7 +281,7 @@ export default function App() {
       </button>
       <button
         className="button primary"
-        disabled={!demoMode && (loading || !strategies.length)}
+        disabled={loading || !strategies.length}
         onClick={() => setEditor({ config: defaultConfig })}
       >
         <Plus size={18} />
@@ -457,7 +325,7 @@ export default function App() {
         <div className="workspace-switch">
           <span className="avatar">M</span>
           <span>
-            Моё пространство<small>{demoMode ? 'Демопример в браузере' : 'Локальный сервер'}</small>
+            Моё пространство<small>{'Локальный сервер'}</small>
           </span>
           <span className="workspace-dot" />
         </div>
@@ -479,15 +347,15 @@ export default function App() {
         <div className="sidebar-bottom">
           <div className="sandbox-card">
             <FlaskConical size={21} />
-            <strong>Место для экспериментов</strong>
-            <p>Настройте бота и изучите интерфейс без реальных сделок.</p>
+            <strong>Только симуляция</strong>
+            <p>Боты работают на публичных данных бирж. Реальных заявок и ключей нет.</p>
             <button onClick={() => go('connections')}>
-              {demoMode ? 'О деморежиме' : 'О рабочем пространстве'} <ArrowUpRight size={15} />
+              О рабочем пространстве <ArrowUpRight size={15} />
             </button>
           </div>
           <div className="sidebar-footer">
             <span className="tiny-dot" />
-            {demoMode ? 'Демо-пространство' : 'Серверное пространство'}
+            Серверное пространство
             <span>v0.1</span>
           </div>
         </div>
@@ -509,79 +377,57 @@ export default function App() {
           <div className="topbar-right">
             <span className="mode-pill">
               <FlaskConical size={13} />
-              {demoMode ? 'ДЕМО' : 'СЕРВЕР'}
+              СИМУЛЯЦИЯ
             </span>
             <span className="topbar-divider" />
-            <span
-              className="profile"
-              title={demoMode ? 'Демопример в браузере' : 'Локальный сервер'}
-            >
+            <span className="profile" title="Локальный сервер">
               M
             </span>
           </div>
         </header>
         <main>
-          <div className="demo-banner">
+          <div className="mode-banner">
             <FlaskConical size={16} />
             <span>
-              {demoMode ? (
-                <>
-                  <strong>Демонстрационный режим.</strong> Данные вымышлены. Подключений к биржам и
-                  реальных сделок нет.
-                </>
-              ) : (
-                <>
-                  <strong>Серверное пространство.</strong> Настройки хранятся в базе. Бот «Поводырь»
-                  работает в живой симуляции по публичным данным; реальные заявки не отправляются,
-                  торговые подключения не созданы.
-                </>
-              )}
+              <strong>Живая симуляция.</strong> Настройки и результаты хранятся в базе локального
+              сервера. Боты работают по публичным данным бирж; реальные заявки не отправляются,
+              торговые подключения не созданы.
             </span>
             <button onClick={() => go('connections')}>
               Подробнее
               <ArrowRight size={14} />
             </button>
           </div>
-          {storageError && (
+          {serverError && (
             <div className="error-banner" role="alert">
-              {storageError}
-              {!demoMode && (
-                <button
-                  className="button secondary"
-                  disabled={loading || busy}
-                  onClick={() => void refreshServer().catch(() => {})}
-                >
-                  Обновить данные
-                </button>
-              )}
-            </div>
-          )}
-          {!demoMode && (
-            <div className="server-toolbar">
-              <span role="status">
-                {loading
-                  ? 'Загрузка с сервера…'
-                  : busy
-                    ? 'Сохранение…'
-                    : storageError
-                      ? 'Не удалось обновить данные'
-                      : 'Данные загружены с сервера'}
-              </span>
+              {serverError}
               <button
-                className="text-button"
+                className="button secondary"
                 disabled={loading || busy}
                 onClick={() => void refreshServer().catch(() => {})}
               >
                 Обновить данные
               </button>
-              <a href="/?demo=1">Открыть демопример</a>
             </div>
           )}
-          {demoMode && (
-            <div className="server-toolbar">
-              <a href="/">Перейти к серверному пространству</a>
-            </div>
-          )}
+          <div className="server-toolbar">
+            <span role="status">
+              {loading
+                ? 'Загрузка с сервера…'
+                : busy
+                  ? 'Сохранение…'
+                  : serverError
+                    ? 'Не удалось обновить данные'
+                    : 'Данные загружены с сервера'}
+            </span>
+            <button
+              className="text-button"
+              disabled={loading || busy}
+              onClick={() => void refreshServer().catch(() => {})}
+            >
+              Обновить данные
+            </button>
+          </div>
           {bot ? (
             <>
               <button className="back-link" onClick={() => go('bots')}>
@@ -611,29 +457,9 @@ export default function App() {
                 </div>
                 <div className="heading-actions">
                   <StatusBadge status={bot.status} />
-                  {!demoMode && bot.strategy === 'leader-lag' ? null : !demoMode ? (
+                  {bot.strategy !== 'leader-lag' && (
                     <button className="button secondary" disabled>
                       Алгоритм в разработке
-                    </button>
-                  ) : bot.status === 'running' ? (
-                    <button className="button secondary" onClick={() => setStatus(bot, 'paused')}>
-                      <Pause size={16} />
-                      Пауза
-                    </button>
-                  ) : (
-                    <button className="button primary" onClick={() => setStatus(bot, 'running')}>
-                      <Play size={16} />
-                      Запустить демо
-                    </button>
-                  )}
-                  {demoMode && (
-                    <button
-                      className="icon-button bordered danger-icon"
-                      title="Остановить и закрыть"
-                      aria-label="Остановить и закрыть"
-                      onClick={() => setConfirm({ type: 'stop', id: bot.id })}
-                    >
-                      <Square size={16} />
                     </button>
                   )}
                 </div>
@@ -650,65 +476,60 @@ export default function App() {
                   </button>
                 ))}
               </div>
-              {tab === 'overview' &&
-                !demoMode &&
-                bot.strategy === 'leader-lag' &&
-                bot.parameters && (
-                  <>
-                    <PaperRun bot={bot} onChanged={quietRefresh} />
-                    <div className="section-line">
-                      <span className="section-kicker">
-                        <span className="tiny-dot" />
-                        СТАТИСТИКА СИМУЛЯЦИИ · НЕ РЕАЛЬНАЯ ТОРГОВЛЯ
-                      </span>
-                      {period}
-                    </div>
-                    <Stats stat={stat} budget={budget} balance={balance} />
-                    <div className="overview-grid">
-                      <Performance trades={trades} pnl={stat.pnl} />
-                      <div className="panel bot-facts">
-                        <h3>Параметры бота</h3>
-                        <Fact label="Стратегия" value="Поводырь → отстающая биржа" />
-                        <Fact label="Версия" value={bot.strategyVersion} />
-                        <Fact
-                          label="Биржа бота / сигнала"
-                          value={`${bot.exchange} / ${bot.parameters.signalExchange}`}
-                        />
-                        <Fact
-                          label="Размер заявки"
-                          value={
-                            bot.parameters.settings.orderQuantity !== null
-                              ? `${bot.parameters.settings.orderQuantity} ${bot.symbol.replace(/USDT$/, '')}`
-                              : `${formatMoney(bot.parameters.settings.orderNotional)} USDT`
-                          }
-                        />
-                        <Fact label="Лимит убытка" value={`${formatMoney(bot.lossLimit)} USDT`} />
-                        <Fact
-                          label="Вход · исполнение"
-                          value={`${bot.parameters.settings.entryOrder === 'maker' ? 'maker' : 'taker'} · ${bot.parameters.settings.executionModel === 'depth' ? 'по стакану' : 'BBO'} · ${bot.parameters.delayMs} мс`}
-                        />
-                        <Fact
-                          label="Комиссии taker / maker"
-                          value={`${percent(bot.parameters.settings.feeBps)} / ${percent(bot.parameters.settings.makerFeeBps)}`}
-                        />
-                        <div className="inline-note">
-                          <ShieldCheck size={17} />
-                          <span>
-                            Лимит убытка и размер заявки применяются в симуляции. Реальных позиций и
-                            ордеров нет.
-                          </span>
-                        </div>
+              {tab === 'overview' && bot.strategy === 'leader-lag' && bot.parameters && (
+                <>
+                  <PaperRun bot={bot} onChanged={quietRefresh} />
+                  <div className="section-line">
+                    <span className="section-kicker">
+                      <span className="tiny-dot" />
+                      СТАТИСТИКА СИМУЛЯЦИИ · НЕ РЕАЛЬНАЯ ТОРГОВЛЯ
+                    </span>
+                    {period}
+                  </div>
+                  <Stats stat={stat} budget={budget} balance={balance} />
+                  <div className="overview-grid">
+                    <Performance trades={trades} pnl={stat.pnl} />
+                    <div className="panel bot-facts">
+                      <h3>Параметры бота</h3>
+                      <Fact label="Стратегия" value="Поводырь → отстающая биржа" />
+                      <Fact label="Версия" value={bot.strategyVersion} />
+                      <Fact
+                        label="Биржа бота / сигнала"
+                        value={`${bot.exchange} / ${bot.parameters.signalExchange}`}
+                      />
+                      <Fact
+                        label="Размер заявки"
+                        value={
+                          bot.parameters.settings.orderQuantity !== null
+                            ? `${bot.parameters.settings.orderQuantity} ${bot.symbol.replace(/USDT$/, '')}`
+                            : `${formatMoney(bot.parameters.settings.orderNotional)} USDT`
+                        }
+                      />
+                      <Fact label="Лимит убытка" value={`${formatMoney(bot.lossLimit)} USDT`} />
+                      <Fact
+                        label="Вход · исполнение"
+                        value={`${bot.parameters.settings.entryOrder === 'maker' ? 'maker' : 'taker'} · ${bot.parameters.settings.executionModel === 'depth' ? 'по стакану' : 'BBO'} · ${bot.parameters.delayMs} мс`}
+                      />
+                      <Fact
+                        label="Комиссии taker / maker"
+                        value={`${percent(bot.parameters.settings.feeBps)} / ${percent(bot.parameters.settings.makerFeeBps)}`}
+                      />
+                      <div className="inline-note">
+                        <ShieldCheck size={17} />
+                        <span>
+                          Лимит убытка и размер заявки применяются в симуляции. Реальных позиций и
+                          ордеров нет.
+                        </span>
                       </div>
                     </div>
-                    <TradesTable trades={trades} botName={bot.name} symbol={bot.symbol} />
-                  </>
-                )}
-              {tab === 'overview' && (demoMode || bot.strategy !== 'leader-lag') && (
+                  </div>
+                  <TradesTable trades={trades} botName={bot.name} symbol={bot.symbol} />
+                </>
+              )}
+              {tab === 'overview' && bot.strategy !== 'leader-lag' && (
                 <>
                   <div className="section-line">
-                    <span className="muted">
-                      {demoMode ? 'Статистика демопримера' : 'Статистика экземпляра'}
-                    </span>
+                    <span className="muted">{'Статистика экземпляра'}</span>
                     {period}
                   </div>
                   <Stats stat={stat} budget={budget} balance={balance} />
@@ -734,11 +555,9 @@ export default function App() {
                 <>
                   <div className="section-line">
                     <p className="muted">
-                      {demoMode
-                        ? 'Только демонстрационные исполнения'
-                        : bot.strategy === 'leader-lag'
-                          ? 'Сделки симуляции — на вкладке «Обзор», в истории запусков. Реальных исполнений нет.'
-                          : 'Исполнений пока нет'}
+                      {bot.strategy === 'leader-lag'
+                        ? 'Сделки симуляции — на вкладке «Обзор», в истории запусков. Реальных исполнений нет.'
+                        : 'Исполнений пока нет'}
                     </p>
                     {period}
                   </div>
@@ -815,27 +634,10 @@ export default function App() {
                   {(page === 'overview' || page === 'bots') && actions}
                 </div>
               </div>
-              {page === 'research' && <Research demo={demoMode} />}
+              {page === 'research' && <Research />}
               {page === 'strategies' && (
                 <Strategies
-                  demo={demoMode}
-                  items={
-                    demoMode
-                      ? [
-                          {
-                            id: 'impulse',
-                            version: '0.1.0',
-                            name: 'Импульс',
-                            description:
-                              'Шаблон для знакомства с интерфейсом. Алгоритм ещё не реализован.',
-                            implementationStatus: 'planned',
-                            canCreate: true,
-                            canRun: false,
-                            exchanges,
-                          },
-                        ]
-                      : strategies
-                  }
+                  items={strategies}
                   onCreate={(item) =>
                     setEditor({
                       config:
@@ -849,7 +651,7 @@ export default function App() {
                   <div className="section-line">
                     <span className="section-kicker">
                       <span className="tiny-dot" />
-                      {demoMode ? 'ДЕМОНСТРАЦИОННАЯ СТАТИСТИКА' : 'СТАТИСТИКА ЭКЗЕМПЛЯРОВ'}
+                      {'СТАТИСТИКА ЭКЗЕМПЛЯРОВ'}
                     </span>
                     {period}
                   </div>
@@ -872,7 +674,7 @@ export default function App() {
                         </div>
                       </div>
                       <Fact
-                        label={demoMode ? 'Демо запущено' : 'Запущено'}
+                        label={'Запущено'}
                         value={
                           <span className="positive">
                             {workspace.bots.filter((b) => b.status === 'running').length}
@@ -915,7 +717,6 @@ export default function App() {
                         key={b.id}
                         bot={b}
                         onOpen={() => openBot(b.id)}
-                        onStatus={() => setStatus(b, b.status === 'running' ? 'paused' : 'running')}
                         onDuplicate={() =>
                           setEditor({
                             config: {
@@ -929,7 +730,7 @@ export default function App() {
                     ))}
                     <button
                       className="add-bot-card"
-                      disabled={!demoMode && (loading || !strategies.length)}
+                      disabled={loading || !strategies.length}
                       onClick={() => setEditor({ config: defaultConfig })}
                     >
                       <span>
@@ -945,9 +746,7 @@ export default function App() {
                   </div>
                   <div className="footnote">
                     <ShieldCheck size={14} />{' '}
-                    {demoMode
-                      ? 'Данные хранятся в этом браузере. Демоистория: 30 сентября — 7 октября 2026.'
-                      : 'Настройки и журнал сохраняются в базе локального сервера.'}
+                    {'Настройки и журнал сохраняются в базе локального сервера.'}
                   </div>
                 </>
               )}
@@ -996,9 +795,6 @@ export default function App() {
                           key={b.id}
                           bot={b}
                           onOpen={() => openBot(b.id)}
-                          onStatus={() =>
-                            setStatus(b, b.status === 'running' ? 'paused' : 'running')
-                          }
                           onDuplicate={() =>
                             setEditor({
                               config: {
@@ -1026,7 +822,7 @@ export default function App() {
                         action={
                           <button
                             className="button primary"
-                            disabled={!demoMode && (loading || !strategies.length)}
+                            disabled={loading || !strategies.length}
                             onClick={() => setEditor({ config: defaultConfig })}
                           >
                             <Plus size={16} />
@@ -1042,9 +838,7 @@ export default function App() {
                 <>
                   <div className="section-line">
                     <span className="muted">
-                      {demoMode
-                        ? 'Вымышленные сделки · не торговый отчёт'
-                        : 'Сделки живой симуляции всех ботов · не реальная торговля'}
+                      {'Сделки живой симуляции всех ботов · не реальная торговля'}
                     </span>
                     {period}
                   </div>
@@ -1077,10 +871,8 @@ export default function App() {
                       <div>
                         <h3>Данные рабочего пространства</h3>
                         <p className="muted">
-                          {demoMode
-                            ? 'Настройки сохраняются в браузере.'
-                            : 'Настройки и журнал сохраняются сервером в SQLite.'}{' '}
-                          Секретные ключи здесь не запрашиваются.
+                          {'Настройки и журнал сохраняются сервером в SQLite.'} Секретные ключи
+                          здесь не запрашиваются.
                         </p>
                       </div>
                       <ShieldCheck size={25} className="positive" />
@@ -1088,20 +880,11 @@ export default function App() {
                     <div className="inline-note">
                       <FlaskConical size={18} />
                       <span>
-                        {demoMode
-                          ? 'Деморежим проверяет только интерфейс. Статусы не запускают алгоритм и не создают сделки.'
-                          : 'Сервер сохраняет настройки и записывает публичные потоки в разделе «Исследование рынка». Торговая стратегия и подключения к аккаунтам ещё не реализованы.'}{' '}
-                        Выбранный тикер — пример, а не рекомендация.
+                        Сервер записывает публичные потоки бирж и ведёт живую симуляцию ботов
+                        «Поводырь». Торговые подключения к аккаунтам ещё не созданы, реальные заявки
+                        не отправляются. Выбранный тикер — пример, а не рекомендация.
                       </span>
                     </div>
-                    {demoMode && (
-                      <button
-                        className="button danger"
-                        onClick={() => setConfirm({ type: 'reset' })}
-                      >
-                        Сбросить демопространство
-                      </button>
-                    )}
                   </div>
                 </>
               )}
@@ -1128,48 +911,28 @@ export default function App() {
             onSave={(c) => save(c, editor.id)}
             submitLabel="Создать бота"
             onCancel={() => setEditor(null)}
-            strategies={demoMode ? [] : strategies}
+            strategies={strategies}
             strategyLocked={!!editor.id}
           />
         </Modal>
       )}
       {importing && <ImportDialog onClose={() => setImporting(false)} onImport={(c) => save(c)} />}
       {confirm && (
-        <Modal
-          title={
-            confirm.type === 'delete'
-              ? 'Удалить бота?'
-              : confirm.type === 'reset'
-                ? 'Восстановить демопример?'
-                : 'Остановить демобота?'
-          }
-          onClose={() => setConfirm(null)}
-        >
+        <Modal title="Удалить бота?" onClose={() => setConfirm(null)}>
           <p className="confirm-text">
-            {confirm.type === 'delete'
-              ? 'Настройки этого экземпляра будут удалены из текущего пространства. При необходимости сначала экспортируйте настройки.'
-              : confirm.type === 'reset'
-                ? 'Все добавленные боты, настройки и журнал будут заменены исходным демонстрационным примером.'
-                : 'Демобот перейдёт в статус «Остановлен». Реальных позиций и ордеров в этой версии нет.'}
+            Настройки этого экземпляра будут удалены с сервера. При необходимости сначала
+            экспортируйте настройки.
           </p>
           <div className="modal-actions">
             <button className="button secondary" onClick={() => setConfirm(null)}>
               Отмена
             </button>
-            <button
-              className={`button ${confirm.type === 'stop' ? 'primary' : 'danger'}`}
-              disabled={busy}
-              onClick={() => void runConfirm()}
-            >
-              {confirm.type === 'delete'
-                ? 'Удалить'
-                : confirm.type === 'reset'
-                  ? 'Сбросить данные'
-                  : 'Остановить'}
+            <button className="button danger" disabled={busy} onClick={() => void runConfirm()}>
+              Удалить
             </button>
           </div>
         </Modal>
-      )}
+      )}{' '}
       {toast && <Toast message={toast} />}
     </div>
   );
@@ -1210,22 +973,18 @@ function Stats({
         note={`После комиссий · ${formatMoney(stat.fees)} USDT`}
       />
       <Stat
-        label={demoMode ? 'Выделено ботам' : 'Баланс · симуляция'}
-        value={formatMoney(demoMode ? budget : balance)}
+        label={'Баланс · симуляция'}
+        value={formatMoney(balance)}
         unit="USDT"
         icon={<Wallet size={18} />}
-        note={
-          demoMode
-            ? 'Виртуальный начальный баланс'
-            : `Выделено ${formatMoney(budget)} USDT, изменение — по закрытым сделкам симуляции`
-        }
+        note={`Выделено ${formatMoney(budget)} USDT, изменение — по закрытым сделкам симуляции`}
       />
       <Stat
         label="Прибыльных сделок"
         value={stat.winRate === null ? '—' : stat.winRate.toFixed(1).replace('.', ',')}
         unit={stat.winRate === null ? '' : '%'}
         icon={<Gauge size={18} />}
-        note={`${stat.count} закрытых ${demoMode ? 'демосделок' : 'сделок'}`}
+        note={`${stat.count} закрытых ${'сделок'}`}
       />
       <Stat
         label="Макс. просадка"
@@ -1267,7 +1026,6 @@ function Stat({
   );
 }
 function Performance({ trades, pnl }: { trades: Trade[]; pnl: number }) {
-  const simulated = !demoMode;
   return (
     <section className="panel performance">
       <div className="section-line">
@@ -1275,15 +1033,13 @@ function Performance({ trades, pnl }: { trades: Trade[]; pnl: number }) {
           Динамика результата{' '}
           <Tooltip
             text={
-              simulated
-                ? 'Накопленный результат закрытых сделок живой симуляции за выбранный период с учётом комиссий. Это не реальная торговля.'
-                : 'Накопленный результат закрытых вымышленных сделок за выбранный период с учётом комиссий.'
+              'Накопленный результат закрытых сделок живой симуляции за выбранный период с учётом комиссий. Это не реальная торговля.'
             }
           />
         </h3>
         <span className="chart-legend">
           <span className="tiny-dot" />
-          {simulated ? 'Чистый PnL · симуляция' : 'Чистый PnL'}
+          {'Чистый PnL · симуляция'}
         </span>
       </div>
       <div className="chart-summary">
@@ -1298,11 +1054,7 @@ function Performance({ trades, pnl }: { trades: Trade[]; pnl: number }) {
         <Empty
           icon={<TrendingUp size={26} />}
           title="Здесь появится кривая результата"
-          text={
-            simulated
-              ? 'Закрытых сделок симуляции за выбранный период нет.'
-              : 'У бота пока нет сделок за выбранный период.'
-          }
+          text={'Закрытых сделок симуляции за выбранный период нет.'}
         />
       )}
     </section>
@@ -1311,17 +1063,15 @@ function Performance({ trades, pnl }: { trades: Trade[]; pnl: number }) {
 function BotCard({
   bot,
   onOpen,
-  onStatus,
   onDuplicate,
 }: {
   bot: Bot;
   onOpen: () => void;
-  onStatus: () => void;
   onDuplicate: () => void;
 }) {
   const stat = metrics(bot.trades);
-  // Outside the demo every trade is simulated, so the card shows the simulated balance.
-  const balance = bot.budget + (demoMode ? 0 : stat.pnl);
+  // Every trade is simulated, so the card shows the simulated balance.
+  const balance = bot.budget + stat.pnl;
   return (
     <article className="panel bot-card">
       <div className="bot-card-header">
@@ -1360,7 +1110,7 @@ function BotCard({
           <strong>{stat.count}</strong>
         </div>
         <div>
-          <span>{demoMode ? 'Баланс' : 'Баланс · симуляция'}</span>
+          <span>{'Баланс · симуляция'}</span>
           <strong>
             {formatMoney(balance)} <small>USDT</small>
           </strong>
@@ -1369,7 +1119,7 @@ function BotCard({
       <div className="bot-card-footer">
         <StatusBadge status={bot.status} />
         <div>
-          {!demoMode && bot.strategy === 'leader-lag' ? (
+          {bot.strategy === 'leader-lag' ? (
             // Simulation controls live on the bot page, next to its live state.
             <button
               className="icon-button"
@@ -1382,12 +1132,11 @@ function BotCard({
           ) : (
             <button
               className="icon-button"
-              aria-label={`${bot.status === 'running' ? 'Приостановить' : 'Запустить демо'} ${bot.name}`}
-              disabled={!demoMode}
-              title={!demoMode ? 'Алгоритм ещё не реализован' : undefined}
-              onClick={onStatus}
+              aria-label={`Запуск недоступен: ${bot.name}`}
+              disabled
+              title="Алгоритм ещё не реализован"
             >
-              {bot.status === 'running' ? <Pause size={16} /> : <Play size={16} />}
+              <Play size={16} />
             </button>
           )}
           <button className="text-button" onClick={onOpen}>
@@ -1569,7 +1318,7 @@ function ConfigForm({
           </label>
         )}
         <label className="field">
-          <span>{demoMode ? 'Демо-баланс, USDT' : 'Выделенный баланс, USDT'}</span>
+          <span>{'Выделенный баланс, USDT'}</span>
           <input
             type="number"
             min="1"
@@ -1606,9 +1355,7 @@ function ConfigForm({
         <span>
           {leaderLag
             ? 'Бот работает только в живой симуляции: реальные заявки не отправляются, ключи не нужны. Биржа сигнала должна оказаться поводырём, иначе запуск остановится с объяснением. Комиссии — пример, укажите свои.'
-            : demoMode
-              ? 'Создаётся демобот.'
-              : 'Создаётся черновик экземпляра. Алгоритм ещё не реализован, запуск недоступен.'}{' '}
+            : 'Создаётся черновик экземпляра. Алгоритм ещё не реализован, запуск недоступен.'}{' '}
           {!leaderLag && 'Доступность инструмента, минимальный ордер и маржа ещё не проверяются.'}
         </span>
       </div>
@@ -1775,7 +1522,7 @@ function TradesTable({
       ]),
     ];
     download(
-      demoMode ? 'demo-trades.csv' : 'simulated-trades.csv',
+      'simulated-trades.csv',
       '\uFEFF' + rows.map((r) => r.map(csvCell).join(';')).join('\r\n'),
       'text/csv;charset=utf-8',
     );
@@ -1795,11 +1542,7 @@ function TradesTable({
         <Empty
           icon={<Activity size={26} />}
           title="Сделок пока нет"
-          text={
-            demoMode
-              ? 'После подключения движка здесь будут входы, выходы и результат каждой сделки.'
-              : 'Здесь появятся закрытые сделки живой симуляции бота.'
-          }
+          text={'Здесь появятся закрытые сделки живой симуляции бота.'}
         />
       ) : (
         <div className="table-scroll">
@@ -1858,9 +1601,9 @@ function TradesTable({
         </div>
       )}
       <div className="table-note">
-        {demoMode
-          ? 'Вымышленные исполнения.'
-          : 'Сделки живой симуляции: исполнения смоделированы по публичным данным, реальных ордеров не было.'}{' '}
+        {
+          'Сделки живой симуляции: исполнения смоделированы по публичным данным, реальных ордеров не было.'
+        }{' '}
         Комиссии и результаты указаны в USDT.
       </div>
     </section>

@@ -346,7 +346,7 @@ td,
   padding: 25px 35px 34px;
   flex: 1;
 }
-.demo-banner {
+.mode-banner {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -358,14 +358,14 @@ td,
   padding: 11px 13px;
   margin-bottom: 29px;
 }
-.demo-banner > svg {
+.mode-banner > svg {
   color: #b3a3da;
 }
-.demo-banner strong {
+.mode-banner strong {
   font-weight: 650;
   color: #c8c0e3;
 }
-.demo-banner button {
+.mode-banner button {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1703,7 +1703,7 @@ tbody tr:hover {
   .exchange-card .button {
     grid-column: 1/-1;
   }
-  .demo-banner button {
+  .mode-banner button {
     display: none;
   }
   .event {
@@ -1777,13 +1777,13 @@ tbody tr:hover {
   .main-shell main {
     padding: 18px 16px;
   }
-  .demo-banner {
+  .mode-banner {
     font-size: 9px;
     padding: 10px;
     align-items: flex-start;
     margin-bottom: 25px;
   }
-  .demo-banner > svg {
+  .mode-banner > svg {
     margin-top: 2px;
   }
   .page-heading {

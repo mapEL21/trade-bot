@@ -1,6 +1,20 @@
 import { expect, test } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { createDemo, exportConfig, STORAGE_KEY } from '../../src/model';
+import { exportConfig } from '../../src/model';
+
+const impulseBot = {
+  id: 'local',
+  name: 'Импульс · ARB',
+  exchange: 'Binance' as const,
+  symbol: 'ARBUSDT',
+  budget: 10,
+  lossLimit: 1,
+  strategy: 'impulse' as const,
+  strategyVersion: '0.1.0',
+  status: 'draft' as const,
+  trades: [],
+  createdAt: '2026-10-01T00:00:00Z',
+};
 
 test('catalog creates a server instance that survives a new browser, edits, exports and deletes', async ({
   page,
@@ -39,7 +53,6 @@ test('catalog creates a server instance that survives a new browser, edits, expo
     await expect(page.getByRole('heading', { name })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Алгоритм в разработке' })).toBeDisabled();
     await expect(page.getByText('Здесь появится кривая результата')).toBeVisible();
-    expect(await page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY)).toBeNull();
 
     const secondContext = await browser.newContext();
     const second = await secondContext.newPage();
@@ -80,13 +93,7 @@ test('catalog creates a server instance that survives a new browser, edits, expo
   }
 });
 
-test('server failure is explicit and does not fall back to browser demo or claim success', async ({
-  page,
-}) => {
-  await page.addInitScript(({ key, data }) => localStorage.setItem(key, data), {
-    key: STORAGE_KEY,
-    data: JSON.stringify(createDemo()),
-  });
+test('server failure is explicit and does not claim success', async ({ page }) => {
   await page.route('**/api/v1/**', (route) => route.abort());
   await page.goto('/');
   await expect(page.getByRole('alert')).toContainText('Сервер недоступен');
@@ -107,7 +114,7 @@ test('server failure is explicit and does not fall back to browser demo or claim
   await page.getByRole('button', { name: 'Импорт бота', exact: true }).click();
   await page
     .getByLabel('Или вставьте содержимое JSON')
-    .fill(exportConfig({ ...createDemo().bots[0], name: 'Не должен сохраниться' }));
+    .fill(exportConfig({ ...impulseBot, name: 'Не должен сохраниться' }));
   await page.getByRole('button', { name: 'Импортировать', exact: true }).click();
   await expect(page.getByRole('dialog').getByRole('alert')).toContainText(
     'База временно недоступна',

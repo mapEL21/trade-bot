@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, Database, Radio, Square, Play, Clock3, ChevronDown } from 'lucide-react';
+import { Database, Radio, Square, Play, Clock3, ChevronDown } from 'lucide-react';
 import { api, type ResearchMarketList } from './api';
 import { MarketPairPicker, marketSymbol } from './MarketPairPicker';
 import { ResearchAnalysis } from './ResearchAnalysis';
@@ -91,7 +91,7 @@ const price = (s: string) => Number(s).toLocaleString('ru-RU', { maximumFraction
 const duration = (n: number) =>
   `${Math.floor(n / 60)}:${String(Math.floor(n % 60)).padStart(2, '0')}`;
 
-export function Research({ demo }: { demo: boolean }) {
+export function Research() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [receipt, setReceipt] = useState<number | null>(null);
   const [now, setNow] = useState(() => performance.now());
@@ -113,7 +113,6 @@ export function Research({ demo }: { demo: boolean }) {
   const sessionActive = useRef(false);
 
   useEffect(() => {
-    if (demo) return;
     const controller = new AbortController();
     setCatalogLoading(true);
     setCatalogError('');
@@ -142,14 +141,10 @@ export function Research({ demo }: { demo: boolean }) {
         if (!controller.signal.aborted) setCatalogLoading(false);
       });
     return () => controller.abort();
-  }, [demo, exchange, sourceExchange, reloadCatalog]);
+  }, [exchange, sourceExchange, reloadCatalog]);
 
   useEffect(() => {
     mounted.current = true;
-    if (demo)
-      return () => {
-        mounted.current = false;
-      };
     const source = new EventSource('/api/v1/research/stream');
     let lastPayload: string | null = null;
     let timer: ReturnType<typeof setInterval> | undefined;
@@ -201,21 +196,8 @@ export function Research({ demo }: { demo: boolean }) {
       clearInterval(timer);
       clearTimeout(watchdog);
     };
-  }, [demo]);
+  }, []);
 
-  if (demo)
-    return (
-      <section className="panel research-empty">
-        <Radio size={30} aria-hidden="true" />
-        <h2>Исследование работает на сервере</h2>
-        <p>
-          Откройте серверное пространство, чтобы получать реальные котировки и записывать рынок.
-        </p>
-        <a className="button primary" href="/">
-          Открыть серверное пространство <ArrowRight size={16} />
-        </a>
-      </section>
-    );
   const delay = receipt === null || !snapshot?.active ? 0 : Math.max(0, now - receipt);
   const offline = streamError || (snapshot?.active === true && delay > 3000);
   const ready = snapshot !== null && !offline;
