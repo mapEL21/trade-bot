@@ -171,6 +171,33 @@ public class ResearchTests
         cancel.Cancel();
     }
 
+    [Fact]
+    public async Task PaperApiRunsOneSessionOnTheRecorderAndStopsDuringCalibration()
+    {
+        var runner = new ControlledRunner(withManifest: true);
+        using var factory = Factory(runner);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-TradeBot-Client", "web");
+        var settings = new ReplaySettings(ExecutionModel: "bbo");
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/paper", new PaperRequest("ARB", "hyperliquid", "binance", 100, settings))).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/paper", new PaperRequest("ARB", "hyperliquid", "binance", 600, settings, DelayMs: 0))).StatusCode);
+        Assert.Equal(0, runner.Runs);
+        var start = await client.PostAsJsonAsync("/api/v1/paper", new PaperRequest("ARB", "hyperliquid", "binance", 600, settings));
+        Assert.Equal(HttpStatusCode.Accepted, start.StatusCode);
+        await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/v1/paper", new PaperRequest("ARB", "hyperliquid", "binance", 600, settings))).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/v1/research", new ResearchRequest("ARB", 60, 5))).StatusCode);
+        PaperSnapshot paper;
+        do paper = (await client.GetFromJsonAsync<PaperSnapshot>("/api/v1/paper"))!; while (paper.State == "starting");
+        Assert.Equal("calibrating", paper.State); Assert.False(paper.ExecutionEnabled);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsync($"/api/v1/paper/{Guid.NewGuid()}/stop", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/paper/{paper.Id}/stop", null)).StatusCode);
+        await runner.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        do paper = (await client.GetFromJsonAsync<PaperSnapshot>("/api/v1/paper", wait.Token))!; while (paper.State == "calibrating");
+        Assert.Equal("stopped", paper.State); Assert.Null(paper.Result); Assert.Equal(1, runner.Runs);
+    }
+
     private static WebApplicationFactory<Program> Factory(IRecordingRunner runner) => new ResearchFactory(runner);
 
     private sealed class ResearchFactory(IRecordingRunner runner) : WebApplicationFactory<Program>
@@ -195,7 +222,7 @@ public class ResearchTests
         }
     }
 
-    private sealed class ControlledRunner : IRecordingRunner
+    private sealed class ControlledRunner(bool withManifest = false) : IRecordingRunner
     {
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Finished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -203,7 +230,14 @@ public class ResearchTests
         public async Task<int> RunAsync(RecorderOptions options, IRecordingObserver observer, CancellationToken ct)
         {
             Interlocked.Increment(ref Runs);
-            observer.Started("test-data"); Started.TrySetResult();
+            var directory = "test-data";
+            if (withManifest)
+            {
+                directory = Path.Combine(Path.GetTempPath(), "trade-bot-paper-tests-" + Guid.NewGuid());
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(Path.Combine(directory, "manifest.json"), "{\"stopwatchFrequency\":1000}");
+            }
+            observer.Started(directory); Started.TrySetResult();
             try { await Task.Delay(Timeout.Infinite, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
             observer.Finished(new(DateTimeOffset.UtcNow, "completed", null, 0, 0, 0, [], new { }));

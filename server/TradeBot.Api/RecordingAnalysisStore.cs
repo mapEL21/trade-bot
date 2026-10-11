@@ -156,8 +156,7 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
             var report = await Task.Run(async () =>
             {
                 var points = new List<MarketAnalysis.Input>();
-                var ids = new[] { RecorderOptions.QuoteFeedId(recording.SourceExchange), RecorderOptions.QuoteFeedId(recording.Exchange) };
-                var tradeIds = new[] { RecorderOptions.TradeFeedId(recording.SourceExchange), RecorderOptions.TradeFeedId(recording.Exchange) };
+                var parser = new RecordingEventParser(recording.Coin, recording.SourceExchange, recording.Exchange, depth);
                 ReplayMarketData? market = null;
                 if (depth)
                 {
@@ -179,33 +178,24 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
                         throw new InvalidDataException($"Некорректное событие в строке {events}.");
                     first = Math.Min(first, item.ReceivedTicks); last = Math.Max(last, item.ReceivedTicks);
                     if (item.Kind == "gap") gaps++;
-                    if (market is not null && tradeIds.Contains(item.Source))
+                    var parsed = parser.Parse(item, events);
+                    if (parsed.Trade is { } trade)
                     {
-                        var venue = Array.IndexOf(tradeIds, item.Source);
-                        // Connection events reset the trade stream; for Hyperliquid they are shared with quotes and fall through.
-                        if (item.Kind is "connecting" or "connected" or "gap" or "invalid")
-                            market.Trades!.Add(new(item.ReceivedTicks, events, venue, item.Connection, null));
-                        else if (item.Kind == "market" && ReplayTradeParser.TryRead(item, recording.Coin, out var prints))
-                        {
-                            market.Trades!.Add(new(item.ReceivedTicks, events, venue, item.Connection, prints));
-                            levels += prints?.Length ?? 0;
-                            if (market.Books.Count + market.Trades.Count > 300000 || levels > 2_000_000) throw new InvalidDataException("Лимит симулятора — 300 тысяч сообщений стакана и сделок и 2 миллиона уровней. Используйте более короткую запись.");
-                            continue;
-                        }
+                        market!.Trades!.Add(trade);
+                        levels += trade.Prints?.Length ?? 0;
                     }
-                    if (!ids.Contains(item.Source)) continue;
-                    if (market is not null && item.Kind == "market" && ReplayDepthParser.TryRead(item, recording.Coin, out var book))
+                    if (parsed.Book is { } book)
                     {
-                        market.Books.Add(new(item.ReceivedTicks, events, Array.IndexOf(ids, item.Source), item.Connection, book));
-                        levels += (book?.Bids.Length ?? 0) + (book?.Asks.Length ?? 0);
-                        if (market.Books.Count > 300000 || levels > 2_000_000) throw new InvalidDataException("Лимит симулятора — 300 тысяч сообщений стакана и 2 миллиона уровней. Используйте более короткую запись.");
-                        continue;
+                        market!.Books.Add(book);
+                        levels += (book.Update?.Bids.Length ?? 0) + (book.Update?.Asks.Length ?? 0);
                     }
-                    MarketQuote? quote = null;
-                    if (item.Kind is not ("connecting" or "connected" or "gap" or "invalid")
-                        && (item.Kind != "market" || !MarketQuote.TryRead(item, out quote))) continue;
-                    points.Add(new(item.ReceivedTicks, events, item.Source, item.Connection, item.Kind, quote));
-                    if (points.Count > MarketAnalysis.MaxPoints) throw new InvalidDataException("Лимит анализатора — 300 тысяч обновлений котировок. Используйте более короткую запись.");
+                    if (market is not null && (market.Books.Count + market.Trades!.Count > 300000 || levels > 2_000_000))
+                        throw new InvalidDataException("Лимит симулятора — 300 тысяч сообщений стакана и сделок и 2 миллиона уровней. Используйте более короткую запись.");
+                    if (parsed.Point is { } point)
+                    {
+                        points.Add(point);
+                        if (points.Count > MarketAnalysis.MaxPoints) throw new InvalidDataException("Лимит анализатора — 300 тысяч обновлений котировок. Используйте более короткую запись.");
+                    }
                 }
                 if (events == 0) throw new InvalidDataException("В записи нет событий.");
                 return calculate(new(recording, frequency, first, last, events, gaps, points, market), token);

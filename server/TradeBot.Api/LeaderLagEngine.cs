@@ -7,6 +7,12 @@ namespace TradeBot.Api;
 public sealed record EngineEvent(double Ms, int Venue, MarketQuote? Quote, bool Reset, int Sequence, string Connection, bool IsBook = false,
     ReplayBookUpdate? Book = null, bool IsTrade = false, ReplayPrint[]? Prints = null, bool IsClock = false);
 public sealed record EngineSetup(int Leader, decimal Basis, ReplaySettings Settings, int DelayMs, bool Counter, ReplayInstrument? Instrument);
+// Receives every decision and closed trade as it happens (the report keeps only the first 500); called on the engine thread.
+public interface IEngineObserver
+{
+    void Decision(ReplayDecision decision);
+    void Trade(ReplayTrade trade);
+}
 
 internal sealed class VenueQuotes
 {
@@ -62,7 +68,7 @@ public static class LeaderLagEngine
     private sealed record Resting(int Sign, double Live, decimal Price, decimal Quantity, double Expires, double? CancelAt, decimal Residual,
         decimal QueueAhead = 0, decimal Traded = 0);
     // Events must arrive in time order. A null end means "the last event seen", which is how a live session stops.
-    public static ReplayScenario Run(IEnumerable<EngineEvent> events, EngineSetup setup, CancellationToken ct, double? end = null)
+    public static ReplayScenario Run(IEnumerable<EngineEvent> events, EngineSetup setup, CancellationToken ct, double? end = null, IEngineObserver? observer = null)
     {
         var (leader, basis, s, delay, counter, instrument) = setup; double lastMs = 0;
         var q = new[] { new VenueQuotes(), new VenueQuotes() }; var journal = new List<ReplayDecision>(); var trades = new List<ReplayTrade>();
@@ -72,7 +78,10 @@ public static class LeaderLagEngine
         var maker = s.EntryOrder == "maker"; Resting? resting = null;
         decimal sum = 0, peak = 0, drawdown = 0, closedNet = 0; double nextSignal = s.CalibrationSeconds * 1000; bool halted = false;
         void Log(double at, string action, string reason, int sign = 0, decimal? price = null, decimal? net = null, decimal? quantity = null)
-        { journalCount++; if (journal.Count < 500) journal.Add(new(at / 1000, action, reason, sign == 0 ? null : sign > 0 ? "long" : "short", price, net, quantity)); }
+        {
+            var decision = new ReplayDecision(at / 1000, action, reason, sign == 0 ? null : sign > 0 ? "long" : "short", price, net, quantity);
+            journalCount++; if (journal.Count < 500) journal.Add(decision); observer?.Decision(decision);
+        }
         bool Fresh(double at) => q.All(x => x.Fresh(at, s.MaxAgeMs));
         decimal Residual() => (q[leader].Current!.Mid / q[1 - leader].Current!.Mid - 1) * 10000 - basis;
         decimal Price(int sign, bool exit)
@@ -170,8 +179,9 @@ public static class LeaderLagEngine
                     var net = Net(price);
                     decimal? fees = depth ? total * (position!.Price * (position.EntryFeeBps ?? s.FeeBps) + price * s.FeeBps) / 10000 : null;
                     decimal? cash = depth ? total * position!.Sign * (price - position.Price) - fees : null;
-                    trades.Add(new(position!.At / 1000, due / 1000, order.Sign > 0 ? "long" : "short", position.Price, price, net, order.Reason,
-                        depth ? total : null, cash, fees));
+                    var closed = new ReplayTrade(position!.At / 1000, due / 1000, order.Sign > 0 ? "long" : "short", position.Price, price, net, order.Reason,
+                        depth ? total : null, cash, fees);
+                    trades.Add(closed); observer?.Trade(closed);
                     closedNet += cash ?? 0;
                     sum += depth ? cash!.Value / s.OrderNotional * 10000 : net; peak = Math.Max(peak, sum); drawdown = Math.Max(drawdown, peak - sum);
                     Log(due, "выход", order.Reason, order.Sign, price, net, depth ? total : null); position = null;

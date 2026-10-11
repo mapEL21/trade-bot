@@ -24,6 +24,8 @@
 - `MarketAnalysis.cs` — оценка качества данных, реакции цены и условных BBO-сделок.
 - `StrategyReplay.cs` — воспроизведение записи: калибровка (`SelectLeader`, `NormalBasis`) и 8 сценариев.
 - `LeaderLagEngine.cs` — общий движок решений и виртуального исполнения `leader-lag`: получает поток `EngineEvent` (котировки, стакан, сделки, разрывы, ход времени) и используется и для записей, и для будущей живой симуляции. `QuoteNormalizer` — потоковый фильтр котировок. Правила стратегии менять только здесь, чтобы replay и живой режим не расходились.
+- `RecordingEvents.cs` — `RecordingEventParser`: разбор записанного события в котировку/стакан/сделку, общий для replay и живой симуляции.
+- `PaperTrading.cs` — живая симуляция: `PaperSession` получает события от регистратора, держит их 0,5 с для порядка по времени получения, калибруется как replay и ведёт `LeaderLagEngine`; `PaperTrading` — одна сессия поверх регистратора, API `/api/v1/paper`. Подробно — `docs/PAPER_TRADING.md`. Инвариант: живой запуск = replay его же записи (тесты `PaperTradingTests`).
 - `ReplayDepth.cs` — новый разбор стакана, правила размера заявки и модель исполнения. Детали — `docs/STRATEGY_REPLAY.md`.
 - `server/TradeBot.Api.Tests/` — xUnit, включая API-тесты. `tests/browser/research.spec.ts` — Playwright, мобильная ширина и axe. `tests/*.test.ts` — модель интерфейса.
 

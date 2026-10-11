@@ -20,7 +20,8 @@ public sealed record ResearchSnapshot(string? Id, string State, bool Active, str
     public string? SourceSymbol { get; init; }
 }
 
-public sealed class ResearchSession(string id, RecorderOptions options) : IRecordingObserver, IDisposable
+// An optional tap (the live paper session) sees the same callbacks after this session's own projection, outside its lock.
+public sealed class ResearchSession(string id, RecorderOptions options, IRecordingObserver? tap = null) : IRecordingObserver, IDisposable
 {
     private sealed class FeedState
     {
@@ -54,9 +55,16 @@ public sealed class ResearchSession(string id, RecorderOptions options) : IRecor
             if (state != "stopping") state = "recording";
             Add("recorder", "Запись публичных данных началась.");
         }
+        tap?.Started(path);
     }
 
     public void Recorded(CaptureEvent item, long totalWritten, long totalBytes)
+    {
+        Project(item, totalWritten, totalBytes);
+        tap?.Recorded(item, totalWritten, totalBytes);
+    }
+
+    private void Project(CaptureEvent item, long totalWritten, long totalBytes)
     {
         // Projection runs in the file writer, outside WebSocket ingestion.
         lock (gate)
@@ -110,6 +118,7 @@ public sealed class ResearchSession(string id, RecorderOptions options) : IRecor
             endedTicks = Stopwatch.GetTimestamp();
             Add("recorder", report.Status == "failed" ? "Запись завершилась с ошибкой." : "Приём остановлен, очередь дописана в файл.");
         }
+        tap?.Finished(report);
     }
 
     public void Fail(string message)
@@ -121,6 +130,7 @@ public sealed class ResearchSession(string id, RecorderOptions options) : IRecor
             endedTicks = Stopwatch.GetTimestamp();
             Add("recorder", message);
         }
+        tap?.Finished(new(DateTimeOffset.UtcNow, "failed", message, 0, written, bytes, [], new { }));
     }
 
     public void EndCancelled()
@@ -132,6 +142,7 @@ public sealed class ResearchSession(string id, RecorderOptions options) : IRecor
             endedTicks = Stopwatch.GetTimestamp();
             Add("recorder", "Сессия остановлена до начала записи.");
         }
+        tap?.Finished(new(DateTimeOffset.UtcNow, "stopped", null, 0, 0, 0, [], new { }));
     }
 
     public void RequestStop()
@@ -199,7 +210,7 @@ public sealed class MarketResearch(IRecordingRunner runner, IConfiguration confi
         lock (gate) return current?.Snapshot() ?? new(null, "idle", false, null, null, 0, 0, 0, 0, 0, null, null, null, [], []);
     }
 
-    public string Start(ResearchRequest request)
+    public string Start(ResearchRequest request, IRecordingObserver? tap = null)
     {
         var root = configuration["Market:Path"] ?? Path.Combine(environment.ContentRootPath, "data", "market");
         var options = RecorderOptions.Parse(["--coin", request.Coin ?? "", "--symbol", MarketCatalog.Symbol(request.Exchange, request.Coin ?? ""), "--exchange", request.Exchange, "--source-exchange", request.SourceExchange,
@@ -208,7 +219,7 @@ public sealed class MarketResearch(IRecordingRunner runner, IConfiguration confi
         {
             if (shuttingDown || task is { IsCompleted: false }) throw new InvalidOperationException("Уже идёт запись или её остановка. Обновите состояние.");
             current?.Dispose();
-            var session = new ResearchSession(Guid.NewGuid().ToString(), options);
+            var session = new ResearchSession(Guid.NewGuid().ToString(), options, tap);
             current = session;
             task = Task.Run(async () =>
             {

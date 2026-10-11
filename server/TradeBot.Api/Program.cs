@@ -22,6 +22,7 @@ builder.Services.AddSingleton<StrategyCatalog>();
 builder.Services.AddSingleton<IRecordingRunner, RecordingRunner>();
 builder.Services.AddSingleton<MarketResearch>();
 builder.Services.AddSingleton<RecordingAnalysisStore>();
+builder.Services.AddSingleton<PaperTrading>();
 builder.Services.AddSingleton(_ => new ResearchMarkets(new HttpClient { Timeout = TimeSpan.FromSeconds(8) }));
 builder.Services.AddHostedService(services => services.GetRequiredService<MarketResearch>());
 builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(
@@ -123,6 +124,16 @@ api.MapGet("/research/stream", async (HttpContext context, MarketResearch resear
 api.MapGet("/strategies", (StrategyCatalog catalog) => Results.Ok(catalog.Items));
 api.MapGet("/research/recordings/{id}/replay", (string id, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReadReplayAsync(id, ct)));
 api.MapPost("/research/recordings/{id}/replay", (string id, ReplaySettings settings, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReplayAsync(id, settings, ct)));
+api.MapGet("/paper", (PaperTrading paper) => Results.Ok(paper.Snapshot()));
+api.MapPost("/paper", (PaperRequest request, PaperTrading paper) =>
+{
+    try { return Results.Accepted("/api/v1/paper", new { id = paper.Start(request) }); }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+    catch (InvalidOperationException e) { return Results.Problem(statusCode: 409, title: e.Message); }
+});
+api.MapPost("/paper/{id:guid}/stop", (Guid id, PaperTrading paper) => paper.Stop(id.ToString())
+    ? Results.Accepted("/api/v1/paper", new { id = id.ToString() })
+    : Results.Problem(statusCode: 409, title: "Симуляция уже сменилась. Обновите состояние перед остановкой."));
 api.MapGet("/research/series/replay", (RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReadSeriesAsync(ct)));
 api.MapPost("/research/series/replay", (SeriesRequest request, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.SeriesAsync(request, ct)));
 api.MapGet("/workspace", async (IWorkspaceStore store, CancellationToken ct) => Results.Ok(await store.ReadAsync(ct)));
