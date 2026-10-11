@@ -56,6 +56,20 @@ const trade = {
   netQuote: 0.0045,
 };
 
+// A closed paper trade as the server returns it inside the bot: net +1.00 USDT after fees.
+const simulatedTrade = () => ({
+  id: 'run-1-0',
+  at: new Date(Date.now() - 3600000).toISOString(),
+  side: 'long',
+  gross: 1.2,
+  fee: 0.2,
+  entry: 0.4012,
+  exit: 0.4019,
+  quantity: 24,
+  runId: 'run-1',
+  simulated: true,
+});
+
 async function server(page: Page) {
   const state = { status: 'draft', started: 0, paused: 0, stopped: 0, created: null as unknown };
   await page.route('**/api/v1/strategies', (route) => route.fulfill({ json: catalog }));
@@ -90,7 +104,11 @@ async function server(page: Page) {
   );
   await page.route('**/api/v1/workspace', (route) =>
     route.fulfill({
-      json: { schemaVersion: 1, bots: [{ ...bot, status: state.status }], events: [] },
+      json: {
+        schemaVersion: 1,
+        bots: [{ ...bot, status: state.status, trades: state.stopped ? [simulatedTrade()] : [] }],
+        events: [],
+      },
     }),
   );
   await page.route('**/api/v1/bots', (route) => {
@@ -272,6 +290,12 @@ test('bot page starts, shows, pauses and stops a live paper run', async ({ page 
   await page.getByRole('button', { name: 'Остановить', exact: true }).click();
   await expect(page.getByRole('table', { name: 'История запусков' })).toContainText('Завершён');
   await expect(page.getByRole('table', { name: 'Сделки последнего запуска' })).toBeVisible();
+  // The finished run's trade now counts in the bot's simulated balance, chart and history.
+  await expect(page.getByText('СТАТИСТИКА СИМУЛЯЦИИ · НЕ РЕАЛЬНАЯ ТОРГОВЛЯ')).toBeVisible();
+  await expect(page.locator('.stat', { hasText: 'Баланс · симуляция' })).toContainText('21,00');
+  await expect(page.locator('.stat', { hasText: 'Чистый результат' })).toContainText('+1,00');
+  await expect(page.getByRole('img', { name: /накопленного результата/ })).toBeVisible();
+  await expect(page.locator('.trades-panel')).toContainText('SIM');
   expect(state.stopped).toBe(1);
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

@@ -158,8 +158,19 @@ api.MapPost("/research/series/replay", (SeriesRequest request, RecordingAnalysis
 api.MapGet("/workspace", async (IWorkspaceStore store, PaperRunStore runs, PaperTrading paper, CancellationToken ct) =>
 {
     var workspace = await store.ReadAsync(ct);
-    var latest = await runs.LatestByBotAsync(ct);
-    return Results.Ok(workspace with { Bots = workspace.Bots.Select(b => b with { Status = paper.StatusFor(b.Id, latest.GetValueOrDefault(b.Id)) }).ToArray() });
+    var byBot = await runs.AllByBotAsync(ct);
+    return Results.Ok(workspace with
+    {
+        Bots = workspace.Bots.Select(b =>
+        {
+            var botRuns = byBot.GetValueOrDefault(b.Id) ?? [];
+            return b with
+            {
+                Status = paper.StatusFor(b.Id, botRuns.FirstOrDefault()),
+                Trades = botRuns.SelectMany(BotTrade.FromRun).OrderBy(t => t.At, StringComparer.Ordinal).TakeLast(10000).ToArray()
+            };
+        }).ToArray()
+    });
 });
 api.MapGet("/bots/{id:guid}/runs", async (Guid id, PaperRunStore runs, CancellationToken ct) => Results.Ok(await runs.ListAsync(id.ToString(), 20, ct)));
 api.MapPost("/bots", async (BotConfig config, StrategyCatalog catalog, IWorkspaceStore store, CancellationToken ct) =>

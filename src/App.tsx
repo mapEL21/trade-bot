@@ -40,6 +40,7 @@ import { Chart, DownloadButton, Empty, Modal, SelectField, Toast, Tooltip } from
 import {
   createDemo,
   csvCell,
+  DEMO_NOW,
   defaultLeaderLagSettings,
   exchanges,
   exportConfig,
@@ -105,6 +106,9 @@ function leaderLagConfig(version: string): BotConfig {
 // Outside the demo a running bot is a live paper simulation, never real trading.
 const statusLabel = (status: Status) =>
   !demoMode && status === 'running' ? 'Симуляция идёт' : statusLabels[status];
+// Fees and thresholds are stored in basis points and shown in percent.
+const percent = (bps: number) =>
+  `${(bps / 100).toLocaleString('ru-RU', { maximumFractionDigits: 6 })}%`;
 const strategyName = (bot: BotConfig) => (bot.strategy === 'leader-lag' ? 'Поводырь' : 'Импульс');
 function download(name: string, text: string, type = 'application/json') {
   const url = URL.createObjectURL(new Blob([text], { type }));
@@ -157,9 +161,13 @@ export default function App() {
   const allTrades = workspace.bots.flatMap((b) =>
     b.trades.map((t) => ({ ...t, botName: b.name, symbol: b.symbol })),
   );
-  const trades = periodTrades(bot?.trades ?? allTrades, days);
+  // The demo history is fixed in the past; server statistics count back from now.
+  const now = demoMode ? DEMO_NOW : Date.now();
+  const trades = periodTrades(bot?.trades ?? allTrades, days, now);
   const stat = metrics(trades);
   const budget = bot?.budget ?? workspace.bots.reduce((s, b) => s + b.budget, 0);
+  // Allocated balance plus every closed simulated trade so far, whatever the period shown.
+  const balance = budget + metrics(bot?.trades ?? allTrades).pnl;
   const visibleBots = workspace.bots.filter(
     (b) =>
       `${b.name} ${b.symbol} ${b.exchange}`.toLowerCase().includes(query.toLowerCase()) &&
@@ -648,35 +656,51 @@ export default function App() {
                 bot.parameters && (
                   <>
                     <PaperRun bot={bot} onChanged={quietRefresh} />
-                    <div className="panel bot-facts">
-                      <h3>Параметры бота</h3>
-                      <Fact label="Стратегия" value="Поводырь → отстающая биржа" />
-                      <Fact label="Версия" value={bot.strategyVersion} />
-                      <Fact
-                        label="Биржа бота / сигнала"
-                        value={`${bot.exchange} / ${bot.parameters.signalExchange}`}
-                      />
-                      <Fact
-                        label="Номинал заявки"
-                        value={`${formatMoney(bot.parameters.settings.orderNotional)} USDT`}
-                      />
-                      <Fact label="Лимит убытка" value={`${formatMoney(bot.lossLimit)} USDT`} />
-                      <Fact
-                        label="Вход · исполнение"
-                        value={`${bot.parameters.settings.entryOrder === 'maker' ? 'maker' : 'taker'} · ${bot.parameters.settings.executionModel === 'depth' ? 'по стакану' : 'BBO'} · ${bot.parameters.delayMs} мс`}
-                      />
-                      <Fact
-                        label="Комиссии taker / maker"
-                        value={`${bot.parameters.settings.feeBps} / ${bot.parameters.settings.makerFeeBps} б.п.`}
-                      />
-                      <div className="inline-note">
-                        <ShieldCheck size={17} />
-                        <span>
-                          Лимит убытка и номинал применяются в симуляции. Реальных позиций и ордеров
-                          нет.
-                        </span>
+                    <div className="section-line">
+                      <span className="section-kicker">
+                        <span className="tiny-dot" />
+                        СТАТИСТИКА СИМУЛЯЦИИ · НЕ РЕАЛЬНАЯ ТОРГОВЛЯ
+                      </span>
+                      {period}
+                    </div>
+                    <Stats stat={stat} budget={budget} balance={balance} />
+                    <div className="overview-grid">
+                      <Performance trades={trades} pnl={stat.pnl} />
+                      <div className="panel bot-facts">
+                        <h3>Параметры бота</h3>
+                        <Fact label="Стратегия" value="Поводырь → отстающая биржа" />
+                        <Fact label="Версия" value={bot.strategyVersion} />
+                        <Fact
+                          label="Биржа бота / сигнала"
+                          value={`${bot.exchange} / ${bot.parameters.signalExchange}`}
+                        />
+                        <Fact
+                          label="Размер заявки"
+                          value={
+                            bot.parameters.settings.orderQuantity !== null
+                              ? `${bot.parameters.settings.orderQuantity} ${bot.symbol.replace(/USDT$/, '')}`
+                              : `${formatMoney(bot.parameters.settings.orderNotional)} USDT`
+                          }
+                        />
+                        <Fact label="Лимит убытка" value={`${formatMoney(bot.lossLimit)} USDT`} />
+                        <Fact
+                          label="Вход · исполнение"
+                          value={`${bot.parameters.settings.entryOrder === 'maker' ? 'maker' : 'taker'} · ${bot.parameters.settings.executionModel === 'depth' ? 'по стакану' : 'BBO'} · ${bot.parameters.delayMs} мс`}
+                        />
+                        <Fact
+                          label="Комиссии taker / maker"
+                          value={`${percent(bot.parameters.settings.feeBps)} / ${percent(bot.parameters.settings.makerFeeBps)}`}
+                        />
+                        <div className="inline-note">
+                          <ShieldCheck size={17} />
+                          <span>
+                            Лимит убытка и размер заявки применяются в симуляции. Реальных позиций и
+                            ордеров нет.
+                          </span>
+                        </div>
                       </div>
                     </div>
+                    <TradesTable trades={trades} botName={bot.name} symbol={bot.symbol} />
                   </>
                 )}
               {tab === 'overview' && (demoMode || bot.strategy !== 'leader-lag') && (
@@ -687,7 +711,7 @@ export default function App() {
                     </span>
                     {period}
                   </div>
-                  <Stats stat={stat} budget={budget} />
+                  <Stats stat={stat} budget={budget} balance={balance} />
                   <div className="overview-grid">
                     <Performance trades={trades} pnl={stat.pnl} />
                     <div className="panel bot-facts">
@@ -829,7 +853,7 @@ export default function App() {
                     </span>
                     {period}
                   </div>
-                  <Stats stat={stat} budget={budget} />
+                  <Stats stat={stat} budget={budget} balance={balance} />
                   <div className="overview-grid">
                     <Performance trades={trades} pnl={stat.pnl} />
                     <div className="panel workspace-health">
@@ -1020,11 +1044,11 @@ export default function App() {
                     <span className="muted">
                       {demoMode
                         ? 'Вымышленные сделки · не торговый отчёт'
-                        : 'Исполнений ещё нет — торговый движок не подключён'}
+                        : 'Сделки живой симуляции всех ботов · не реальная торговля'}
                     </span>
                     {period}
                   </div>
-                  <TradesTable trades={periodTrades(allTrades, days)} showBot />
+                  <TradesTable trades={periodTrades(allTrades, days, now)} showBot />
                 </>
               )}
               {page === 'events' && <Events events={workspace.events} />}
@@ -1166,7 +1190,15 @@ function Fact({ label, value }: { label: string; value: ReactNode }) {
     </div>
   );
 }
-function Stats({ stat, budget }: { stat: ReturnType<typeof metrics>; budget: number }) {
+function Stats({
+  stat,
+  budget,
+  balance,
+}: {
+  stat: ReturnType<typeof metrics>;
+  budget: number;
+  balance: number;
+}) {
   return (
     <div className="stats-grid">
       <Stat
@@ -1178,11 +1210,15 @@ function Stats({ stat, budget }: { stat: ReturnType<typeof metrics>; budget: num
         note={`После комиссий · ${formatMoney(stat.fees)} USDT`}
       />
       <Stat
-        label="Выделено ботам"
-        value={formatMoney(budget)}
+        label={demoMode ? 'Выделено ботам' : 'Баланс · симуляция'}
+        value={formatMoney(demoMode ? budget : balance)}
         unit="USDT"
         icon={<Wallet size={18} />}
-        note={demoMode ? 'Виртуальный начальный баланс' : 'Планируемый баланс экземпляров'}
+        note={
+          demoMode
+            ? 'Виртуальный начальный баланс'
+            : `Выделено ${formatMoney(budget)} USDT, изменение — по закрытым сделкам симуляции`
+        }
       />
       <Stat
         label="Прибыльных сделок"
@@ -1231,16 +1267,23 @@ function Stat({
   );
 }
 function Performance({ trades, pnl }: { trades: Trade[]; pnl: number }) {
+  const simulated = !demoMode;
   return (
     <section className="panel performance">
       <div className="section-line">
         <h3>
           Динамика результата{' '}
-          <Tooltip text="Накопленный результат закрытых вымышленных сделок за выбранный период с учётом комиссий." />
+          <Tooltip
+            text={
+              simulated
+                ? 'Накопленный результат закрытых сделок живой симуляции за выбранный период с учётом комиссий. Это не реальная торговля.'
+                : 'Накопленный результат закрытых вымышленных сделок за выбранный период с учётом комиссий.'
+            }
+          />
         </h3>
         <span className="chart-legend">
           <span className="tiny-dot" />
-          Чистый PnL
+          {simulated ? 'Чистый PnL · симуляция' : 'Чистый PnL'}
         </span>
       </div>
       <div className="chart-summary">
@@ -1255,7 +1298,11 @@ function Performance({ trades, pnl }: { trades: Trade[]; pnl: number }) {
         <Empty
           icon={<TrendingUp size={26} />}
           title="Здесь появится кривая результата"
-          text="У бота пока нет сделок за выбранный период."
+          text={
+            simulated
+              ? 'Закрытых сделок симуляции за выбранный период нет.'
+              : 'У бота пока нет сделок за выбранный период.'
+          }
         />
       )}
     </section>
@@ -1273,6 +1320,8 @@ function BotCard({
   onDuplicate: () => void;
 }) {
   const stat = metrics(bot.trades);
+  // Outside the demo every trade is simulated, so the card shows the simulated balance.
+  const balance = bot.budget + (demoMode ? 0 : stat.pnl);
   return (
     <article className="panel bot-card">
       <div className="bot-card-header">
@@ -1311,9 +1360,9 @@ function BotCard({
           <strong>{stat.count}</strong>
         </div>
         <div>
-          <span>Баланс</span>
+          <span>{demoMode ? 'Баланс' : 'Баланс · симуляция'}</span>
           <strong>
-            {formatMoney(bot.budget)} <small>USDT</small>
+            {formatMoney(balance)} <small>USDT</small>
           </strong>
         </div>
       </div>
@@ -1726,7 +1775,7 @@ function TradesTable({
       ]),
     ];
     download(
-      'demo-trades.csv',
+      demoMode ? 'demo-trades.csv' : 'simulated-trades.csv',
       '\uFEFF' + rows.map((r) => r.map(csvCell).join(';')).join('\r\n'),
       'text/csv;charset=utf-8',
     );
@@ -1746,7 +1795,11 @@ function TradesTable({
         <Empty
           icon={<Activity size={26} />}
           title="Сделок пока нет"
-          text="После подключения движка здесь будут входы, выходы и результат каждой сделки."
+          text={
+            demoMode
+              ? 'После подключения движка здесь будут входы, выходы и результат каждой сделки.'
+              : 'Здесь появятся закрытые сделки живой симуляции бота.'
+          }
         />
       ) : (
         <div className="table-scroll">
@@ -1776,7 +1829,17 @@ function TradesTable({
                     })}
                   </td>
                   {showBot && <td>{t.botName ?? botName}</td>}
-                  <td className="table-symbol">{t.symbol ?? symbol}</td>
+                  <td className="table-symbol">
+                    {t.symbol ?? symbol}
+                    {t.simulated && (
+                      <span
+                        className="sim-tag"
+                        title="Сделка живой симуляции, не реальное исполнение"
+                      >
+                        SIM
+                      </span>
+                    )}
+                  </td>
                   <td>
                     <span className={`side ${t.side}`}>{t.side === 'long' ? 'Лонг' : 'Шорт'}</span>
                   </td>
@@ -1795,8 +1858,10 @@ function TradesTable({
         </div>
       )}
       <div className="table-note">
-        {demoMode ? 'Вымышленные исполнения.' : 'Торговый движок ещё не подключён.'} Комиссии и
-        результаты указаны в USDT.
+        {demoMode
+          ? 'Вымышленные исполнения.'
+          : 'Сделки живой симуляции: исполнения смоделированы по публичным данным, реальных ордеров не было.'}{' '}
+        Комиссии и результаты указаны в USDT.
       </div>
     </section>
   );

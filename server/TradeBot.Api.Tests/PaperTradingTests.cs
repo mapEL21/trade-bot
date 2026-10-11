@@ -210,6 +210,25 @@ public sealed class PaperTradingTests : IDisposable
     }
 
     [Fact]
+    public void ClosedPaperTradesBecomeBotTradesInUsdt()
+    {
+        var (session, _) = Drive(new("SOL", "hyperliquid", "binance", 600, Depth, BotId: "bot"), Events(), long.MaxValue, _ => { });
+        var run = session.Record();
+        var source = Assert.Single(run.TradeLog);
+        var trade = Assert.Single(BotTrade.FromRun(run));
+        Assert.Equal(source.NetQuote, trade.Gross - trade.Fee);
+        Assert.Equal(source.FeesQuote, trade.Fee);
+        Assert.Equal((source.EntryPrice, source.ExitPrice, source.Quantity), (trade.Entry, trade.Exit, (decimal?)trade.Quantity));
+        Assert.Equal(run.StartedUtc.AddSeconds(source.ExitSeconds).ToString("O"), trade.At);
+        Assert.True(trade.Simulated);
+        // The simplified BBO model has no sizes: they follow from the configured nominal and fees.
+        var bbo = run with { Settings = Depth with { ExecutionModel = "bbo" }, TradeLog = [source with { Quantity = null, NetQuote = null, FeesQuote = null }] };
+        var estimated = Assert.Single(BotTrade.FromRun(bbo));
+        Assert.Equal(Depth.OrderNotional / source.EntryPrice, estimated.Quantity, 12);
+        Assert.Equal(source.NetBps / 10000 * Depth.OrderNotional, estimated.Gross - estimated.Fee, 12);
+    }
+
+    [Fact]
     public void OrderLargerThanTheBotBalanceIsNotSent()
     {
         // 9 coins at about 120 USDT need over 1000 USDT; a 100 USDT balance must refuse the entry before it is sent.

@@ -48,6 +48,9 @@ export interface Trade {
   entry: number;
   exit: number;
   quantity: number;
+  // Set by the server for trades of a live paper run: simulated, never a real execution.
+  runId?: string;
+  simulated?: boolean;
 }
 export interface Bot extends BotConfig {
   revision?: number;
@@ -186,10 +189,8 @@ export function metrics(trades: Trade[]) {
     drawdown,
   };
 }
-export function periodTrades(trades: Trade[], days: number) {
-  return trades.filter(
-    (t) => Date.parse(t.at) >= DEMO_NOW - days * 86400000 && Date.parse(t.at) <= DEMO_NOW,
-  );
+export function periodTrades(trades: Trade[], days: number, now = DEMO_NOW) {
+  return trades.filter((t) => Date.parse(t.at) >= now - days * 86400000 && Date.parse(t.at) <= now);
 }
 export function validateConfig(value: unknown): BotConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -407,7 +408,6 @@ export function parseWorkspace(text: string): Workspace {
         ![t.gross, t.fee, t.entry, t.exit, t.quantity].every(
           (n) => typeof n === 'number' && Number.isFinite(n),
         ) ||
-        t.fee < 0 ||
         t.entry <= 0 ||
         t.exit <= 0 ||
         t.quantity <= 0

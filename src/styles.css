@@ -2464,3 +2464,12 @@ tbody tr:hover {
   margin-top: 4px;
   line-height: 1.45;
 }
+.sim-tag {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border: 1px solid #5b6f8f;
+  border-radius: 4px;
+  font-size: 9px;
+  color: #b9c7da;
+  vertical-align: middle;
+}

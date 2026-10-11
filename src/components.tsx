@@ -108,7 +108,7 @@ export function Chart({ trades }: { trades: Trade[] }) {
         <svg
           viewBox={`0 0 ${width} 210`}
           role="img"
-          aria-label={`Демонстрационная кривая накопленного результата: ${formatMoney(sum)} USDT, ${trades.length} сделок`}
+          aria-label={`Кривая накопленного результата: ${formatMoney(sum)} USDT, ${trades.length} сделок`}
           onMouseLeave={() => setActive(null)}
         >
           <defs>

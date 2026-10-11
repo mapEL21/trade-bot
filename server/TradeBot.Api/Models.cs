@@ -14,7 +14,30 @@ public sealed record Bot(string Id, string Name, string Exchange, string Symbol,
 {
     // draft, calibrating, running, paused, stopping, stopped or interrupted; filled from paper runs when the workspace is read.
     public string Status { get; init; } = "draft";
-    public object[] Trades => [];
+    // Closed trades of the bot's paper runs, filled when the workspace is read; never real executions.
+    public BotTrade[] Trades { get; init; } = [];
+}
+
+// One closed paper trade in USDT, in the shape the workspace UI uses for statistics and charts.
+public sealed record BotTrade(string Id, string At, string Side, decimal Gross, decimal Fee, decimal Entry, decimal Exit,
+    decimal Quantity, string RunId, bool Simulated = true)
+{
+    // Exit time is the run start plus the trade's session time; fees and size come from the depth model, or follow
+    // from the configured size and fees in the simplified BBO model.
+    public static IEnumerable<BotTrade> FromRun(PaperRunRecord run)
+    {
+        var s = run.Settings;
+        return run.TradeLog.Select((t, i) =>
+        {
+            var notional = s.OrderQuantity is { } coins ? coins * t.EntryPrice : s.OrderNotional;
+            var quantity = t.Quantity ?? notional / t.EntryPrice;
+            var entryFee = s.EntryOrder == "maker" ? s.MakerFeeBps : s.FeeBps;
+            var fee = t.FeesQuote ?? quantity * (t.EntryPrice * entryFee + t.ExitPrice * s.FeeBps) / 10000;
+            var net = t.NetQuote ?? t.NetBps / 10000 * quantity * t.EntryPrice;
+            return new BotTrade($"{run.Id}-{i}", run.StartedUtc.AddSeconds(t.ExitSeconds).ToString("O"), t.Side, net + fee, fee,
+                t.EntryPrice, t.ExitPrice, quantity, run.Id);
+        });
+    }
 }
 
 public sealed record WorkspaceEvent(string Id, string At, string BotId, string BotName, string Text);

@@ -86,6 +86,11 @@ public sealed class PaperRunStore
         QueryAsync(botId is null ? "SELECT body FROM paper_runs WHERE bot_id IS NULL ORDER BY started DESC LIMIT $limit"
             : "SELECT body FROM paper_runs WHERE bot_id = $bot ORDER BY started DESC LIMIT $limit", botId, limit, ct);
 
+    // Every bot's runs, newest first, for the workspace view.
+    public async Task<Dictionary<string, PaperRunRecord[]>> AllByBotAsync(CancellationToken ct) =>
+        (await QueryAsync("SELECT body FROM paper_runs WHERE bot_id IS NOT NULL ORDER BY started DESC", null, 0, ct))
+            .GroupBy(x => x.BotId!).ToDictionary(x => x.Key, x => x.ToArray());
+
     public async Task<Dictionary<string, PaperRunRecord>> LatestByBotAsync(CancellationToken ct) =>
         (await QueryAsync("""
             SELECT body FROM paper_runs p WHERE bot_id IS NOT NULL
