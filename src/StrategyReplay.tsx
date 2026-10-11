@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, request } from './api';
+import { StrategySeries, type SeriesRecordingOption } from './StrategySeries';
 
 const initial = {
   calibrationSeconds: 120,
@@ -107,7 +108,15 @@ const price = (value: number | null | undefined) =>
   value == null ? '—' : value.toLocaleString('ru-RU', { maximumSignificantDigits: 12 });
 const mode = (value: string) => (value === 'follow' ? 'По импульсу' : 'Против импульса');
 
-export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean }) {
+export function StrategyReplay({
+  id,
+  disabled,
+  recordings = [],
+}: {
+  id: string;
+  disabled: boolean;
+  recordings?: SeriesRecordingOption[];
+}) {
   const [settings, setSettings] = useState(initial);
   const [executionModel, setExecutionModel] = useState('depth');
   const [entryOrder, setEntryOrder] = useState('taker');
@@ -492,6 +501,10 @@ export function StrategyReplay({ id, disabled }: { id: string; disabled: boolean
           <p className="field-hint">Последний результат стратегии сохранён вместе с записью.</p>
         </div>
       )}
+      <StrategySeries
+        recordings={recordings}
+        settings={{ ...settings, executionModel, entryOrder }}
+      />
     </section>
   );
 }

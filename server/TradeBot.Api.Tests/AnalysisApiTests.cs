@@ -102,6 +102,61 @@ public sealed class AnalysisApiTests : IDisposable
     [Fact]
     public async Task DepthReplayLoadsRawBooksAndRecordedRulesThroughApi()
     {
+        await SeedDepth();
+        using var factory = Factory(); using var client = Client(factory);
+        var response = await client.PostAsJsonAsync($"/api/v1/research/recordings/{Id}/replay", new ReplaySettings(OrderNotional: 1200, FeeBps: 1, SlippageBps: 0, MinEdgeBps: 1));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var report = (await response.Content.ReadFromJsonAsync<ReplayReport>())!;
+        Assert.Equal("evaluated", report.Status); Assert.Equal("depth", report.Settings.ExecutionModel);
+        Assert.Equal(1, report.Instrument!.QuantityStep);
+        Assert.All(report.Scenarios, s => Assert.NotNull(Assert.Single(s.TradeLog).NetQuote));
+        var saved = (await client.GetFromJsonAsync<ReplayReport>($"/api/v1/research/recordings/{Id}/replay"))!;
+        Assert.Equal(report.Scenarios[0].TradeLog, saved.Scenarios[0].TradeLog);
+    }
+
+    [Fact]
+    public async Task MakerDepthReplayReadsRecordedAggressorTradesFromTheMarketFeed()
+    {
+        // 300 coins sold into the bid at 120.3 s clear the 100 visible ahead of the 10-coin maker buy.
+        await SeedDepth([
+            new("binance-market", "t", "connected", DateTimeOffset.UnixEpoch, 0, ""),
+            new("binance-market", "t", "market", DateTimeOffset.UnixEpoch, 120300, """{"e":"aggTrade","s":"SOLUSDT","p":"119.99","q":"300","m":true}""")]);
+        using var factory = Factory(); using var client = Client(factory);
+        var response = await client.PostAsJsonAsync($"/api/v1/research/recordings/{Id}/replay",
+            new ReplaySettings(OrderNotional: 1200, FeeBps: 1, SlippageBps: 0, MinEdgeBps: 1, EntryOrder: "maker"));
+        var report = (await response.Content.ReadFromJsonAsync<ReplayReport>())!;
+        Assert.Equal("evaluated", report.Status);
+        var follow = report.Scenarios.Single(x => x.Mode == "follow" && x.DelayMs == 10);
+        Assert.Equal(1, follow.MakerFills); Assert.Equal(119.99m, Assert.Single(follow.TradeLog).EntryPrice);
+    }
+
+    [Fact]
+    public async Task SeriesRecomputesEachRecordingAndPersistsCombinedReport()
+    {
+        await SeedDepth();
+        using (var factory = Factory())
+        using (var client = Client(factory))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/v1/research/series/replay")).StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/research/series/replay", new SeriesRequest([], new ReplaySettings()))).StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync("/api/v1/research/series/replay",
+                new SeriesRequest([Id, "20261010T100000Z-22222222222222222222222222222222"], new ReplaySettings()))).StatusCode);
+            var response = await client.PostAsJsonAsync("/api/v1/research/series/replay",
+                new SeriesRequest([Id], new ReplaySettings(OrderNotional: 1200, FeeBps: 1, SlippageBps: 0, MinEdgeBps: 1)));
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var series = (await response.Content.ReadFromJsonAsync<SeriesReport>())!;
+            Assert.Equal(StrategyReplay.Version, series.Version);
+            Assert.Equal("evaluated", Assert.Single(series.Recordings).Status);
+            Assert.All(series.Totals, t => { Assert.Equal(1, t.Recordings); Assert.Equal(1, t.OrdersSent); Assert.Equal(1, t.Trades); });
+            Assert.True(File.Exists(Path.Combine(root, Id, "strategy-replay-v1.json")));
+        }
+        using var restarted = Factory(); using var reader = Client(restarted);
+        var saved = (await reader.GetFromJsonAsync<SeriesReport>("/api/v1/research/series/replay"))!;
+        Assert.Equal(8, saved.Totals.Length); Assert.Equal(1200, saved.Settings.OrderNotional);
+    }
+
+    private async Task SeedDepth(IEnumerable<CaptureEvent>? extra = null)
+    {
         await Seed(); var dir = Path.Combine(root, Id);
         using var metadata = JsonDocument.Parse("""{"symbols":[{"symbol":"SOLUSDT","baseAsset":"SOL","quoteAsset":"USDT","contractType":"PERPETUAL","filters":[{"filterType":"MARKET_LOT_SIZE","stepSize":"1","minQty":"1","maxQty":"10000"},{"filterType":"MIN_NOTIONAL","notional":"5"},{"filterType":"PRICE_FILTER","tickSize":"0.01"}]}]}""");
         await File.WriteAllTextAsync(Path.Combine(dir, "manifest.json"), JsonSerializer.Serialize(new {
@@ -124,16 +179,8 @@ public sealed class AnalysisApiTests : IDisposable
             }
             events.Add(new(input.Source, "c", input.Kind, DateTimeOffset.UnixEpoch, input.Ticks, payload));
         }
-        await File.WriteAllLinesAsync(Path.Combine(dir, "events.ndjson"), events.Select(x => JsonSerializer.Serialize(x)));
-        using var factory = Factory(); using var client = Client(factory);
-        var response = await client.PostAsJsonAsync($"/api/v1/research/recordings/{Id}/replay", new ReplaySettings(OrderNotional: 1200, FeeBps: 1, SlippageBps: 0, MinEdgeBps: 1));
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var report = (await response.Content.ReadFromJsonAsync<ReplayReport>())!;
-        Assert.Equal("evaluated", report.Status); Assert.Equal("depth", report.Settings.ExecutionModel);
-        Assert.Equal(1, report.Instrument!.QuantityStep);
-        Assert.All(report.Scenarios, s => Assert.NotNull(Assert.Single(s.TradeLog).NetQuote));
-        var saved = (await client.GetFromJsonAsync<ReplayReport>($"/api/v1/research/recordings/{Id}/replay"))!;
-        Assert.Equal(report.Scenarios[0].TradeLog, saved.Scenarios[0].TradeLog);
+        events.AddRange(extra ?? []);
+        await File.WriteAllLinesAsync(Path.Combine(dir, "events.ndjson"), events.OrderBy(x => x.ReceivedTicks).Select(x => JsonSerializer.Serialize(x)));
     }
 
     [Fact]

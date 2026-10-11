@@ -2225,6 +2225,31 @@ tbody tr:hover {
   display: grid;
   gap: 8px;
 }
+.strategy-series {
+  margin-top: 28px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.strategy-series fieldset {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.series-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  overflow-wrap: anywhere;
+}
+.series-choice input {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+}
 .replay-selection select {
   max-width: 100%;
   padding: 10px;

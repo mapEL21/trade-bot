@@ -214,7 +214,12 @@ export function ResearchAnalysis({ active }: { active: boolean }) {
         </button>
       </form>
       {error && <p role="alert">{error}</p>}
-      <StrategyReplay key={id} id={id} disabled={busy || selected?.status !== 'completed'} />
+      <StrategyReplay
+        key={id}
+        id={id}
+        disabled={busy || selected?.status !== 'completed'}
+        recordings={items}
+      />
       {report && (
         <div aria-live="polite">
           <h3>Отчёт: {report.recording.coin}</h3>

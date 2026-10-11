@@ -770,3 +770,87 @@ test('maker entry submits its settings and shows how many resting orders filled'
     [],
   );
 });
+
+test('series check sends the chosen recordings with current settings and shows combined totals', async ({
+  page,
+}) => {
+  await installFeed(page, idle);
+  const second = {
+    ...analysisRecording,
+    id: '20261011T100000Z-22222222222222222222222222222222',
+    coin: 'MAGIC',
+  };
+  await page.route('**/api/v1/research/recordings', (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          { ...analysisRecording, hasReport: false },
+          { ...second, hasReport: false },
+        ],
+        unavailable: 0,
+      },
+    }),
+  );
+  await page.route('**/api/v1/research/recordings/*/replay', (route) =>
+    route.fulfill({ status: 404 }),
+  );
+  await page.route('**/api/v1/research/series/replay', (route) => {
+    if (route.request().method() !== 'POST') return route.fulfill({ status: 404 });
+    const body = route.request().postDataJSON();
+    expect(body.ids).toEqual([second.id]);
+    expect(body.settings.entryOrder).toBe('maker');
+    return route.fulfill({
+      json: {
+        version: '0.3.2',
+        createdUtc: '2026-10-11T12:00:00Z',
+        settings: body.settings,
+        recordings: [
+          {
+            ...second,
+            status: 'evaluated',
+            explanation: 'Поводырь выбран.',
+            leader: 'binance',
+            executionExchange: 'okx',
+            scenarios: [],
+          },
+        ],
+        totals: [
+          {
+            mode: 'follow',
+            delayMs: 10,
+            recordings: 3,
+            recordingsPositive: 2,
+            ordersSent: 40,
+            entriesFilled: 12,
+            ordersUnfilled: 25,
+            trades: 11,
+            unresolved: 3,
+            sumNetBps: -4.5,
+            meanNetBps: -0.4,
+            winPercent: 45.5,
+            drawdownBps: 9,
+            closedNetQuote: -0.01,
+            drawdownFromTruncatedLog: false,
+          },
+        ],
+        notes: ['Итоги складывают только проверенные записи.'],
+      },
+    });
+  });
+  await openResearch(page);
+  await page.getByText('Настройки стратегии', { exact: true }).click();
+  await page.getByLabel('Вход в сделку').selectOption('maker');
+  const series = page.locator('.strategy-series');
+  await series.getByRole('checkbox', { name: /^SOL/ }).uncheck();
+  await series.getByRole('button', { name: 'Проверить на выбранных записях (1)' }).click();
+  const totals = page.getByRole('table', {
+    name: 'Итоги по сценариям на всех проверенных записях',
+  });
+  await expect(totals.getByRole('cell', { name: '2 из 3' })).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Записи серии' })).toContainText('binance → okx');
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect((await new AxeBuilder({ page }).include('.strategy-series').analyze()).violations).toEqual(
+    [],
+  );
+});

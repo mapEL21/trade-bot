@@ -93,6 +93,46 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
             data.Frequency, data.First, data.Last, data.Points, token, data.Market), ct, settings.ExecutionModel == "depth");
     }
 
+    // Recomputes every chosen recording with the same settings, one after another, then saves the combined report.
+    public async Task<SeriesReport> SeriesAsync(SeriesRequest request, CancellationToken ct)
+    {
+        StrategySeries.Validate(request);
+        foreach (var id in request.Ids) DirectoryFor(id);
+        var items = new List<(SeriesRecording, ReplayReport?)>();
+        foreach (var id in request.Ids)
+        {
+            ct.ThrowIfCancellationRequested();
+            try { var report = await ReplayAsync(id, request.Settings, ct); items.Add((StrategySeries.Row(report), report)); }
+            catch (Exception e) when (e is InvalidDataException or InvalidOperationException or IOException or UnauthorizedAccessException or JsonException
+                or KeyNotFoundException or FormatException or OverflowException || e is OperationCanceledException && !ct.IsCancellationRequested)
+            {
+                items.Add((StrategySeries.Failed(id, e is OperationCanceledException ? "Расчёт записи превысил 60 секунд." : e.Message), null));
+            }
+        }
+        var series = StrategySeries.Build(request.Settings, items, DateTimeOffset.UtcNow);
+        Directory.CreateDirectory(Root); CheckLink(Root);
+        var output = Path.Combine(Root, "strategy-series-v1.json");
+        if (File.Exists(output)) CheckLink(output);
+        var temporary = Path.Combine(Root, "series-" + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(series, Json), ct);
+            File.Move(temporary, output, true);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        return series;
+    }
+
+    public async Task<SeriesReport> ReadSeriesAsync(CancellationToken ct)
+    {
+        if (!Directory.Exists(Root)) throw new FileNotFoundException();
+        CheckLink(Root);
+        var path = Path.Combine(Root, "strategy-series-v1.json");
+        if (!File.Exists(path)) throw new FileNotFoundException();
+        return JsonSerializer.Deserialize<SeriesReport>(await File.ReadAllTextAsync(FileFor(Root, "strategy-series-v1.json", 16 * 1048576), ct), Json)
+            ?? throw new InvalidDataException("Не удалось прочитать отчёт по серии записей.");
+    }
+
     public async Task<ReplayReport> ReadReplayAsync(string id, CancellationToken ct)
     {
         var report = JsonSerializer.Deserialize<ReplayReport>(await File.ReadAllTextAsync(FileFor(DirectoryFor(id), "strategy-replay-v1.json", 8 * 1048576), ct), Json)

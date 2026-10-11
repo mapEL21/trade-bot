@@ -26,7 +26,8 @@ public sealed record ReplayTrade(double EntrySeconds, double ExitSeconds, string
 public sealed record ReplayScenario(string Mode, int DelayMs, int Trades, decimal? MeanNetBps, double? WinPercent,
     decimal SumNetBps, decimal ClosedTradeDrawdownBps, int UnresolvedPositions, int Skipped, int Signals,
     ReplayTrade[] TradeLog, ReplayDecision[] Journal, bool JournalTruncated, int PartialEntries = 0, int PartialExits = 0,
-    decimal? ClosedNetQuote = null, decimal? UnresolvedQuantity = null, int? MakerOrders = null, int? MakerFills = null);
+    decimal? ClosedNetQuote = null, decimal? UnresolvedQuantity = null, int? MakerOrders = null, int? MakerFills = null,
+    int? OrdersSent = null, int? EntriesFilled = null, int? OrdersUnfilled = null);
 public sealed record ReplayLeader(string SourceExchange, string Exchange, int Samples, decimal? ResponseBps);
 public sealed record ReplayReport(string Strategy, string Version, AnalysisRecording Recording, ReplaySettings Settings,
     string Status, string Explanation, string? Leader, string? ExecutionExchange, decimal? NormalBasisBps,
@@ -35,6 +36,7 @@ public sealed record ReplayReport(string Strategy, string Version, AnalysisRecor
 // Pure offline execution: local arrival times only; no API keys, networking, orders or account state.
 public static class StrategyReplay
 {
+    public const string Version = "0.3.2";
     private sealed record Tick(double Ms, int Venue, MarketQuote? Quote, bool Reset, int Sequence, string Connection, bool IsBook = false, ReplayBookUpdate? Book = null,
         bool IsTrade = false, ReplayPrint[]? Prints = null);
     // Quantity is the open remainder; earlier partial exits are kept so the closed trade gets one weighted exit price.
@@ -81,7 +83,7 @@ public static class StrategyReplay
         var candidates = analysis.Directions.Select(d => new ReplayLeader(d.SourceExchange, d.Exchange,
             d.Horizons[0].Samples, d.Horizons[0].MeanMoveBps)).ToArray();
         string[] notes = [
-            "Исследовательская стратегия v0.3.2: поводырь выбран только на начальном участке и зафиксирован. Это предварительная гипотеза лидерства по реакции через 100 мс, не доказанная причинность.",
+            $"Исследовательская стратегия v{Version}: поводырь выбран только на начальном участке и зафиксирован. Это предварительная гипотеза лидерства по реакции через 100 мс, не доказанная причинность.",
             settings.ExecutionModel == "depth"
                 ? "Исполнение по видимому стакану: условная немедленная заявка с пределом цены от bid/ask в момент решения. Размер округляется вниз. Цена — средняя по уровням плюс заданное дополнительное проскальзывание; комиссия за обе стороны. Это модель IOC, а не точная эмуляция правил брокера."
                 : "Упрощённая модель BBO: последние свежие bid/ask, проскальзывание и комиссия. Объём, минимальная заявка и частичные исполнения не учитываются. Номинал и предел цены в этой модели не используются.",
@@ -92,7 +94,7 @@ public static class StrategyReplay
             "Выбор лучшей задержки на этой записи требует новой независимой проверки. Положительный результат не подтверждает прибыльность. Живая симуляция и торговое исполнение ещё не подключены.",
             .. (settings.EntryOrder == "maker" ? new[] { "Вход maker (экспериментальная модель): post-only заявка по своей лучшей цене (bid для покупки, ask для продажи) на момент решения, с той же задержкой доставки; отклоняется, если цена уже дошла до её уровня. В модели стакана заявка встаёт в конец очереди своего уровня: исполненный объём = записанные сделки агрессора по её цене или хуже минус видимый объём перед ней, не больше размера заявки. Уход заявок из очереди не учитывается. При частичном исполнении остаток отменяется, и пока отмена идёт, может исполниться ещё часть. В упрощённой модели BBO объём неизвестен: исполнение засчитывается целиком, когда встречная цена дошла до уровня заявки. Разрыв потока сделок, устаревание котировок ведомой биржи или конец записи при выставленной заявке дают неопределённый результат. Выход — taker." } : Array.Empty<string>())
         ];
-        ReplayReport Empty(string status, string reason) => new("leader-lag", "0.3.2", recording, settings, status, reason,
+        ReplayReport Empty(string status, string reason) => new("leader-lag", Version, recording, settings, status, reason,
             null, null, null, duration, candidates, [], notes);
         if (recording.Status != "completed") return Empty("incomplete", "Нужна запись без ошибок и разрывов: текущая сессия завершена неполно.");
         if (duration <= settings.CalibrationSeconds + settings.MaxHoldMs / 1000.0 + .2)
@@ -132,7 +134,7 @@ public static class StrategyReplay
         var scenarios = new List<ReplayScenario>();
         foreach (var delay in new[] { 10, 25, 50, 100 })
             foreach (var counter in new[] { false, true }) scenarios.Add(Simulate(ticks, leader, basis, duration * 1000, settings, delay, counter, ct, instrument));
-        return new("leader-lag", "0.3.2", recording, settings, "evaluated", "Поводырь выбран на начальном участке. Результаты ниже относятся только к последующей части записи.",
+        return new("leader-lag", Version, recording, settings, "evaluated", "Поводырь выбран на начальном участке. Результаты ниже относятся только к последующей части записи.",
             best.SourceExchange, best.Exchange, basis, duration, candidates, scenarios.ToArray(), notes, settings.ExecutionModel == "depth" ? instrument : null);
     }
 
@@ -159,7 +161,7 @@ public static class StrategyReplay
         var q = new[] { new Quotes(), new Quotes() }; var journal = new List<ReplayDecision>(); var trades = new List<ReplayTrade>();
         var depth = s.ExecutionModel == "depth"; var book = new ReplayBook(); string? bookConnection = null, tradeConnection = null;
         Position? position = null; Pending? pending = null; int skipped = 0, signals = 0, unresolved = 0, journalCount = 0;
-        int partialEntries = 0, partialExits = 0, makerOrders = 0, makerFills = 0;
+        int partialEntries = 0, partialExits = 0, makerOrders = 0, makerFills = 0, sent = 0, filled = 0, unfilled = 0;
         var maker = s.EntryOrder == "maker"; Resting? resting = null;
         decimal sum = 0, peak = 0, drawdown = 0, closedNet = 0; double nextSignal = s.CalibrationSeconds * 1000; bool halted = false;
         void Log(double at, string action, string reason, int sign = 0, decimal? price = null, decimal? net = null, decimal? quantity = null)
@@ -199,7 +201,7 @@ public static class StrategyReplay
         decimal MakerFilled(Resting r) => Math.Clamp(decimal.Floor((r.Traded - r.QueueAhead) / instrument!.QuantityStep) * instrument.QuantityStep, 0, r.Quantity);
         void OpenMaker(double at, Resting r, decimal quantity, string reason)
         {
-            makerFills++; if (quantity < r.Quantity) partialEntries++;
+            makerFills++; filled++; if (quantity < r.Quantity) partialEntries++;
             position = new(r.Sign, at, r.Price, r.Residual, quantity, EntryFeeBps: s.MakerFeeBps); resting = null;
             Log(at, quantity < r.Quantity ? "частичный вход" : "вход", reason, r.Sign, r.Price, quantity: depth ? quantity : null);
         }
@@ -227,7 +229,7 @@ public static class StrategyReplay
                     if (resting.CancelAt is null) { resting = resting with { CancelAt = due }; Log(due, "отмена запрошена", "Срок ожидания заявки maker истёк."); }
                     else if (depth && MakerFilled(resting) is > 0 and var part)
                         OpenMaker(due, resting, part, "Отмена дошла до биржи; позиция открыта на исполненную часть заявки maker.");
-                    else { resting = null; skipped++; Log(due, "пропуск", "Заявка maker не исполнилась и снята."); }
+                    else { resting = null; skipped++; unfilled++; Log(due, "пропуск", "Заявка maker не исполнилась и снята."); }
                     continue;
                 }
                 if (pending is null) { pending = Order(position!.Sign, due, "Лимит времени удержания", true); Log(due, "выход запрошен", pending.Reason); continue; }
@@ -274,7 +276,7 @@ public static class StrategyReplay
                     {
                         var quote = q[1 - leader].Current!;
                         if (order.Sign > 0 ? quote.Ask <= order.Limit : quote.Bid >= order.Limit)
-                        { skipped++; Log(due, "пропуск", "Post-only заявка отклонена: цена уже дошла до её уровня, и она исполнилась бы как taker."); continue; }
+                        { skipped++; unfilled++; Log(due, "пропуск", "Post-only заявка отклонена: цена уже дошла до её уровня, и она исполнилась бы как taker."); continue; }
                         makerOrders++; resting = new(order.Sign, due, order.Limit, order.Quantity, due + s.MakerWaitMs, null, order.Residual,
                             depth ? book.Quantity(order.Sign > 0, order.Limit) : 0);
                         Log(due, "заявка maker выставлена", counter ? "Контрольный вход против импульса" : "Отставание покрывает заданный порог расходов",
@@ -292,12 +294,12 @@ public static class StrategyReplay
                             continue;
                         }
                         if (fill.Quantity == 0)
-                        { skipped++; Log(due, "пропуск", "В пределах цены заявки нет доступного объёма."); continue; }
+                        { skipped++; unfilled++; Log(due, "пропуск", "В пределах цены заявки нет доступного объёма."); continue; }
                         book.Fill(order.Sign > 0, order.Quantity, order.Limit, s.SlippageBps, instrument.QuantityStep, true);
                         price = fill.Price; quantity = fill.Quantity;
                         if (quantity < order.Quantity) { partialEntries++; Log(due, "частичный вход", "Доступна только часть объёма до предела цены; неисполненный остаток отменён.", order.Sign, price, quantity: quantity); }
                     }
-                    position = new(order.Sign, due, price, order.Residual, quantity);
+                    position = new(order.Sign, due, price, order.Residual, quantity); filled++;
                     Log(due, "вход", counter ? "Контрольный вход против импульса" : "Отставание покрывает заданный порог расходов", order.Sign, price, quantity: depth ? quantity : null);
                 }
             }
@@ -320,13 +322,13 @@ public static class StrategyReplay
                     .Sum(p => p.Quantity * instrument!.BasePerUnit);
                 if (through == 0) continue;
                 resting = r with { Traded = r.Traded + through };
-                var filled = MakerFilled(resting);
-                if (filled >= resting.Quantity) OpenMaker(tick.Ms, resting, filled, "Заявка maker исполнена: объём сделок по её цене превысил очередь перед ней");
-                else if (filled > 0 && resting.CancelAt is null)
+                var done = MakerFilled(resting);
+                if (done >= resting.Quantity) OpenMaker(tick.Ms, resting, done, "Заявка maker исполнена: объём сделок по её цене превысил очередь перед ней");
+                else if (done > 0 && resting.CancelAt is null)
                 {
                     // The bot sees the partial fill and cancels the rest; more can fill while the cancel travels.
                     resting = resting with { CancelAt = tick.Ms };
-                    Log(tick.Ms, "отмена запрошена", "Заявка maker исполнена частично; остаток отменяется.", resting.Sign, resting.Price, quantity: filled);
+                    Log(tick.Ms, "отмена запрошена", "Заявка maker исполнена частично; остаток отменяется.", resting.Sign, resting.Price, quantity: done);
                 }
                 continue;
             }
@@ -403,7 +405,7 @@ public static class StrategyReplay
             var order = Order(counter ? -sign : sign, tick.Ms, "Импульс и отставание", false) with { Residual = residual };
             if (depth && !SizeAllowed(order.Quantity, maker ? order.Limit : Math.Min(order.Limit, q[1 - leader].Current!.Mid)))
             { skipped++; Log(tick.Ms, "пропуск", "Размер заявки после округления не проходит минимальный номинал или ограничения количества.", quantity: order.Quantity); continue; }
-            pending = order; Log(tick.Ms, "вход отправлен", pending.Reason, pending.Sign, depth ? pending.Limit : null, quantity: depth ? pending.Quantity : null);
+            pending = order; sent++; Log(tick.Ms, "вход отправлен", pending.Reason, pending.Sign, depth ? pending.Limit : null, quantity: depth ? pending.Quantity : null);
         }
         if (!halted) Advance(end);
         if (!halted && position is not null) { unresolved++; Log(end, "не оценено", "Запись закончилась с открытой позицией."); }
@@ -414,6 +416,6 @@ public static class StrategyReplay
             trades.Count == 0 ? null : 100.0 * trades.Count(x => x.NetBps > 0) / trades.Count, sum, drawdown, unresolved, skipped, signals,
             trades.Take(500).ToArray(), journal.ToArray(), journalCount > 500 || trades.Count > 500, partialEntries, partialExits,
             depth ? closedNet : null, depth && unresolved > 0 ? position?.Quantity ?? resting?.Quantity ?? pending?.Quantity : null,
-            maker ? makerOrders : null, maker ? makerFills : null);
+            maker ? makerOrders : null, maker ? makerFills : null, sent, filled, unfilled);
     }
 }
