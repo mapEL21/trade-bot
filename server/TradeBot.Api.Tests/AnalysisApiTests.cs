@@ -4,6 +4,8 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using TradeBot.Api;
 using TradeBot.Recorder;
 using Xunit;
@@ -14,9 +16,17 @@ public sealed class AnalysisApiTests : IDisposable
 {
     private readonly string root = Path.Combine(Path.GetTempPath(), "analysis-tests-" + Guid.NewGuid());
     private const string Id = "20261010T100000Z-11111111111111111111111111111111";
-    private WebApplicationFactory<Program> Factory() => new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
-        builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(new Dictionary<string, string?> {
-            ["Market:Path"] = root, ["Storage:Path"] = Path.Combine(root, "workspace.db") })));
+    private WebApplicationFactory<Program> Factory() => new WebApplicationFactory<Program>().WithWebHostBuilder(builder => builder
+        .ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(new Dictionary<string, string?> {
+            ["Market:Path"] = root, ["Storage:Path"] = Path.Combine(root, "workspace.db") }))
+        // Never let a test open the real workspace database, whatever the configuration order.
+        .ConfigureServices(services =>
+        {
+            services.RemoveAll<IWorkspaceStore>();
+            services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(Path.Combine(root, "workspace.db")));
+            services.RemoveAll<PaperRunStore>();
+            services.AddSingleton(_ => new PaperRunStore(Path.Combine(root, "workspace.db")));
+        }));
     private async Task Seed(bool finished = true, bool malformed = false, int version = 3)
     {
         var dir = Path.Combine(root, Id); Directory.CreateDirectory(dir);

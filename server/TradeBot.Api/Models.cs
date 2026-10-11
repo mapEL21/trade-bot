@@ -2,14 +2,18 @@ using System.Text.RegularExpressions;
 
 namespace TradeBot.Api;
 
+// Exchange is where the bot trades; for leader-lag the signal comes from SignalExchange, which must turn out to be the leader.
+public sealed record LeaderLagParameters(string SignalExchange, ReplaySettings Settings, int DelayMs = 50, bool Counter = false);
+
 public record BotConfig(string Name, string Exchange, string Symbol, decimal Budget,
-    decimal LossLimit, string Strategy, string StrategyVersion);
+    decimal LossLimit, string Strategy, string StrategyVersion, LeaderLagParameters? Parameters = null);
 
 public sealed record Bot(string Id, string Name, string Exchange, string Symbol, decimal Budget,
-    decimal LossLimit, string Strategy, string StrategyVersion, string CreatedAt, long Revision)
-    : BotConfig(Name, Exchange, Symbol, Budget, LossLimit, Strategy, StrategyVersion)
+    decimal LossLimit, string Strategy, string StrategyVersion, string CreatedAt, long Revision, LeaderLagParameters? Parameters = null)
+    : BotConfig(Name, Exchange, Symbol, Budget, LossLimit, Strategy, StrategyVersion, Parameters)
 {
-    public string Status => "draft";
+    // draft, calibrating, running, paused, stopping, stopped or interrupted; filled from paper runs when the workspace is read.
+    public string Status { get; init; } = "draft";
     public object[] Trades => [];
 }
 
@@ -24,7 +28,10 @@ public sealed class StrategyCatalog
     public IReadOnlyList<StrategyDefinition> Items { get; } = [new(
         "impulse", "0.1.0", "Импульс",
         "Планируемая стратегия краткосрочных ценовых импульсов. Правила входа и выхода ещё не реализованы.",
-        "planned", true, false, ["Binance", "Bybit", "OKX"])];
+        "planned", true, false, ["Binance", "Bybit", "OKX"]),
+        new("leader-lag", StrategyReplay.Version, "Поводырь → отстающая биржа",
+        "Ищет биржу, которая раньше показывает движение цены, и входит на отстающей. Доступна живая симуляция: реальные заявки не отправляются.",
+        "paper", true, true, ["Binance", "Bybit", "OKX", "Hyperliquid"])];
 
     public Dictionary<string, string[]> Validate(BotConfig config)
     {
@@ -35,7 +42,22 @@ public sealed class StrategyCatalog
         if (strategy is null || !strategy.CanCreate)
             errors["strategy"] = ["Эта версия стратегии не зарегистрирована на сервере."];
         if (strategy is not null && !strategy.Exchanges.Contains(config.Exchange))
-            errors["exchange"] = ["Выберите Binance, Bybit или OKX."];
+            errors["exchange"] = [$"Выберите {string.Join(", ", strategy.Exchanges)}."];
+        if (config.Strategy == "leader-lag" && strategy is not null)
+        {
+            if (config.Parameters is not { } p) errors["parameters"] = ["Укажите параметры стратегии."];
+            else
+            {
+                if (!strategy.Exchanges.Contains(p.SignalExchange) || p.SignalExchange == config.Exchange)
+                    errors["signalExchange"] = ["Биржа сигнала должна быть другой поддерживаемой биржей."];
+                try { (p.Settings ?? throw new ArgumentException("Укажите настройки стратегии.")).Validate(); }
+                catch (ArgumentException e) { errors["settings"] = [e.Message]; }
+                if (p.DelayMs is < 1 or > 1000) errors["delayMs"] = ["Задержка заявки — от 1 до 1000 мс."];
+                if (p.Settings is not null && p.Settings.OrderNotional > config.Budget)
+                    errors["orderNotional"] = ["Номинал заявки не может превышать выделенный баланс."];
+            }
+        }
+        else if (config.Parameters is not null) errors["parameters"] = ["У этой стратегии нет дополнительных параметров."];
         if (config.Symbol is null || !Regex.IsMatch(config.Symbol, @"\A[A-Z0-9]{2,16}USDT\z"))
             errors["symbol"] = ["Укажите символ USDT-фьючерса, например ARBUSDT."];
         if (config.Budget < 1 || config.Budget > 1_000_000)

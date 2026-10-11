@@ -5,7 +5,7 @@ export interface StrategyDefinition {
   version: string;
   name: string;
   description: string;
-  implementationStatus: 'planned' | 'implemented';
+  implementationStatus: 'planned' | 'implemented' | 'paper';
   canCreate: boolean;
   canRun: boolean;
   exchanges: string[];

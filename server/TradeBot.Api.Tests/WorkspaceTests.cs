@@ -20,6 +20,9 @@ public sealed class WorkspaceTests : IDisposable
         {
             services.RemoveAll<IWorkspaceStore>();
             services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(Database));
+            // Never let a test open the real workspace database.
+            services.RemoveAll<PaperRunStore>();
+            services.AddSingleton(_ => new PaperRunStore(Database));
         }));
 
     private static HttpClient Client(WebApplicationFactory<Program> factory)
@@ -37,7 +40,9 @@ public sealed class WorkspaceTests : IDisposable
         using (var client = Client(factory))
         {
             var strategies = await client.GetFromJsonAsync<StrategyDefinition[]>("/api/v1/strategies");
-            Assert.False(Assert.Single(strategies!).CanRun);
+            Assert.False(strategies!.Single(x => x.Id == "impulse").CanRun);
+            var leaderLag = strategies!.Single(x => x.Id == "leader-lag");
+            Assert.Equal(("paper", true, StrategyReplay.Version), (leaderLag.ImplementationStatus, leaderLag.CanRun, leaderLag.Version));
             var response = await client.PostAsJsonAsync("/api/v1/bots", Valid);
             Assert.Equal(HttpStatusCode.Created, response.StatusCode);
             var bot = (await response.Content.ReadFromJsonAsync<Bot>())!;

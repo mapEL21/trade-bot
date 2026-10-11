@@ -12,6 +12,10 @@ public interface IEngineObserver
 {
     void Decision(ReplayDecision decision);
     void Trade(ReplayTrade trade);
+    // Whether a position, an order in flight or a resting order exists; reported when it changes.
+    void Exposure(bool open) { }
+    // A reason to send no new entry at this virtual time (pause, loss limit, stopping), or null. Exits are never blocked.
+    string? EntryBlock(double ms) => null;
 }
 
 internal sealed class VenueQuotes
@@ -70,7 +74,7 @@ public static class LeaderLagEngine
     // Events must arrive in time order. A null end means "the last event seen", which is how a live session stops.
     public static ReplayScenario Run(IEnumerable<EngineEvent> events, EngineSetup setup, CancellationToken ct, double? end = null, IEngineObserver? observer = null)
     {
-        var (leader, basis, s, delay, counter, instrument) = setup; double lastMs = 0;
+        var (leader, basis, s, delay, counter, instrument) = setup; double lastMs = 0; var reportedExposure = false;
         var q = new[] { new VenueQuotes(), new VenueQuotes() }; var journal = new List<ReplayDecision>(); var trades = new List<ReplayTrade>();
         var depth = s.ExecutionModel == "depth"; var book = new ReplayBook(); string? bookConnection = null, tradeConnection = null;
         Position? position = null; Pending? pending = null; int skipped = 0, signals = 0, unresolved = 0, journalCount = 0;
@@ -224,6 +228,8 @@ public static class LeaderLagEngine
         foreach (var tick in events)
         {
             ct.ThrowIfCancellationRequested(); lastMs = tick.Ms; Advance(tick.Ms); if (halted) break;
+            var exposed = position is not null || pending is not null || resting is not null;
+            if (exposed != reportedExposure) { reportedExposure = exposed; observer?.Exposure(exposed); }
             if (tick.IsClock) continue;
             if (tick.IsTrade)
             {
@@ -323,6 +329,7 @@ public static class LeaderLagEngine
             var order = Order(counter ? -sign : sign, tick.Ms, "Импульс и отставание", false) with { Residual = residual };
             if (depth && !SizeAllowed(order.Quantity, maker ? order.Limit : Math.Min(order.Limit, q[1 - leader].Current!.Mid)))
             { skipped++; Log(tick.Ms, "пропуск", "Размер заявки после округления не проходит минимальный номинал или ограничения количества.", quantity: order.Quantity); continue; }
+            if (observer?.EntryBlock(tick.Ms) is { } blocked) { skipped++; Log(tick.Ms, "пропуск", blocked); continue; }
             pending = order; sent++; Log(tick.Ms, "вход отправлен", pending.Reason, pending.Sign, depth ? pending.Limit : null, quantity: depth ? pending.Quantity : null);
         }
         var finish = end ?? lastMs;

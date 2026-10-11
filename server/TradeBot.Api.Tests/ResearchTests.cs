@@ -196,6 +196,53 @@ public class ResearchTests
         using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         do paper = (await client.GetFromJsonAsync<PaperSnapshot>("/api/v1/paper", wait.Token))!; while (paper.State == "calibrating");
         Assert.Equal("stopped", paper.State); Assert.Null(paper.Result); Assert.Equal(1, runner.Runs);
+        // The final record is written right after the session completes; wait for it before the database is removed.
+        var runs = factory.Services.GetRequiredService<PaperRunStore>();
+        PaperRunRecord[] saved;
+        do saved = await runs.ListAsync(null, 5, wait.Token); while (saved.FirstOrDefault()?.State != "stopped");
+        Assert.Equal(paper.Id, saved[0].Id); Assert.NotNull(saved[0].EndedUtc);
+    }
+
+    [Fact]
+    public async Task LeaderLagBotRunsOnlyInSimulationAndIsLockedWhileRunning()
+    {
+        var runner = new ControlledRunner(withManifest: true);
+        using var factory = Factory(runner);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-TradeBot-Client", "web");
+        var settings = new ReplaySettings(ExecutionModel: "bbo");
+        static BotConfig Config(LeaderLagParameters? p) => new("Поводырь", "Binance", "ARBUSDT", 10, 1, "leader-lag", StrategyReplay.Version, p);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", Config(null))).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", Config(new("Binance", settings)))).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", Config(new("Hyperliquid", settings with { OrderNotional = 50 })))).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots",
+            new BotConfig("Импульс", "Binance", "ARBUSDT", 10, 1, "impulse", "0.1.0", new("Hyperliquid", settings)))).StatusCode);
+        var created = await client.PostAsJsonAsync("/api/v1/bots", Config(new("Hyperliquid", settings, DelayMs: 25)));
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var bot = (await created.Content.ReadFromJsonAsync<Bot>())!;
+        Assert.Equal(25, bot.Parameters!.DelayMs); Assert.Equal("draft", bot.Status);
+        var impulse = (await (await client.PostAsJsonAsync("/api/v1/bots", new BotConfig("Импульс", "Binance", "ARBUSDT", 10, 1, "impulse", "0.1.0")))
+            .Content.ReadFromJsonAsync<Bot>())!;
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsync($"/api/v1/bots/{impulse.Id}/start", null)).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsJsonAsync($"/api/v1/bots/{bot.Id}/start", new PaperStart(600))).StatusCode);
+        await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        async Task<string> Status() => (await client.GetFromJsonAsync<Workspace>("/api/v1/workspace"))!.Bots.Single(x => x.Id == bot.Id).Status;
+        Assert.Equal("calibrating", await Status());
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync($"/api/v1/bots/{bot.Id}", Config(new("OKX", settings)))).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.DeleteAsync($"/api/v1/bots/{bot.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/bots/{bot.Id}/pause", null)).StatusCode);
+        Assert.True((await client.GetFromJsonAsync<PaperSnapshot>("/api/v1/paper"))!.Paused);
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/bots/{bot.Id}/stop", null)).StatusCode);
+        await runner.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        PaperRunRecord[] runs;
+        do runs = (await client.GetFromJsonAsync<PaperRunRecord[]>($"/api/v1/bots/{bot.Id}/runs", wait.Token))!; while (runs.FirstOrDefault()?.EndedUtc is null);
+        var run = Assert.Single(runs);
+        Assert.Equal(("Поводырь", "binance", "hyperliquid", 25), (run.BotName, run.Exchange, run.SignalExchange, run.DelayMs));
+        Assert.Equal("stopped", await Status());
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsync($"/api/v1/bots/{bot.Id}/stop", null)).StatusCode);
     }
 
     private static WebApplicationFactory<Program> Factory(IRecordingRunner runner) => new ResearchFactory(runner);
@@ -208,6 +255,9 @@ public class ResearchTests
             services.RemoveAll<IRecordingRunner>(); services.AddSingleton(runner);
             services.RemoveAll<IWorkspaceStore>();
             services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(Path.Combine(directory, "workspace.db")));
+            // Never let a test open the real workspace database.
+            services.RemoveAll<PaperRunStore>();
+            services.AddSingleton(_ => new PaperRunStore(Path.Combine(directory, "workspace.db")));
         });
         protected override void Dispose(bool disposing)
         {

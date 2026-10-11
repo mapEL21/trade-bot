@@ -145,6 +145,98 @@ public sealed class PaperTradingTests : IDisposable
         Assert.True(session.Pump()); Assert.True(session.Done); Assert.Null(session.Snapshot().Result);
     }
 
+    // Feeds events and lets a test act on the session at a given receive time.
+    private (PaperSession Session, Func<int> Stops) Drive(PaperRequest request, List<CaptureEvent> events, long actAt, Action<PaperSession> act)
+    {
+        long now = 0; var stops = 0; var acted = false;
+        var session = new PaperSession("paper", request, () => now) { StopRecording = () => stops++ };
+        session.Started(directory);
+        for (var i = 0; i < events.Count; i++)
+        {
+            session.Recorded(events[i], i + 1, 0); now = events[i].ReceivedTicks; session.Pump();
+            if (!acted && now >= actAt) { acted = true; act(session); }
+        }
+        session.Finished(new(DateTimeOffset.UnixEpoch, "completed", null, 0, events.Count, 0, [], new { }));
+        Assert.True(session.Pump());
+        return (session, () => stops);
+    }
+
+    [Fact]
+    public void PauseBlocksNewEntriesButIsRecordedAsTheReason()
+    {
+        var (session, _) = Drive(new("SOL", "hyperliquid", "binance", 600, Depth), Events(), 100000, s => s.Pause(true));
+        var snapshot = session.Snapshot();
+        Assert.Empty(snapshot.Result!.TradeLog); Assert.Equal(0, snapshot.Result.OrdersSent);
+        Assert.Contains(snapshot.Result.Journal, x => x.Reason.StartsWith("Пауза"));
+        Assert.True(snapshot.Paused);
+    }
+
+    [Fact]
+    public void LossLimitStopsNewEntriesAfterClosedLosses()
+    {
+        // The counter-impulse control loses on the fixture; a 0.01 limit is hit by that one trade.
+        var request = new PaperRequest("SOL", "hyperliquid", "binance", 600, Depth, Counter: true, LossLimit: .01m);
+        var (session, _) = Drive(request, Events(), long.MaxValue, _ => { });
+        var record = session.Record();
+        Assert.True(record.ClosedNetQuote < -.01m);
+        Assert.Null(record.EntriesBlocked); // completed runs report no live block
+        Assert.Contains("лимит убытка", session.EntryBlock(0)!);
+    }
+
+    [Fact]
+    public void GracefulStopWaitsForTheOpenPositionToClose()
+    {
+        var (session, stops) = Drive(new("SOL", "hyperliquid", "binance", 600, Depth), Events(), 120900, s => s.RequestStop(false));
+        var snapshot = session.Snapshot();
+        Assert.Equal(1, stops());
+        Assert.Single(snapshot.Result!.TradeLog); Assert.Equal(0, snapshot.Result.UnresolvedPositions);
+        Assert.True(snapshot.Stopping);
+    }
+
+    [Fact]
+    public void ForcedStopLeavesTheOpenPositionUnresolved()
+    {
+        var events = Events();
+        long now = 0; var stops = 0;
+        var session = new PaperSession("paper", new("SOL", "hyperliquid", "binance", 600, Depth), () => now) { StopRecording = () => stops++ };
+        session.Started(directory);
+        var i = 0;
+        for (; i < events.Count && events[i].ReceivedTicks <= 120450; i++) { session.Recorded(events[i], i + 1, 0); now = events[i].ReceivedTicks; session.Pump(); }
+        session.RequestStop(true);
+        Assert.Equal(1, stops);
+        session.Finished(new(DateTimeOffset.UnixEpoch, "completed", null, 0, i, 0, [], new { }));
+        Assert.True(session.Pump());
+        Assert.Equal(1, session.Snapshot().Result!.UnresolvedPositions);
+    }
+
+    [Fact]
+    public void BotRunRefusesWhenItsOwnExchangeLeads()
+    {
+        // The fixture leader is Hyperliquid; a bot trading on Hyperliquid with a Binance signal has nothing to follow.
+        var request = new PaperRequest("SOL", "binance", "hyperliquid", 600, Depth with { ExecutionModel = "bbo" }, RequireSourceLeader: true);
+        var (session, stops) = Drive(request, Events(), long.MaxValue, _ => { });
+        var snapshot = session.Snapshot();
+        Assert.Equal("no-leader", snapshot.State); Assert.Contains("биржа бота", snapshot.Explanation); Assert.Equal(1, stops());
+    }
+
+    [Fact]
+    public void InterruptedRunsAreMarkedWhenTheStoreOpensAgain()
+    {
+        var path = Path.Combine(directory, "workspace.db");
+        var store = new PaperRunStore(path);
+        var running = new PaperRunRecord("r1", "bot", "Бот", StrategyReplay.Version, DateTimeOffset.UnixEpoch, null, "running", "Идёт.", "SOL",
+            "hyperliquid", "binance", Depth, 50, false, "hyperliquid", "binance", null, 0, 0, 0, 0, 0, null, [], []);
+        store.SaveAsync(running, default).GetAwaiter().GetResult();
+        store.SaveAsync(running with { Id = "r0", State = "finished", StartedUtc = DateTimeOffset.UnixEpoch.AddDays(-1) }, default).GetAwaiter().GetResult();
+        var reopened = new PaperRunStore(path);
+        var runs = reopened.ListAsync("bot", 10, default).GetAwaiter().GetResult();
+        Assert.Equal(["r1", "r0"], runs.Select(x => x.Id));
+        Assert.Equal("interrupted", runs[0].State); Assert.NotNull(runs[0].EndedUtc);
+        Assert.Equal("finished", runs[1].State);
+        Assert.Equal("r1", reopened.LatestByBotAsync(default).GetAwaiter().GetResult()["bot"].Id);
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+    }
+
     [Fact]
     public void StoppingDuringCalibrationEndsWithoutTrades()
     {

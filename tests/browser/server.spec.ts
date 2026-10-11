@@ -18,7 +18,12 @@ test('catalog creates a server instance that survives a new browser, edits, expo
     expect(
       (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze()).violations,
     ).toEqual([]);
-    await page.getByRole('button', { name: 'Создать экземпляр' }).click();
+    await page
+      .locator('.strategy-card', {
+        has: page.getByRole('heading', { name: 'Импульс', exact: true }),
+      })
+      .getByRole('button', { name: 'Создать экземпляр' })
+      .click();
     await page.getByLabel('Название бота').fill(name);
     const responsePromise = page.waitForResponse(
       (response) =>

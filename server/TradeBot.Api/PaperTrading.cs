@@ -5,12 +5,15 @@ using TradeBot.Recorder;
 
 namespace TradeBot.Api;
 
+// For a bot, SourceExchange is its signal exchange and RequireSourceLeader refuses a run in which the bot's own exchange leads.
 public sealed record PaperRequest(string Coin, string SourceExchange, string Exchange, int Seconds, ReplaySettings Settings,
-    int DelayMs = 50, bool Counter = false, int MaxMb = 256);
+    int DelayMs = 50, bool Counter = false, int MaxMb = 256, string? BotId = null, string? BotName = null, decimal? LossLimit = null,
+    bool RequireSourceLeader = false);
 public sealed record PaperSnapshot(string? Id, string State, string Explanation, string? Coin, string? SourceExchange, string? Exchange,
     ReplaySettings? Settings, int DelayMs, bool Counter, string? RecordingDirectory, double SessionSeconds, string? Leader,
     string? ExecutionExchange, decimal? NormalBasisBps, ReplayLeader[] Candidates, ReplayDecision[] Decisions, ReplayTrade[] Trades,
-    int Decided, decimal SumNetBps, decimal? ClosedNetQuote, int LateEvents, ReplayScenario? Result, string Version, bool ExecutionEnabled = false);
+    int Decided, decimal SumNetBps, decimal? ClosedNetQuote, int LateEvents, ReplayScenario? Result, string Version, bool ExecutionEnabled = false,
+    string? BotId = null, string? BotName = null, bool Paused = false, bool Stopping = false, string? EntriesBlocked = null, bool PositionOpen = false);
 public sealed record PaperRunReport(string Strategy, string Version, string Id, DateTimeOffset EndedUtc, string State, string Explanation,
     string Coin, string SourceExchange, string Exchange, ReplaySettings Settings, int DelayMs, bool Counter, string? Leader,
     string? ExecutionExchange, decimal? NormalBasisBps, ReplayLeader[] Candidates, int LateEvents, ReplayScenario? Result);
@@ -46,9 +49,16 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
     private Task<ReplayScenario>? engine;
     private double lastClockMs = double.NegativeInfinity;
     private ReplayScenario? result;
-    private volatile bool finished;
-    private bool complete, stopPending;
+    private volatile bool finished, paused, stopping, lossHalted, open, dirty = true;
+    // Virtual time at which a pause or stop was requested: it applies to signals from then on, not to ones already shown.
+    private double pausedFromMs = double.PositiveInfinity, stoppingFromMs = double.PositiveInfinity;
+    private bool complete, stopPending, stopIssued;
+    private long stopRequestedAt;
+    private decimal closedQuote;
+    private readonly DateTimeOffset startedUtc = DateTimeOffset.UtcNow;
+    private DateTimeOffset? endedUtc;
     public string Id => id;
+    public string? BotId => request.BotId;
     public Action? StopRecording { get; set; }
     public bool Done { get { lock (gate) return complete; } }
 
@@ -89,8 +99,47 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
 
     public void Trade(ReplayTrade trade)
     {
-        lock (outputGate) if (closed.Count < 10000) closed.Add(trade);
+        lock (outputGate)
+        {
+            if (closed.Count < 10000) closed.Add(trade);
+            // Closed results only, in the settlement currency: open positions are not marked to market here.
+            closedQuote += depth && trade.NetQuote is { } cash ? cash : trade.NetBps / 10000 * settings.OrderNotional;
+            if (request.LossLimit is { } limit && closedQuote <= -limit) lossHalted = true;
+        }
+        dirty = true;
     }
+
+    public void Exposure(bool exposed) => open = exposed;
+
+    public string? EntryBlock(double ms) =>
+        stopping && ms >= stoppingFromMs ? "Остановка: новые входы не отправляются, текущая позиция закрывается по правилам стратегии."
+        : lossHalted ? $"Достигнут лимит убытка {request.LossLimit:0.##}: новые входы запрещены до конца запуска."
+        : paused && ms >= pausedFromMs ? "Пауза: новые входы не отправляются, текущая позиция ведётся по правилам стратегии." : null;
+
+    private string? CurrentBlock() => EntryBlock(double.PositiveInfinity);
+
+    private double NowMs() => first is null ? 0 : Ms(clock());
+
+    public void Pause(bool value)
+    {
+        lock (gate) { paused = value; pausedFromMs = value ? NowMs() : double.PositiveInfinity; }
+        dirty = true;
+    }
+
+    // A graceful stop blocks entries and lets an open position close; force (or a timeout) stops the recording at once,
+    // and whatever is still open becomes an unresolved result.
+    public void RequestStop(bool force)
+    {
+        lock (gate)
+        {
+            if (!stopping) { stoppingFromMs = NowMs(); stopping = true; stopRequestedAt = clock(); }
+            if (force || state != "running" || !open) stopPending = true;
+        }
+        dirty = true;
+        RequestStopIfNeeded();
+    }
+
+    public bool TakeDirty() { var was = dirty; dirty = false; return was; }
 
     private double Ms(long ticks) => (ticks - first!.Value) * 1000.0 / frequency;
 
@@ -105,7 +154,8 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
     private void RequestStopIfNeeded()
     {
         bool stop;
-        lock (gate) { stop = stopPending; stopPending = false; }
+        // The recorder needs a moment to finish; the stop is requested once, not on every pump in between.
+        lock (gate) { stop = stopPending && !stopIssued; stopPending = false; stopIssued |= stop; }
         if (stop) StopRecording?.Invoke();
     }
 
@@ -134,6 +184,9 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
                 if (state == "calibrating" && now >= settings.CalibrationSeconds * 1000) Calibrate();
                 if (state == "running" && !ending && now > lastClockMs) { feed!.Add(new(now, 0, null, false, 0, "", IsClock: true)); lastClockMs = now; }
             }
+            if (stopping && !ending && !stopPending && state == "running"
+                && (!open || clock() - stopRequestedAt > (long)((settings.MaxHoldMs / 1000.0 + 10) * frequency)))
+                stopPending = true;
             if (!ending || !incoming.IsEmpty) return false;
             if (state == "running")
             {
@@ -202,6 +255,8 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
         if (StrategyReplay.SelectLeader(candidates, settings) is not { } best)
         { Stop("no-leader", "Поводырь не определён: нужны минимум 10 наблюдений в каждом направлении, положительная реакция и достаточное преимущество. Сделки не моделировались."); return; }
         leader = best.SourceExchange == request.SourceExchange ? 0 : 1;
+        if (request.RequireSourceLeader && leader != 0)
+        { Stop("no-leader", $"Поводырём оказалась биржа бота ({best.SourceExchange}): на ней нечего догонять. Сделки не моделировались."); return; }
         var instrument = depth ? instruments[1 - leader] : null;
         if (depth && (instrument is null || books.All(x => x.Venue != 1 - leader || x.Update is null)))
         { Stop("no-execution-data", "Для отстающей биржи нет правил размера заявки или глубины стакана за время калибровки. Выберите упрощённую модель BBO или другую пару."); return; }
@@ -222,14 +277,16 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
         engine = Task.Factory.StartNew(() => LeaderLagEngine.Run(feed.GetConsumingEnumerable(), setup, CancellationToken.None, null, this),
             CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         inputs.Clear(); quoteEvents.Clear(); books.Clear(); trades.Clear();
-        state = "running";
+        state = "running"; dirty = true;
         explanation = $"Поводырь: {best.SourceExchange}, виртуальное исполнение на {best.Exchange}. Решения принимаются по живым данным; реальные заявки не отправляются.";
     }
 
-    private void Stop(string status, string reason) { state = status; explanation = reason; stopPending = true; }
+    private void Stop(string status, string reason) { state = status; explanation = reason; stopPending = true; dirty = true; }
 
+    // Called once, when the run completes.
     private void Save()
     {
+        endedUtc = DateTimeOffset.UtcNow; dirty = true;
         if (directory is null) return;
         var report = new PaperRunReport("leader-lag", StrategyReplay.Version, id, DateTimeOffset.UtcNow, state, explanation, request.Coin,
             request.SourceExchange, request.Exchange, settings, request.DelayMs, request.Counter, leaderName, executionName, basis, candidates, late, result);
@@ -237,22 +294,41 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { explanation += " Не удалось сохранить отчёт симуляции рядом с записью."; }
     }
 
+    // Same normalisation as the replay report: per configured notional in the depth model, per trade otherwise.
+    private decimal ClosedSumBps() => result?.SumNetBps ?? closed.Sum(t => depth && t.NetQuote is { } cash ? cash / settings.OrderNotional * 10000 : t.NetBps);
+    private decimal? ClosedNetQuote() => depth ? result?.ClosedNetQuote ?? closed.Sum(t => t.NetQuote ?? 0) : null;
+
     public PaperSnapshot Snapshot()
     {
         lock (gate) lock (outputGate)
-        {
-            var depthResult = depth;
-            var sum = closed.Sum(t => depthResult && t.NetQuote is { } cash ? cash / settings.OrderNotional * 10000 : t.NetBps);
             return new(id, state, explanation, request.Coin, request.SourceExchange, request.Exchange, settings, request.DelayMs, request.Counter,
                 directory, first is null ? 0 : Math.Max(0, Ms(lastTicks) / 1000), leaderName, executionName, basis, candidates,
                 decisions.AsEnumerable().Reverse().Take(50).ToArray(), closed.TakeLast(100).Reverse().ToArray(), decided,
-                result?.SumNetBps ?? sum, depth ? result?.ClosedNetQuote ?? closed.Sum(t => t.NetQuote ?? 0) : null, late, result, StrategyReplay.Version);
-        }
+                ClosedSumBps(), ClosedNetQuote(), late, result, StrategyReplay.Version, false, request.BotId, request.BotName,
+                paused, stopping, complete ? null : CurrentBlock(), open);
+    }
+
+    public PaperRunRecord Record()
+    {
+        lock (gate) lock (outputGate)
+            return new(id, request.BotId, request.BotName, StrategyReplay.Version, startedUtc, endedUtc, state, explanation, request.Coin,
+                request.SourceExchange, request.Exchange, settings, request.DelayMs, request.Counter, leaderName, executionName, directory,
+                result?.Trades ?? closed.Count, ClosedSumBps(), ClosedNetQuote(), result?.UnresolvedPositions ?? 0, late,
+                complete ? null : CurrentBlock(), result?.TradeLog ?? closed.Take(500).ToArray(), decisions.ToArray());
+    }
+
+    // What a bot card shows while this session runs.
+    public string BotStatus()
+    {
+        lock (gate)
+            return complete ? "stopped" : state is "starting" or "calibrating" ? "calibrating" : stopping ? "stopping" : paused ? "paused" : "running";
     }
 }
 
+public sealed record PaperStart(int Seconds = 1800);
+
 // Runs at most one live paper session, on top of the market recorder (which also allows one recording at a time).
-public sealed class PaperTrading(MarketResearch research, ILogger<PaperTrading> logger) : IDisposable
+public sealed class PaperTrading(MarketResearch research, PaperRunStore runs, ILogger<PaperTrading> logger) : IDisposable
 {
     private readonly object gate = new();
     private readonly CancellationTokenSource shutdown = new();
@@ -262,6 +338,15 @@ public sealed class PaperTrading(MarketResearch research, ILogger<PaperTrading> 
     {
         lock (gate) return current?.Snapshot() ?? new(null, "idle", "Симуляция не запущена.", null, null, null, null, 0, false, null, 0, null, null,
             null, [], [], [], 0, 0, null, 0, null, StrategyReplay.Version);
+    }
+
+    // A leader-lag bot trades on its own exchange; the signal exchange must turn out to be the leader.
+    public string StartBot(Bot bot, PaperStart options)
+    {
+        if (bot.Strategy != "leader-lag" || bot.Parameters is not { } p)
+            throw new InvalidOperationException("Для этой стратегии запуск недоступен: алгоритм ещё не реализован.");
+        return Start(new(bot.Symbol[..^4], p.SignalExchange.ToLowerInvariant(), bot.Exchange.ToLowerInvariant(), options.Seconds, p.Settings,
+            p.DelayMs, p.Counter, BotId: bot.Id, BotName: bot.Name, LossLimit: bot.LossLimit, RequireSourceLeader: true));
     }
 
     public string Start(PaperRequest request)
@@ -278,24 +363,51 @@ public sealed class PaperTrading(MarketResearch research, ILogger<PaperTrading> 
             var recording = research.Start(new ResearchRequest(request.Coin, request.Seconds, request.MaxMb, request.Exchange, request.SourceExchange), session);
             session.StopRecording = () => research.Stop(recording);
             current = session;
-            _ = Task.Run(async () =>
-            {
-                try { while (!session.Pump()) await Task.Delay(10, shutdown.Token); }
-                catch (OperationCanceledException) { }
-                catch (Exception e) { logger.LogError(e, "Paper session failed"); }
-            });
+            _ = Task.Run(() => RunAsync(session));
             return session.Id;
         }
     }
 
-    public bool Stop(string id)
+    // Pumps the session and keeps its database record current: on every change and at least every 5 seconds.
+    private async Task RunAsync(PaperSession session)
     {
-        PaperSession? session;
-        lock (gate) session = current?.Id == id ? current : null;
-        if (session is null) return false;
-        session.StopRecording?.Invoke();
-        return true;
+        var saved = Stopwatch.GetTimestamp();
+        try
+        {
+            while (true)
+            {
+                var done = session.Pump();
+                if (session.TakeDirty() || done || Stopwatch.GetElapsedTime(saved) > TimeSpan.FromSeconds(5))
+                {
+                    try { await runs.SaveAsync(session.Record(), CancellationToken.None); }
+                    catch (Exception e) when (e is Microsoft.Data.Sqlite.SqliteException or IOException) { logger.LogWarning(e, "Paper run was not saved"); }
+                    saved = Stopwatch.GetTimestamp();
+                }
+                if (done) return;
+                await Task.Delay(10, shutdown.Token);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception e) { logger.LogError(e, "Paper session failed"); }
     }
+
+    private PaperSession? Find(string id) { lock (gate) return current?.Id == id ? current : null; }
+    public PaperSession? ForBot(string botId) { lock (gate) return current is { Done: false } s && s.BotId == botId ? s : null; }
+
+    public bool Pause(string id, bool paused)
+    {
+        if (Find(id) is not { Done: false } session) return false;
+        session.Pause(paused); return true;
+    }
+
+    public bool Stop(string id, bool force = false)
+    {
+        if (Find(id) is not { } session) return false;
+        session.RequestStop(force); return true;
+    }
+
+    public string StatusFor(string botId, PaperRunRecord? latest) =>
+        ForBot(botId)?.BotStatus() ?? (latest is null ? "draft" : latest.State == "interrupted" ? "interrupted" : "stopped");
 
     public void Dispose() { shutdown.Cancel(); shutdown.Dispose(); }
 }

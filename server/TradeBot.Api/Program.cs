@@ -25,8 +25,9 @@ builder.Services.AddSingleton<RecordingAnalysisStore>();
 builder.Services.AddSingleton<PaperTrading>();
 builder.Services.AddSingleton(_ => new ResearchMarkets(new HttpClient { Timeout = TimeSpan.FromSeconds(8) }));
 builder.Services.AddHostedService(services => services.GetRequiredService<MarketResearch>());
-builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(
-    builder.Configuration["Storage:Path"] ?? Path.Combine(builder.Environment.ContentRootPath, "data", "workspace.db")));
+var storagePath = builder.Configuration["Storage:Path"] ?? Path.Combine(builder.Environment.ContentRootPath, "data", "workspace.db");
+builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(storagePath));
+builder.Services.AddSingleton(_ => new PaperRunStore(storagePath));
 builder.Services.AddRateLimiter(options =>
 {
     options.AddFixedWindowLimiter("local", settings =>
@@ -131,12 +132,22 @@ api.MapPost("/paper", (PaperRequest request, PaperTrading paper) =>
     catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
     catch (InvalidOperationException e) { return Results.Problem(statusCode: 409, title: e.Message); }
 });
-api.MapPost("/paper/{id:guid}/stop", (Guid id, PaperTrading paper) => paper.Stop(id.ToString())
+api.MapPost("/paper/{id:guid}/stop", (Guid id, bool? force, PaperTrading paper) => paper.Stop(id.ToString(), force == true)
     ? Results.Accepted("/api/v1/paper", new { id = id.ToString() })
     : Results.Problem(statusCode: 409, title: "Симуляция уже сменилась. Обновите состояние перед остановкой."));
+api.MapPost("/paper/{id:guid}/pause", (Guid id, PaperTrading paper) => paper.Pause(id.ToString(), true)
+    ? Results.Accepted("/api/v1/paper") : Results.Problem(statusCode: 409, title: "Симуляция уже завершена или сменилась."));
+api.MapPost("/paper/{id:guid}/resume", (Guid id, PaperTrading paper) => paper.Pause(id.ToString(), false)
+    ? Results.Accepted("/api/v1/paper") : Results.Problem(statusCode: 409, title: "Симуляция уже завершена или сменилась."));
 api.MapGet("/research/series/replay", (RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReadSeriesAsync(ct)));
 api.MapPost("/research/series/replay", (SeriesRequest request, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.SeriesAsync(request, ct)));
-api.MapGet("/workspace", async (IWorkspaceStore store, CancellationToken ct) => Results.Ok(await store.ReadAsync(ct)));
+api.MapGet("/workspace", async (IWorkspaceStore store, PaperRunStore runs, PaperTrading paper, CancellationToken ct) =>
+{
+    var workspace = await store.ReadAsync(ct);
+    var latest = await runs.LatestByBotAsync(ct);
+    return Results.Ok(workspace with { Bots = workspace.Bots.Select(b => b with { Status = paper.StatusFor(b.Id, latest.GetValueOrDefault(b.Id)) }).ToArray() });
+});
+api.MapGet("/bots/{id:guid}/runs", async (Guid id, PaperRunStore runs, CancellationToken ct) => Results.Ok(await runs.ListAsync(id.ToString(), 20, ct)));
 api.MapPost("/bots", async (BotConfig config, StrategyCatalog catalog, IWorkspaceStore store, CancellationToken ct) =>
 {
     var errors = catalog.Validate(config);
@@ -153,28 +164,45 @@ api.MapGet("/bots/{id:guid}", async (Guid id, HttpContext context, IWorkspaceSto
     context.Response.Headers.ETag = $"\"{bot.Revision}\"";
     return Results.Ok(bot);
 });
-api.MapPut("/bots/{id:guid}", async (Guid id, BotConfig config, HttpContext context, StrategyCatalog catalog, IWorkspaceStore store, CancellationToken ct) =>
+api.MapPut("/bots/{id:guid}", async (Guid id, BotConfig config, HttpContext context, StrategyCatalog catalog, IWorkspaceStore store, PaperTrading paper, CancellationToken ct) =>
 {
+    if (paper.ForBot(id.ToString()) is not null) return Results.Problem(statusCode: 409, title: "Бот работает в симуляции. Остановите его перед изменением настроек.");
     if (!TryRevision(context, out var revision)) return Results.Problem(statusCode: 428, title: "Нужна версия бота в If-Match.");
     var errors = catalog.Validate(config);
     if (errors.Count > 0) return Results.ValidationProblem(errors);
     var result = await store.UpdateAsync(id.ToString(), revision, config, ct);
     return result.Status == StoreStatus.Saved ? Results.Ok(result.Bot) : Failure(result.Status);
 });
-api.MapDelete("/bots/{id:guid}", async (Guid id, HttpContext context, IWorkspaceStore store, CancellationToken ct) =>
+api.MapDelete("/bots/{id:guid}", async (Guid id, HttpContext context, IWorkspaceStore store, PaperTrading paper, CancellationToken ct) =>
 {
+    if (paper.ForBot(id.ToString()) is not null) return Results.Problem(statusCode: 409, title: "Бот работает в симуляции. Остановите его перед удалением.");
     if (!TryRevision(context, out var revision)) return Results.Problem(statusCode: 428, title: "Нужна версия бота в If-Match.");
     var result = await store.DeleteAsync(id.ToString(), revision, ct);
     return result.Status == StoreStatus.Saved ? Results.NoContent() : Failure(result.Status);
 });
-api.MapPost("/bots/{id:guid}/start", async (Guid id, IWorkspaceStore store, CancellationToken ct) =>
+// Starts a live paper run only: no exchange account or order adapter exists.
+api.MapPost("/bots/{id:guid}/start", async (Guid id, PaperStart? options, IWorkspaceStore store, StrategyCatalog catalog, PaperTrading paper, CancellationToken ct) =>
 {
-    if (!(await store.ReadAsync(ct)).Bots.Any(x => x.Id == id.ToString())) return Failure(StoreStatus.Missing);
-    return Results.Problem(statusCode: 409, title: "Алгоритм ещё не реализован. Запуск недоступен.");
+    var bot = (await store.ReadAsync(ct)).Bots.FirstOrDefault(x => x.Id == id.ToString());
+    if (bot is null) return Failure(StoreStatus.Missing);
+    if (bot.Strategy != "leader-lag") return Results.Problem(statusCode: 409, title: "Алгоритм ещё не реализован. Запуск недоступен.");
+    var errors = catalog.Validate(bot with { StrategyVersion = StrategyReplay.Version });
+    if (errors.Count > 0) return Results.ValidationProblem(errors);
+    try { return Results.Accepted("/api/v1/paper", new { id = paper.StartBot(bot, options ?? new()) }); }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+    catch (InvalidOperationException e) { return Results.Problem(statusCode: 409, title: e.Message); }
 });
+api.MapPost("/bots/{id:guid}/stop", (Guid id, bool? force, PaperTrading paper) => paper.ForBot(id.ToString()) is { } session && paper.Stop(session.Id, force == true)
+    ? Results.Accepted("/api/v1/paper") : Results.Problem(statusCode: 409, title: "Бот сейчас не работает в симуляции."));
+api.MapPost("/bots/{id:guid}/pause", (Guid id, PaperTrading paper) => paper.ForBot(id.ToString()) is { } session && paper.Pause(session.Id, true)
+    ? Results.Accepted("/api/v1/paper") : Results.Problem(statusCode: 409, title: "Бот сейчас не работает в симуляции."));
+api.MapPost("/bots/{id:guid}/resume", (Guid id, PaperTrading paper) => paper.ForBot(id.ToString()) is { } session && paper.Pause(session.Id, false)
+    ? Results.Accepted("/api/v1/paper") : Results.Problem(statusCode: 409, title: "Бот сейчас не работает в симуляции."));
 
 // Validate the database on startup; never silently replace a damaged workspace.
 _ = app.Services.GetRequiredService<IWorkspaceStore>();
+// Marks runs cut off by the previous shutdown as interrupted before anything reads them.
+_ = app.Services.GetRequiredService<PaperRunStore>();
 app.Run();
 
 static bool TryRevision(HttpContext context, out long revision) =>

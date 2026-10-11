@@ -23,24 +23,36 @@ export function Strategies({
       </div>
       <div className="connection-grid">
         {items.map((item) => (
-        <article className="panel exchange-card strategy-card" key={`${item.id}-${item.version}`}>
+          <article className="panel exchange-card strategy-card" key={`${item.id}-${item.version}`}>
             <div className="bot-icon">
               <Code2 size={25} />
             </div>
             <h2>{item.name}</h2>
             <span className="neutral-badge">
-              {item.canRun ? 'Реализована' : 'В разработке'} · v{item.version}
+              {item.implementationStatus === 'paper'
+                ? 'Живая симуляция'
+                : item.canRun
+                  ? 'Реализована'
+                  : 'В разработке'}{' '}
+              · v{item.version}
             </span>
             <p>{item.description}</p>
             <p>Биржи в настройках: {item.exchanges.join(', ')}. Подключения ещё отсутствуют.</p>
-            <button className="button primary" disabled={!item.canCreate} onClick={onCreate}>
+            {/* The bot form only knows the impulse settings so far. */}
+            <button
+              className="button primary"
+              disabled={!item.canCreate || item.id !== 'impulse'}
+              onClick={onCreate}
+            >
               <Plus size={16} />
               Создать экземпляр
             </button>
             <p className="field-hint">
-              {demo
-                ? 'Настройки останутся в демопространстве браузера.'
-                : 'Сохраним черновик на сервере. Запуск станет доступен после реализации алгоритма.'}
+              {item.id !== 'impulse'
+                ? 'Создание и запуск этого бота из интерфейса появятся в следующем обновлении.'
+                : demo
+                  ? 'Настройки останутся в демопространстве браузера.'
+                  : 'Сохраним черновик на сервере. Запуск станет доступен после реализации алгоритма.'}
             </p>
           </article>
         ))}
