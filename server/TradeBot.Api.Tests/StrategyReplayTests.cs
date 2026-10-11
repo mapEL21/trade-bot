@@ -42,7 +42,7 @@ public class StrategyReplayTests
             var sign = scenario.Mode == "follow" ? 1 : -1;
             Assert.Equal(expectedEntry, trade.EntryPrice); Assert.Equal(expectedExit, trade.ExitPrice);
             Assert.Equal(sign * (expectedExit / expectedEntry - 1) * 10000 - (1 + expectedExit / expectedEntry), trade.NetBps);
-            Assert.Contains(scenario.Journal, x => x.Action == "вход запрошен");
+            Assert.Contains(scenario.Journal, x => x.Action == "вход отправлен");
         }
     }
 
@@ -66,10 +66,27 @@ public class StrategyReplayTests
     }
 
     [Fact]
-    public void GapBeforeEntryCancelsPendingOrder()
+    public void GapOnExecutionVenueWhileEntryIsInFlightLeavesFillUnknown()
     {
+        // The order already left; losing the data does not cancel it.
         var data = Data(); data.Add(new(120255, 999999, "binance-public", "c", "gap", null));
-        Assert.All(Run(data).Scenarios, s => { Assert.Empty(s.TradeLog); Assert.Equal(0, s.UnresolvedPositions); Assert.Contains(s.Journal, x => x.Reason == "Разрыв данных до исполнения."); });
+        Assert.All(Run(data).Scenarios, s =>
+        {
+            Assert.Empty(s.TradeLog); Assert.Equal(1, s.UnresolvedPositions);
+            Assert.Contains(s.Journal, x => x.Reason.Contains("исполнение неизвестно"));
+        });
+    }
+
+    [Fact]
+    public void SentOrderExecutesEvenIfTheLagDisappearedInFlight()
+    {
+        // The target catches up at 120.3 s: before the 100 ms order arrives, after the 50 ms one.
+        var data = Data().Select(x => x.Ticks is >= 120300 and < 120500 && x.Source == "binance-public" && x.Quote is { } q
+            ? x with { Quote = q with { Bid = 120.99m, Ask = 121.01m } } : x).ToList();
+        var result = Run(data);
+        var late = Assert.Single(result.Scenarios.Single(x => x.Mode == "follow" && x.DelayMs == 100).TradeLog);
+        Assert.Equal(121.01m, late.EntryPrice); Assert.True(late.NetBps < 0);
+        Assert.Equal(120.01m, Assert.Single(result.Scenarios.Single(x => x.Mode == "follow" && x.DelayMs == 50).TradeLog).EntryPrice);
     }
 
     [Fact]

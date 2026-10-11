@@ -39,7 +39,8 @@ public static class StrategyReplay
     // Quantity is the open remainder; earlier partial exits are kept so the closed trade gets one weighted exit price.
     private sealed record Position(int Sign, double At, decimal Price, decimal EntryResidual, decimal Quantity = 0,
         decimal ExitedQuantity = 0, decimal ExitedValue = 0, string? RetryReason = null, decimal? EntryFeeBps = null);
-    private sealed record Pending(int Sign, double Due, string Reason, bool Exit, decimal Quantity = 0, decimal Limit = 0);
+    // An order already sent: side, size, limit and the signal's lag are fixed at the decision and cannot be revised in flight.
+    private sealed record Pending(int Sign, double Due, string Reason, bool Exit, decimal Quantity = 0, decimal Limit = 0, decimal Residual = 0);
     // A post-only entry resting at its own price from Live until a cancel request (CancelAt) reaches the exchange.
     private sealed record Resting(int Sign, double Live, decimal Price, decimal Quantity, double Expires, double? CancelAt, decimal Residual);
     private sealed class Quotes
@@ -77,18 +78,18 @@ public static class StrategyReplay
         var candidates = analysis.Directions.Select(d => new ReplayLeader(d.SourceExchange, d.Exchange,
             d.Horizons[0].Samples, d.Horizons[0].MeanMoveBps)).ToArray();
         string[] notes = [
-            "Исследовательская стратегия v0.3.0: поводырь выбран только на начальном участке и зафиксирован. Это предварительная гипотеза лидерства по реакции через 100 мс, не доказанная причинность.",
+            "Исследовательская стратегия v0.3.1: поводырь выбран только на начальном участке и зафиксирован. Это предварительная гипотеза лидерства по реакции через 100 мс, не доказанная причинность.",
             settings.ExecutionModel == "depth"
                 ? "Исполнение по видимому стакану: условная немедленная заявка с пределом цены от bid/ask в момент решения. Размер округляется вниз. Цена — средняя по уровням плюс заданное дополнительное проскальзывание; комиссия за обе стороны. Это модель IOC, а не точная эмуляция правил брокера."
                 : "Упрощённая модель BBO: последние свежие bid/ask, проскальзывание и комиссия. Объём, минимальная заявка и частичные исполнения не учитываются. Номинал и предел цены в этой модели не используются.",
-            "Одна позиция на сценарий. Задержка применяется и к входу, и к выходу. При потере свежести или разрыве во время позиции сценарий останавливается с неоценённой позицией, без выдуманного закрытия.",
+            "Одна позиция на сценарий. Задержка — время от отправки заявки до её исполнения на бирже, она применяется и к входу, и к выходу. Все условия входа проверяются в момент сигнала; отправленная заявка исполняется на зафиксированных условиях, даже если отставание к тому времени исчезло. Потеря данных ведомой биржи до исполнения даёт неопределённый результат, а не отмену. При потере свежести или разрыве во время позиции сценарий останавливается с неоценённой позицией, без выдуманного закрытия.",
             "В модели стакана сумма и просадка в б.п. нормированы на заданный номинал, средний итог — на фактический объём каждой закрытой сделки. Если выход не уложился в предел цены, остаток закрывается новой заявкой после следующего обновления котировок, а сделка получает среднюю цену всех частей выхода. Если исполнение за записанной глубиной неизвестно, остаток не закрывается выдуманной ценой: сценарий прекращается, вся незавершённая сделка исключена из итогов закрытых сделок.",
             "Используется только записанная глубина, без скрытых заявок и очереди maker. Если при входе неизвестно исполнение за последним уровнем, вход пропускается. Запись не отражает влияние нашего бота на дальнейший рынок. Плечо, маржа, funding, ликвидация, ценовые коридоры биржи и персональные лимиты не моделируются; тариф 5 б.п. — пример.",
             "Контрольный вход против импульса использует те же первоначальные сигналы отбора, но не гарантирует доступного движения в обратную сторону. Сценарии независимы; результаты нельзя складывать.",
             "Выбор лучшей задержки на этой записи требует новой независимой проверки. Положительный результат не подтверждает прибыльность. Живая симуляция и торговое исполнение ещё не подключены.",
             .. (settings.EntryOrder == "maker" ? new[] { "Вход maker: post-only заявка по своей лучшей цене (bid для покупки, ask для продажи) на момент решения, с той же задержкой доставки. Заявка отклоняется, если к моменту выставления цена уже дошла до её уровня. Исполнение засчитывается только когда встречная лучшая цена дошла до уровня заявки: тогда весь уровень гарантированно съеден, независимо от места в очереди. Сделки по нашей цене без этого не учитываются, поэтому доля исполнений занижена, а исполняются в основном заявки, против которых цена пошла. Отмена по сроку или сокращению отставания доходит до биржи с той же задержкой. Выход — taker, как раньше." } : Array.Empty<string>())
         ];
-        ReplayReport Empty(string status, string reason) => new("leader-lag", "0.3.0", recording, settings, status, reason,
+        ReplayReport Empty(string status, string reason) => new("leader-lag", "0.3.1", recording, settings, status, reason,
             null, null, null, duration, candidates, [], notes);
         if (recording.Status != "completed") return Empty("incomplete", "Нужна запись без ошибок и разрывов: текущая сессия завершена неполно.");
         if (duration <= settings.CalibrationSeconds + settings.MaxHoldMs / 1000.0 + .2)
@@ -122,7 +123,7 @@ public static class StrategyReplay
         var scenarios = new List<ReplayScenario>();
         foreach (var delay in new[] { 10, 25, 50, 100 })
             foreach (var counter in new[] { false, true }) scenarios.Add(Simulate(ticks, leader, basis, duration * 1000, settings, delay, counter, ct, instrument));
-        return new("leader-lag", "0.3.0", recording, settings, "evaluated", "Поводырь выбран на начальном участке. Результаты ниже относятся только к последующей части записи.",
+        return new("leader-lag", "0.3.1", recording, settings, "evaluated", "Поводырь выбран на начальном участке. Результаты ниже относятся только к последующей части записи.",
             best.SourceExchange, best.Exchange, basis, duration, candidates, scenarios.ToArray(), notes, settings.ExecutionModel == "depth" ? instrument : null);
     }
 
@@ -182,6 +183,9 @@ public static class StrategyReplay
         }
         void LosePosition(double at, string reason = "Потеря данных при открытой позиции: сценарий остановлен.")
         { unresolved++; halted = true; pending = null; Log(at, "не оценено", reason, quantity: depth ? position?.Quantity : null); }
+        // Losing data while an entry is in flight leaves its fill unknown; it is not a guaranteed cancel.
+        void LoseOrder(double at, decimal quantity)
+        { unresolved++; halted = true; pending = null; Log(at, "не оценено", "Потеря данных ведомой биржи при отправленной заявке на вход: исполнение неизвестно.", quantity: depth ? quantity : null); }
         void Advance(double to)
         {
             while (!halted)
@@ -201,10 +205,10 @@ public static class StrategyReplay
                 }
                 if (pending is null) { pending = Order(position!.Sign, due, "Лимит времени удержания", true); Log(due, "выход запрошен", pending.Reason); continue; }
                 var order = pending; pending = null;
-                if (!Fresh(due))
-                { if (position is not null) LosePosition(due); else { skipped++; Log(due, "пропуск", "К моменту входа котировки устарели."); } continue; }
-                if (depth && (order.Exit || !maker) && !book.Fresh(due, s.MaxAgeMs))
-                { if (position is not null) LosePosition(due); else { skipped++; Log(due, "пропуск", "Нет свежего восстановленного стакана для исполнения."); } continue; }
+                if (order.Exit && (!Fresh(due) || (depth && !book.Fresh(due, s.MaxAgeMs)))) { LosePosition(due); continue; }
+                // An entry only needs the execution venue; the leader going quiet does not cancel an order already sent.
+                if (!order.Exit && (!q[1 - leader].Fresh(due, s.MaxAgeMs) || (depth && !maker && !book.Fresh(due, s.MaxAgeMs))))
+                { LoseOrder(due, order.Quantity); continue; }
                 if (order.Exit)
                 {
                     var price = Price(order.Sign, true); decimal total = 0;
@@ -238,16 +242,13 @@ public static class StrategyReplay
                 }
                 else
                 {
-                    var direction = counter ? -order.Sign : order.Sign;
-                    if (direction * Residual() <= Costs()) { skipped++; Log(due, "пропуск", "Отставание исчезло до исполнения."); continue; }
-                    if (depth && !SizeAllowed(order.Quantity, maker ? order.Limit : Math.Min(order.Limit, q[1 - leader].Current!.Mid)))
-                    { skipped++; Log(due, "пропуск", "Размер заявки после округления не проходит минимальный номинал или ограничения количества.", quantity: order.Quantity); continue; }
+                    // No second look at the lag here: the order left at the signal and executes on the conditions fixed then.
                     if (maker)
                     {
                         var quote = q[1 - leader].Current!;
                         if (order.Sign > 0 ? quote.Ask <= order.Limit : quote.Bid >= order.Limit)
                         { skipped++; Log(due, "пропуск", "Post-only заявка отклонена: цена уже дошла до её уровня, и она исполнилась бы как taker."); continue; }
-                        makerOrders++; resting = new(order.Sign, due, order.Limit, order.Quantity, due + s.MakerWaitMs, null, Residual());
+                        makerOrders++; resting = new(order.Sign, due, order.Limit, order.Quantity, due + s.MakerWaitMs, null, order.Residual);
                         Log(due, "заявка maker выставлена", counter ? "Контрольный вход против импульса" : "Отставание покрывает заданный порог расходов",
                             order.Sign, order.Limit, quantity: depth ? order.Quantity : null);
                         continue;
@@ -257,14 +258,18 @@ public static class StrategyReplay
                     {
                         var fill = book.Fill(order.Sign > 0, order.Quantity, order.Limit, s.SlippageBps, instrument!.QuantityStep, false);
                         if (fill.BeyondVisibleDepth)
-                        { skipped++; Log(due, "пропуск", "Для объёма заявки не хватает записанной глубины; исполнение за последним уровнем неизвестно.", quantity: order.Quantity); continue; }
+                        {
+                            unresolved++; halted = true;
+                            Log(due, "не оценено", "Для объёма отправленной заявки не хватает записанной глубины; исполнение за последним уровнем неизвестно.", quantity: order.Quantity);
+                            continue;
+                        }
                         if (fill.Quantity == 0)
                         { skipped++; Log(due, "пропуск", "В пределах цены заявки нет доступного объёма."); continue; }
                         book.Fill(order.Sign > 0, order.Quantity, order.Limit, s.SlippageBps, instrument.QuantityStep, true);
                         price = fill.Price; quantity = fill.Quantity;
                         if (quantity < order.Quantity) { partialEntries++; Log(due, "частичный вход", "Доступна только часть объёма до предела цены; неисполненный остаток отменён.", order.Sign, price, quantity: quantity); }
                     }
-                    position = new(order.Sign, due, price, Residual(), quantity);
+                    position = new(order.Sign, due, price, order.Residual, quantity);
                     Log(due, "вход", counter ? "Контрольный вход против импульса" : "Отставание покрывает заданный порог расходов", order.Sign, price, quantity: depth ? quantity : null);
                 }
             }
@@ -284,7 +289,7 @@ public static class StrategyReplay
             {
                 if (tick.Venue == 1 - leader) { book.Reset(); bookConnection = tick.Connection; }
                 if (position is not null) { LosePosition(tick.Ms); break; }
-                if (pending is not null) { pending = null; skipped++; Log(tick.Ms, "пропуск", "Разрыв данных до исполнения."); }
+                if (pending is not null && tick.Venue == 1 - leader) { LoseOrder(tick.Ms, pending.Quantity); break; }
                 if (resting is not null && tick.Venue == 1 - leader)
                 {
                     // Without the execution venue's prices we cannot know whether the resting order filled.
@@ -342,8 +347,13 @@ public static class StrategyReplay
             signals++; nextSignal = tick.Ms + Math.Max(250, s.WindowMs);
             var sign = Math.Sign(impulse);
             if (sign * residual <= Costs()) { skipped++; Log(tick.Ms, "пропуск", "Оставшееся отставание меньше порога расходов и запаса."); continue; }
-            pending = Order(counter ? -sign : sign, tick.Ms, "Импульс и отставание", false);
-            Log(tick.Ms, "вход запрошен", pending.Reason, pending.Sign);
+            // Everything that can stop an entry is decided here, before sending; afterwards only the exchange decides.
+            if (depth && !maker && !book.Fresh(tick.Ms, s.MaxAgeMs))
+            { skipped++; Log(tick.Ms, "пропуск", "Нет свежего восстановленного стакана для исполнения."); continue; }
+            var order = Order(counter ? -sign : sign, tick.Ms, "Импульс и отставание", false) with { Residual = residual };
+            if (depth && !SizeAllowed(order.Quantity, maker ? order.Limit : Math.Min(order.Limit, q[1 - leader].Current!.Mid)))
+            { skipped++; Log(tick.Ms, "пропуск", "Размер заявки после округления не проходит минимальный номинал или ограничения количества.", quantity: order.Quantity); continue; }
+            pending = order; Log(tick.Ms, "вход отправлен", pending.Reason, pending.Sign, depth ? pending.Limit : null, quantity: depth ? pending.Quantity : null);
         }
         if (!halted) Advance(end);
         if (!halted && position is not null) { unresolved++; Log(end, "не оценено", "Запись закончилась с открытой позицией."); }

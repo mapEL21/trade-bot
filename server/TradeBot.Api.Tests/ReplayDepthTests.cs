@@ -86,7 +86,7 @@ public class ReplayDepthTests
     public void ReplayUsesVolumeWeightedPricesAndActualRoundTripFees()
     {
         var report = Run(Market()); var scenario = Follow(report); var trade = Assert.Single(scenario.TradeLog);
-        Assert.Equal("evaluated", report.Status); Assert.Equal("0.3.0", report.Version);
+        Assert.Equal("evaluated", report.Status); Assert.Equal("0.3.1", report.Version);
         Assert.Equal(9, trade.Quantity); Assert.Equal((2 * 120.01m + 7 * 120.03m) / 9, trade.EntryPrice);
         Assert.Equal(120.99m, trade.ExitPrice);
         Assert.Equal(9 * (trade.EntryPrice + trade.ExitPrice) / 10000, trade.FeesQuote);
