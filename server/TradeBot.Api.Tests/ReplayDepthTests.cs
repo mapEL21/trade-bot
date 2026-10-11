@@ -86,7 +86,7 @@ public class ReplayDepthTests
     public void ReplayUsesVolumeWeightedPricesAndActualRoundTripFees()
     {
         var report = Run(Market()); var scenario = Follow(report); var trade = Assert.Single(scenario.TradeLog);
-        Assert.Equal("evaluated", report.Status); Assert.Equal("0.2.0", report.Version);
+        Assert.Equal("evaluated", report.Status); Assert.Equal("0.2.1", report.Version);
         Assert.Equal(9, trade.Quantity); Assert.Equal((2 * 120.01m + 7 * 120.03m) / 9, trade.EntryPrice);
         Assert.Equal(120.99m, trade.ExitPrice);
         Assert.Equal(9 * (trade.EntryPrice + trade.ExitPrice) / 10000, trade.FeesQuote);
@@ -118,13 +118,45 @@ public class ReplayDepthTests
     }
 
     [Fact]
+    public void ExitBlockedByPriceLimitIsRetriedInsteadOfDroppingTheTradeFromStatistics()
+    {
+        // A short dip in the book makes the first IOC exit miss its limit. Excluding such trades would hide the worst exits.
+        var market = Market();
+        for (var i = 0; i < market.Books.Count; i++)
+        {
+            var item = market.Books[i];
+            if (item.Ticks is >= 120500 and < 120600) market.Books[i] = item with { Update = item.Update! with { Bids = [new(120.8m, 100)] } };
+        }
+        var scenario = Follow(Run(market)); var trade = Assert.Single(scenario.TradeLog);
+        Assert.Equal(0, scenario.UnresolvedPositions); Assert.Equal(9, trade.Quantity);
+        Assert.Equal(120.99m, trade.ExitPrice); Assert.True(trade.ExitSeconds > 120.51);
+        Assert.Contains(scenario.Journal, x => x.Action == "выход не исполнен");
+    }
+
+    [Fact]
+    public void PartialExitsAccumulateIntoOneClosedTradeAtWeightedPrice()
+    {
+        var market = Market();
+        for (var i = 0; i < market.Books.Count; i++)
+        {
+            var item = market.Books[i];
+            if (item.Ticks is >= 120500 and < 120550) market.Books[i] = item with { Update = item.Update! with { Bids = [new(121m, 4), new(120.5m, 100)] } };
+        }
+        var scenario = Follow(Run(market)); var trade = Assert.Single(scenario.TradeLog);
+        Assert.Equal(1, scenario.PartialExits); Assert.Equal(9, trade.Quantity);
+        Assert.Equal((4 * 121m + 5 * 120.99m) / 9, trade.ExitPrice);
+        Assert.Equal(9 * (trade.EntryPrice + trade.ExitPrice) / 10000, trade.FeesQuote);
+        Assert.Equal(trade.NetQuote, scenario.ClosedNetQuote);
+    }
+
+    [Fact]
     public void PartialExitLeavesExplicitRemainderAndDoesNotFabricateClosedProfit()
     {
         var market = Market();
         for (var i = 0; i < market.Books.Count; i++)
         {
             var item = market.Books[i];
-            if (item.Ticks >= 120500) market.Books[i] = item with { Update = item.Update! with { Bids = [new(120.99m, 1), new(119, 100)] } };
+            if (item.Ticks >= 120500) market.Books[i] = item with { Update = item.Update! with { Bids = [new(120.99m, 1)] } };
         }
         var scenario = Follow(Run(market));
         Assert.Empty(scenario.TradeLog); Assert.Equal(1, scenario.PartialExits); Assert.Equal(1, scenario.UnresolvedPositions);

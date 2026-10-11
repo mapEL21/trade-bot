@@ -33,7 +33,9 @@ public sealed record ReplayReport(string Strategy, string Version, AnalysisRecor
 public static class StrategyReplay
 {
     private sealed record Tick(double Ms, int Venue, MarketQuote? Quote, bool Reset, int Sequence, string Connection, bool IsBook = false, ReplayBookUpdate? Book = null);
-    private sealed record Position(int Sign, double At, decimal Price, decimal EntryResidual, decimal Quantity = 0);
+    // Quantity is the open remainder; earlier partial exits are kept so the closed trade gets one weighted exit price.
+    private sealed record Position(int Sign, double At, decimal Price, decimal EntryResidual, decimal Quantity = 0,
+        decimal ExitedQuantity = 0, decimal ExitedValue = 0, string? RetryReason = null);
     private sealed record Pending(int Sign, double Due, string Reason, bool Exit, decimal Quantity = 0, decimal Limit = 0);
     private sealed class Quotes
     {
@@ -70,17 +72,17 @@ public static class StrategyReplay
         var candidates = analysis.Directions.Select(d => new ReplayLeader(d.SourceExchange, d.Exchange,
             d.Horizons[0].Samples, d.Horizons[0].MeanMoveBps)).ToArray();
         string[] notes = [
-            "Исследовательская стратегия v0.2: поводырь выбран только на начальном участке и зафиксирован. Это предварительная гипотеза лидерства по реакции через 100 мс, не доказанная причинность.",
+            "Исследовательская стратегия v0.2.1: поводырь выбран только на начальном участке и зафиксирован. Это предварительная гипотеза лидерства по реакции через 100 мс, не доказанная причинность.",
             settings.ExecutionModel == "depth"
                 ? "Исполнение по видимому стакану: условная немедленная заявка с пределом цены от bid/ask в момент решения. Размер округляется вниз. Цена — средняя по уровням плюс заданное дополнительное проскальзывание; комиссия за обе стороны. Это модель IOC, а не точная эмуляция правил брокера."
                 : "Упрощённая модель BBO: последние свежие bid/ask, проскальзывание и комиссия. Объём, минимальная заявка и частичные исполнения не учитываются. Номинал и предел цены в этой модели не используются.",
             "Одна позиция на сценарий. Задержка применяется и к входу, и к выходу. При потере свежести или разрыве во время позиции сценарий останавливается с неоценённой позицией, без выдуманного закрытия.",
-            "В модели стакана сумма и просадка в б.п. нормированы на заданный номинал, средний итог — на фактический объём каждой закрытой сделки. При частичном выходе остаток не закрывается выдуманной ценой: сценарий прекращается; вся незавершённая сделка исключена из итогов закрытых сделок.",
+            "В модели стакана сумма и просадка в б.п. нормированы на заданный номинал, средний итог — на фактический объём каждой закрытой сделки. Если выход не уложился в предел цены, остаток закрывается новой заявкой после следующего обновления котировок, а сделка получает среднюю цену всех частей выхода. Если исполнение за записанной глубиной неизвестно, остаток не закрывается выдуманной ценой: сценарий прекращается, вся незавершённая сделка исключена из итогов закрытых сделок.",
             "Используется только записанная глубина, без скрытых заявок и очереди maker. Если при входе неизвестно исполнение за последним уровнем, вход пропускается. Запись не отражает влияние нашего бота на дальнейший рынок. Плечо, маржа, funding, ликвидация, ценовые коридоры биржи и персональные лимиты не моделируются; тариф 5 б.п. — пример.",
             "Контрольный вход против импульса использует те же первоначальные сигналы отбора, но не гарантирует доступного движения в обратную сторону. Сценарии независимы; результаты нельзя складывать.",
             "Выбор лучшей задержки на этой записи требует новой независимой проверки. Положительный результат не подтверждает прибыльность. Живая симуляция и торговое исполнение ещё не подключены."
         ];
-        ReplayReport Empty(string status, string reason) => new("leader-lag", "0.2.0", recording, settings, status, reason,
+        ReplayReport Empty(string status, string reason) => new("leader-lag", "0.2.1", recording, settings, status, reason,
             null, null, null, duration, candidates, [], notes);
         if (recording.Status != "completed") return Empty("incomplete", "Нужна запись без ошибок и разрывов: текущая сессия завершена неполно.");
         if (duration <= settings.CalibrationSeconds + settings.MaxHoldMs / 1000.0 + .2)
@@ -114,7 +116,7 @@ public static class StrategyReplay
         var scenarios = new List<ReplayScenario>();
         foreach (var delay in new[] { 10, 25, 50, 100 })
             foreach (var counter in new[] { false, true }) scenarios.Add(Simulate(ticks, leader, basis, duration * 1000, settings, delay, counter, ct, instrument));
-        return new("leader-lag", "0.2.0", recording, settings, "evaluated", "Поводырь выбран на начальном участке. Результаты ниже относятся только к последующей части записи.",
+        return new("leader-lag", "0.2.1", recording, settings, "evaluated", "Поводырь выбран на начальном участке. Результаты ниже относятся только к последующей части записи.",
             best.SourceExchange, best.Exchange, basis, duration, candidates, scenarios.ToArray(), notes, settings.ExecutionModel == "depth" ? instrument : null);
     }
 
@@ -179,30 +181,34 @@ public static class StrategyReplay
                 { if (position is not null) LosePosition(due); else { skipped++; Log(due, "пропуск", "Нет свежего восстановленного стакана для исполнения."); } continue; }
                 if (order.Exit)
                 {
-                    var price = Price(order.Sign, true);
+                    var price = Price(order.Sign, true); decimal total = 0;
                     if (depth)
                     {
                         var fill = book.Fill(order.Sign < 0, order.Quantity, order.Limit, s.SlippageBps, instrument!.QuantityStep, true);
-                        if (fill.Quantity < position!.Quantity)
+                        if (fill.Quantity > 0 && fill.Quantity < position!.Quantity)
                         {
-                            if (fill.Quantity > 0)
-                            {
-                                partialExits++; Log(due, "частичный выход", "Исполнена только видимая часть в пределах цены; сделка не закрыта полностью.", order.Sign, fill.Price, quantity: fill.Quantity);
-                                position = position with { Quantity = position.Quantity - fill.Quantity };
-                            }
-                            LosePosition(due, fill.BeyondVisibleDepth ? "Выход за пределы записанной глубины: остаток позиции не оценён." : "Предел цены не позволил закрыть остаток позиции; сценарий остановлен.");
+                            partialExits++; Log(due, "частичный выход", "Исполнена только видимая часть в пределах цены; сделка не закрыта полностью.", order.Sign, fill.Price, quantity: fill.Quantity);
+                        }
+                        position = position! with { Quantity = position.Quantity - fill.Quantity, ExitedQuantity = position.ExitedQuantity + fill.Quantity,
+                            ExitedValue = position.ExitedValue + fill.Quantity * fill.Price };
+                        if (position.Quantity > 0)
+                        {
+                            if (fill.BeyondVisibleDepth) { LosePosition(due, "Выход за пределы записанной глубины: остаток позиции не оценён."); continue; }
+                            // A real bot keeps closing. Dropping trades whose exit missed the limit would hide the worst exits from statistics.
+                            position = position with { RetryReason = position.RetryReason ?? order.Reason };
+                            Log(due, "выход не исполнен", "Предел цены не позволил закрыть остаток; новая заявка на выход после следующего обновления котировок.", order.Sign, quantity: position.Quantity);
                             continue;
                         }
-                        price = fill.Price;
+                        total = position.ExitedQuantity; price = position.ExitedValue / total;
                     }
                     var net = Net(price);
-                    decimal? fees = depth ? position!.Quantity * (position.Price + price) * s.FeeBps / 10000 : null;
-                    decimal? cash = depth ? position!.Quantity * position.Sign * (price - position.Price) - fees : null;
+                    decimal? fees = depth ? total * (position!.Price + price) * s.FeeBps / 10000 : null;
+                    decimal? cash = depth ? total * position!.Sign * (price - position.Price) - fees : null;
                     trades.Add(new(position!.At / 1000, due / 1000, order.Sign > 0 ? "long" : "short", position.Price, price, net, order.Reason,
-                        depth ? position.Quantity : null, cash, fees));
+                        depth ? total : null, cash, fees));
                     closedNet += cash ?? 0;
                     sum += depth ? cash!.Value / s.OrderNotional * 10000 : net; peak = Math.Max(peak, sum); drawdown = Math.Max(drawdown, peak - sum);
-                    Log(due, "выход", order.Reason, order.Sign, price, net, depth ? position.Quantity : null); position = null;
+                    Log(due, "выход", order.Reason, order.Sign, price, net, depth ? total : null); position = null;
                 }
                 else
                 {
@@ -263,7 +269,8 @@ public static class StrategyReplay
                     }
                     var mark = Net(markPrice);
                     var direction = Math.Sign(position.EntryResidual);
-                    var reason = insufficient ? "Недостаточно видимой ликвидности для полного выхода" : mark <= -s.StopLossBps ? "Ограничение убытка" : direction * residual <= s.MinEdgeBps ? "Отставание сократилось или сменило знак" : null;
+                    var reason = position.RetryReason is { } retry ? "Повтор выхода: " + retry
+                        : insufficient ? "Недостаточно видимой ликвидности для полного выхода" : mark <= -s.StopLossBps ? "Ограничение убытка" : direction * residual <= s.MinEdgeBps ? "Отставание сократилось или сменило знак" : null;
                     var prior = q[leader].Before(tick.Ms - s.WindowMs, s.MaxAgeMs);
                     if (reason is null && prior is not null && direction * (q[leader].Current!.Mid / prior.Mid - 1) * 10000 <= -s.ImpulseBps)
                         reason = "Поводырь развернулся";
