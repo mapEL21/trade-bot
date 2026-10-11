@@ -443,15 +443,11 @@ export default function App() {
                     <h1>{bot.name}</h1>
                     <p>
                       {bot.symbol.replace('USDT', ' / USDT')}{' '}
-                      <span className="dot-separator">·</span> {bot.exchange}{' '}
-                      <span className="dot-separator">·</span> USDT Perpetual
-                      {bot.parameters && (
-                        <>
-                          {' '}
-                          <span className="dot-separator">·</span> сигнал{' '}
-                          {bot.parameters.signalExchange}
-                        </>
-                      )}
+                      <span className="dot-separator">·</span> USDT Perpetual{' '}
+                      <span className="dot-separator">·</span>{' '}
+                      {bot.parameters
+                        ? `${bot.exchange} ↔ ${bot.parameters.signalExchange}`
+                        : bot.exchange}
                     </p>
                   </div>
                 </div>
