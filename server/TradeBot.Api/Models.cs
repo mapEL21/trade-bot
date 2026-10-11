@@ -24,14 +24,29 @@ public sealed record Bot(string Id, string Name, string Exchange, string Symbol,
 }
 
 // One closed paper trade in USDT, in the shape the workspace UI uses for statistics and charts.
+// A closed trade in the form shared by every strategy: what was traded where, when, for how long and at what size.
+// The instrument and exchanges come from the run that made the trade, never from the bot's current settings, so
+// editing a bot does not rewrite its history. Leader is strategy-specific and stays null for strategies without one.
 public sealed record BotTrade(string Id, string At, string Side, decimal Gross, decimal Fee, decimal Entry, decimal Exit,
-    decimal Quantity, string RunId, bool Simulated = true)
+    decimal Quantity, string RunId, bool Simulated = true, string? Symbol = null, string? Exchange = null,
+    string? Leader = null, string? OpenedAt = null, double? HoldSeconds = null, decimal? Notional = null,
+    string? ExitReason = null)
 {
+    static readonly Dictionary<string, string> ExchangeNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["binance"] = "Binance", ["bybit"] = "Bybit", ["okx"] = "OKX", ["hyperliquid"] = "Hyperliquid",
+    };
+
+    public static string? ExchangeName(string? id) => id is null ? null : ExchangeNames.GetValueOrDefault(id, id);
+
     // Exit time is the run start plus the trade's session time; fees and size come from the depth model, or follow
     // from the configured size and fees in the simplified BBO model.
     public static IEnumerable<BotTrade> FromRun(PaperRunRecord run)
     {
         var s = run.Settings;
+        var symbol = run.Coin.ToUpperInvariant() + "USDT";
+        var exchange = ExchangeName(run.ExecutionExchange ?? run.Exchange);
+        var leader = ExchangeName(run.Leader);
         return run.TradeLog.Select((t, i) =>
         {
             var notional = s.OrderQuantity is { } coins ? coins * t.EntryPrice : s.OrderNotional;
@@ -40,7 +55,10 @@ public sealed record BotTrade(string Id, string At, string Side, decimal Gross, 
             var fee = t.FeesQuote ?? quantity * (t.EntryPrice * entryFee + t.ExitPrice * s.FeeBps) / 10000;
             var net = t.NetQuote ?? t.NetBps / 10000 * quantity * t.EntryPrice;
             return new BotTrade($"{run.Id}-{i}", run.StartedUtc.AddSeconds(t.ExitSeconds).ToString("O"), t.Side, net + fee, fee,
-                t.EntryPrice, t.ExitPrice, quantity, run.Id);
+                t.EntryPrice, t.ExitPrice, quantity, run.Id, Symbol: symbol, Exchange: exchange, Leader: leader,
+                OpenedAt: run.StartedUtc.AddSeconds(t.EntrySeconds).ToString("O"),
+                HoldSeconds: Math.Max(0, t.ExitSeconds - t.EntrySeconds), Notional: quantity * t.EntryPrice,
+                ExitReason: t.ExitReason);
         });
     }
 }

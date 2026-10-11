@@ -251,6 +251,14 @@ public sealed class PaperTradingTests : IDisposable
         Assert.Equal((source.EntryPrice, source.ExitPrice, source.Quantity), (trade.Entry, trade.Exit, (decimal?)trade.Quantity));
         Assert.Equal(run.StartedUtc.AddSeconds(source.ExitSeconds).ToString("O"), trade.At);
         Assert.True(trade.Simulated);
+        // Instrument, exchanges, timing and size belong to the trade's own run, not to the bot's current settings.
+        Assert.Equal("SOLUSDT", trade.Symbol);
+        Assert.Equal("Binance", trade.Exchange);
+        Assert.Equal("Hyperliquid", trade.Leader);
+        Assert.Equal(source.ExitSeconds - source.EntrySeconds, trade.HoldSeconds!.Value, 9);
+        Assert.Equal(run.StartedUtc.AddSeconds(source.EntrySeconds).ToString("O"), trade.OpenedAt);
+        Assert.Equal(source.Quantity * source.EntryPrice, trade.Notional);
+        Assert.Equal(source.ExitReason, trade.ExitReason);
         // The simplified BBO model has no sizes: they follow from the configured nominal and fees.
         var bbo = run with { Settings = Depth with { ExecutionModel = "bbo" }, TradeLog = [source with { Quantity = null, NetQuote = null, FeesQuote = null }] };
         var estimated = Assert.Single(BotTrade.FromRun(bbo));

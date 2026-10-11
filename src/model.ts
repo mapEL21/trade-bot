@@ -54,6 +54,16 @@ export interface Trade {
   // Set by the server for trades of a live paper run: simulated, never a real execution.
   runId?: string;
   simulated?: boolean;
+  // Common to every strategy, taken from the run that made the trade rather than the bot's current settings.
+  symbol?: string;
+  exchange?: string;
+  openedAt?: string;
+  holdSeconds?: number;
+  // Position size in USDT at the entry price.
+  notional?: number;
+  exitReason?: string;
+  // Strategy-specific: the exchange that gave the signal in leader-lag.
+  leader?: string;
 }
 export interface Bot extends BotConfig {
   revision?: number;
@@ -370,7 +380,14 @@ export function parseWorkspace(text: string): Workspace {
         ) ||
         t.entry <= 0 ||
         t.exit <= 0 ||
-        t.quantity <= 0
+        t.quantity <= 0 ||
+        [t.symbol, t.exchange, t.leader, t.exitReason].some(
+          (s) => s != null && typeof s !== 'string',
+        ) ||
+        (t.openedAt != null && !Number.isFinite(Date.parse(t.openedAt))) ||
+        [t.holdSeconds, t.notional].some(
+          (n) => n != null && (typeof n !== 'number' || !Number.isFinite(n) || n < 0),
+        )
       )
         throw new Error('Invalid trade');
   }

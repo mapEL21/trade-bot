@@ -134,9 +134,7 @@ export default function App() {
   const [toast, setToast] = useState('');
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bot = workspace.bots.find((b) => b.id === selected);
-  const allTrades = workspace.bots.flatMap((b) =>
-    b.trades.map((t) => ({ ...t, botName: b.name, symbol: b.symbol })),
-  );
+  const allTrades = workspace.bots.flatMap((b) => b.trades.map((t) => ({ ...t, botName: b.name })));
   const now = Date.now();
   const trades = periodTrades(bot?.trades ?? allTrades, days, now);
   const stat = metrics(trades);
@@ -528,7 +526,7 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                  <TradesTable trades={trades} botName={bot.name} symbol={bot.symbol} />
+                  <TradesTable trades={trades} botName={bot.name} />
                 </>
               )}
               {tab === 'overview' && bot.strategy !== 'leader-lag' && (
@@ -553,7 +551,7 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                  <TradesTable trades={trades} botName={bot.name} symbol={bot.symbol} />
+                  <TradesTable trades={trades} botName={bot.name} />
                 </>
               )}
               {tab === 'trades' && (
@@ -566,7 +564,7 @@ export default function App() {
                     </p>
                     {period}
                   </div>
-                  <TradesTable trades={trades} botName={bot.name} symbol={bot.symbol} />
+                  <TradesTable trades={trades} botName={bot.name} />
                 </>
               )}
               {tab === 'events' && (
@@ -1494,46 +1492,80 @@ function ImportDialog({
     </Modal>
   );
 }
+// Prices keep enough significant digits to show small moves on cheap coins: 0.1234 → 0.12343 is a real 2.4 b.p. move.
+const formatPrice = (n: number) => String(Number(n.toPrecision(7)));
+// Price move in the trade's direction, before fees.
+const tradeMove = (t: Trade) => (t.exit / t.entry - 1) * (t.side === 'long' ? 100 : -100);
+function formatHold(seconds: number) {
+  if (seconds < 60)
+    return `${seconds.toLocaleString('ru-RU', { maximumFractionDigits: seconds < 10 ? 2 : 1 })} с`;
+  const m = Math.floor(seconds / 60);
+  return `${m} мин ${Math.round(seconds - m * 60)} с`;
+}
+const moscowTime = (at: string) =>
+  new Date(at).toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    timeZone: 'Europe/Moscow',
+  });
+// Trade history shared by every strategy: instrument and exchange of each trade come from the run that made it.
+// The leader column appears only when some trade has one (a strategy-specific field).
 function TradesTable({
   trades,
   botName,
-  symbol,
   showBot = false,
 }: {
-  trades: (Trade & { botName?: string; symbol?: string })[];
+  trades: (Trade & { botName?: string })[];
   botName?: string;
-  symbol?: string;
   showBot?: boolean;
 }) {
   const sorted = [...trades].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+  const withLeader = trades.some((t) => t.leader);
   function csv() {
     const rows = [
       [
-        'Время UTC',
+        'Вход UTC',
+        'Выход UTC',
         'Бот',
         'Пара',
+        'Биржа',
+        'Поводырь',
         'Сторона',
         'Вход',
         'Выход',
+        'Движение %',
+        'Время в сделке, с',
+        'Размер USDT',
         'Количество',
         'Комиссия USDT',
         'Чистый PnL USDT',
+        'Причина выхода',
       ],
       ...sorted.map((t) => [
+        t.openedAt ?? '',
         t.at,
         t.botName ?? botName ?? '',
-        t.symbol ?? symbol ?? '',
+        t.symbol ?? '',
+        t.exchange ?? '',
+        t.leader ?? '',
         t.side,
         t.entry,
         t.exit,
+        tradeMove(t),
+        t.holdSeconds ?? '',
+        t.notional ?? t.quantity * t.entry,
         t.quantity,
         t.fee,
         net(t),
+        t.exitReason ?? '',
       ]),
     ];
     download(
       'simulated-trades.csv',
-      '\uFEFF' + rows.map((r) => r.map(csvCell).join(';')).join('\r\n'),
+      '﻿' + rows.map((r) => r.map(csvCell).join(';')).join('\r\n'),
       'text/csv;charset=utf-8',
     );
   }
@@ -1559,53 +1591,65 @@ function TradesTable({
           <table>
             <thead>
               <tr>
-                <th>Время · МСК</th>
+                <th>Вход · МСК</th>
                 {showBot && <th>Бот</th>}
                 <th>Инструмент</th>
+                <th>Биржа</th>
+                {withLeader && <th>Поводырь</th>}
                 <th>Сторона</th>
                 <th>Вход → выход</th>
-                <th>Количество</th>
+                <th>В сделке</th>
+                <th>Размер, USDT</th>
                 <th>Комиссия</th>
                 <th>Чистый PnL</th>
+                <th>Причина выхода</th>
               </tr>
             </thead>
             <tbody>
-              {sorted.map((t) => (
-                <tr key={t.id}>
-                  <td>
-                    {new Date(t.at).toLocaleString('ru-RU', {
-                      day: '2-digit',
-                      month: '2-digit',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      timeZone: 'Europe/Moscow',
-                    })}
-                  </td>
-                  {showBot && <td>{t.botName ?? botName}</td>}
-                  <td className="table-symbol">
-                    {t.symbol ?? symbol}
-                    {t.simulated && (
-                      <span
-                        className="sim-tag"
-                        title="Сделка живой симуляции, не реальное исполнение"
-                      >
-                        SIM
+              {sorted.map((t) => {
+                const move = tradeMove(t);
+                return (
+                  <tr key={t.id}>
+                    <td className="mono">{moscowTime(t.openedAt ?? t.at)}</td>
+                    {showBot && <td>{t.botName ?? botName}</td>}
+                    <td className="table-symbol">
+                      {t.symbol ?? '—'}
+                      {t.simulated && (
+                        <span
+                          className="sim-tag"
+                          title="Сделка живой симуляции, не реальное исполнение"
+                        >
+                          SIM
+                        </span>
+                      )}
+                    </td>
+                    <td>{t.exchange ?? '—'}</td>
+                    {withLeader && <td>{t.leader ?? '—'}</td>}
+                    <td>
+                      <span className={`side ${t.side}`}>
+                        {t.side === 'long' ? 'Лонг' : 'Шорт'}
                       </span>
-                    )}
-                  </td>
-                  <td>
-                    <span className={`side ${t.side}`}>{t.side === 'long' ? 'Лонг' : 'Шорт'}</span>
-                  </td>
-                  <td className="mono">
-                    {t.entry.toFixed(4)} <span className="muted">→</span> {t.exit.toFixed(4)}
-                  </td>
-                  <td>{t.quantity}</td>
-                  <td>{t.fee.toFixed(3)}</td>
-                  <td className={net(t) >= 0 ? 'positive' : 'negative'}>
-                    {formatMoney(net(t), true)}
-                  </td>
-                </tr>
-              ))}
+                    </td>
+                    <td className="mono">
+                      {formatPrice(t.entry)} <span className="muted">→</span> {formatPrice(t.exit)}{' '}
+                      <span
+                        className={move >= 0 ? 'positive' : 'negative'}
+                        title="Движение цены в сторону сделки, до комиссий"
+                      >
+                        {move >= 0 ? '+' : ''}
+                        {move.toLocaleString('ru-RU', { maximumFractionDigits: 3 })}%
+                      </span>
+                    </td>
+                    <td>{t.holdSeconds != null ? formatHold(t.holdSeconds) : '—'}</td>
+                    <td>{formatMoney(t.notional ?? t.quantity * t.entry)}</td>
+                    <td>{t.fee.toFixed(3)}</td>
+                    <td className={net(t) >= 0 ? 'positive' : 'negative'}>
+                      {formatMoney(net(t), true)}
+                    </td>
+                    <td className="muted">{t.exitReason ?? '—'}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

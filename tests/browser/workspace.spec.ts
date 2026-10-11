@@ -4,9 +4,17 @@ import { defaultLeaderLagSettings, exportConfig, type Bot, type Trade } from '..
 
 const hour = 3600000;
 // Closed simulated trades as the server returns them inside a bot: two within 24 hours, five within 7 days.
+// They were made on another instrument than the bot's current one: history keeps its own instrument.
 const trades: Trade[] = [1, 5, 30, 60, 100].map((hours, i) => ({
   id: `run-1-${i}`,
   at: new Date(Date.now() - hours * hour).toISOString(),
+  openedAt: new Date(Date.now() - hours * hour - 274).toISOString(),
+  holdSeconds: 0.274,
+  symbol: 'STRKUSDT',
+  exchange: 'OKX',
+  leader: 'Binance',
+  notional: 10.2,
+  exitReason: 'Поводырь развернулся',
   side: i % 2 ? 'short' : 'long',
   gross: i % 3 ? 0.05 : -0.02,
   fee: 0.01,
@@ -126,6 +134,12 @@ test('overview, trade periods and bot navigation work without console errors', a
   await page.getByRole('button', { name: '24 часа', exact: true }).click();
   await expect(page.locator('.trades-panel tbody tr')).toHaveCount(2);
   await expect(page.locator('.trades-panel')).toContainText('SIM');
+  const row = page.locator('.trades-panel tbody tr').first();
+  for (const text of ['STRKUSDT', 'OKX', 'Binance', '0,27 с', '10,20', 'Поводырь развернулся'])
+    await expect(row).toContainText(text);
+  await expect(row).not.toContainText('MAGIC');
+  // Small moves on cheap coins stay visible: 0.4 → 0.405 is +1.25%.
+  await expect(row).toContainText('+1,25%');
   await page.getByRole('button', { name: 'Настройки', exact: true }).click();
   await page.getByLabel('Название бота').fill('Мой поводырь');
   await page.getByRole('button', { name: 'Сохранить изменения' }).click();
