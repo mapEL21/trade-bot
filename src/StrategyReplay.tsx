@@ -67,7 +67,7 @@ interface Report {
   executionExchange: string | null;
   normalBasisBps: number | null;
   durationSeconds: number;
-  settings: Settings & { executionModel?: string; entryOrder?: string };
+  settings: Settings & { executionModel?: string; entryOrder?: string; leader?: string };
   instrument?: {
     quantityStep: number;
     minimumQuantity: number;
@@ -87,7 +87,7 @@ interface Report {
 }
 // Shared with the bot form so both name and limit the strategy settings the same way.
 export const strategyFields: [keyof Settings, string, number, number, number][] = [
-  ['calibrationSeconds', 'Участок выбора поводыря, с', 30, 1800, 1],
+  ['calibrationSeconds', 'Начальный участок, с', 30, 1800, 1],
   ['impulseBps', 'Порог импульса, б.п.', 0.1, 1000, 0.1],
   ['windowMs', 'Окно движения, мс', 10, 5000, 1],
   ['maxAgeMs', 'Свежесть котировки, мс', 10, 5000, 1],
@@ -96,7 +96,7 @@ export const strategyFields: [keyof Settings, string, number, number, number][] 
   ['minEdgeBps', 'Запас сверх расходов, б.п.', 0, 100, 0.1],
   ['stopLossBps', 'Порог убытка сделки, б.п.', 1, 1000, 0.1],
   ['maxHoldMs', 'Максимальное удержание, мс', 100, 10000, 1],
-  ['leaderAdvantageBps', 'Преимущество поводыря, б.п.', 0.1, 100, 0.1],
+  ['leaderAdvantageBps', 'Преимущество поводыря (автовыбор), б.п.', 0.1, 100, 0.1],
   ['orderNotional', 'Номинал заявки в валюте расчёта', 1, 100000, 0.01],
   ['priceLimitBps', 'Предел отклонения цены заявки, б.п.', 0, 100, 0.1],
   ['makerFeeBps', 'Комиссия maker за вход, б.п.', -10, 100, 0.01],
@@ -121,6 +121,8 @@ export function StrategyReplay({
   const [settings, setSettings] = useState(initial);
   const [executionModel, setExecutionModel] = useState('depth');
   const [entryOrder, setEntryOrder] = useState('taker');
+  // As in the bot, the signal exchange of the recording leads unless an automatic choice is asked for.
+  const [leader, setLeader] = useState<'source' | 'auto'>('source');
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -157,7 +159,7 @@ export function StrategyReplay({
     try {
       const result = await request<Report>(`/research/recordings/${id}/replay`, {
         method: 'POST',
-        body: JSON.stringify({ ...settings, executionModel, entryOrder }),
+        body: JSON.stringify({ ...settings, executionModel, entryOrder, leader }),
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(70000)]),
       });
       if (!controller.signal.aborted) setReport(result);
@@ -174,8 +176,8 @@ export function StrategyReplay({
     <section className="strategy-replay" aria-labelledby="replay-title">
       <h3 id="replay-title">Первая стратегия: поводырь → отстающая биржа</h3>
       <p>
-        Симуляция на выбранной выше записи. Сначала выбираем поводыря, затем проверяем сделки на
-        оставшихся данных. Реальные заявки не отправляются.
+        Симуляция на выбранной выше записи. Начальный участок задаёт обычную разницу цен, сделки
+        проверяются на оставшихся данных. Реальные заявки не отправляются.
       </p>
       <form
         onSubmit={(e) => {
@@ -188,6 +190,21 @@ export function StrategyReplay({
           <p className="field-hint">
             1 б.п. = 0,01%. Комиссия по умолчанию — пример, не тариф аккаунта. Порог убытка не
             гарантирует цену выхода: к ней тоже применяется задержка.
+          </p>
+          <label>
+            Поводырь
+            <select
+              value={leader}
+              disabled={busy}
+              onChange={(e) => setLeader(e.target.value as 'source' | 'auto')}
+            >
+              <option value="source">Источник сигнала записи — как в боте</option>
+              <option value="auto">Определить по начальному участку</option>
+            </select>
+          </label>
+          <p className="field-hint">
+            Автоматический выбор может не найти поводыря, и тогда сделки не моделируются. Замер
+            опережения показывается в результате в обоих случаях.
           </p>
           <label>
             Модель исполнения
@@ -234,7 +251,8 @@ export function StrategyReplay({
                     busy ||
                     (executionModel === 'bbo' &&
                       (key === 'orderNotional' || key === 'priceLimitBps')) ||
-                    (entryOrder !== 'maker' && makerFields.includes(key))
+                    (entryOrder !== 'maker' && makerFields.includes(key)) ||
+                    (leader === 'source' && key === 'leaderAdvantageBps')
                   }
                   value={Number.isNaN(settings[key]) ? '' : settings[key]}
                   onChange={(e) => setSettings((s) => ({ ...s, [key]: e.target.valueAsNumber }))}
@@ -259,8 +277,8 @@ export function StrategyReplay({
           <h4>Результат стратегии v{report.version}</h4>
           <p>{report.explanation}</p>
           <p>
-            Выбор поводыря: первые {report.settings.calibrationSeconds} с. Запись:{' '}
-            {n(report.durationSeconds)} с. Торговая проверка начинается только после выбора.
+            Начальный участок: первые {report.settings.calibrationSeconds} с. Запись:{' '}
+            {n(report.durationSeconds)} с. Торговая проверка начинается только после него.
           </p>
           <details>
             <summary>Параметры сохранённого результата</summary>
@@ -269,7 +287,11 @@ export function StrategyReplay({
               {report.settings.executionModel === 'depth'
                 ? 'По записанному стакану и объёму'
                 : 'Упрощённая BBO, без проверки объёма'}
-              . Вход: {report.settings.entryOrder === 'maker' ? 'maker' : 'taker'}.
+              . Вход: {report.settings.entryOrder === 'maker' ? 'maker' : 'taker'}. Поводырь:{' '}
+              {report.settings.leader === 'source'
+                ? 'задан — источник сигнала'
+                : 'выбран по начальному участку'}
+              .
             </p>
             <ul>
               {strategyFields
@@ -294,7 +316,7 @@ export function StrategyReplay({
           </details>
           <div className="analysis-table" tabIndex={0}>
             <table>
-              <caption>Кандидаты в поводыря на начальном участке</caption>
+              <caption>Опережение бирж на начальном участке</caption>
               <thead>
                 <tr>
                   <th>Направление</th>
@@ -504,7 +526,7 @@ export function StrategyReplay({
       )}
       <StrategySeries
         recordings={recordings}
-        settings={{ ...settings, executionModel, entryOrder }}
+        settings={{ ...settings, executionModel, entryOrder, leader }}
       />
     </section>
   );

@@ -113,6 +113,10 @@ public class StrategyReplayTests
     {
         var flat = Data().Select(x => x.Quote is { } q ? x with { Quote = q with { Bid = 99.99m, Ask = 100.01m } } : x).ToList();
         Assert.Equal("no-leader", Run(flat).Status); Assert.Empty(Run(flat).Scenarios);
+        // With the leader set, a flat start is no reason to skip the recording: it is evaluated, and flat prices give no trades.
+        var fixedLeader = StrategyReplay.Run(Recording, Settings with { Leader = "source" }, 1000, 0, 125000, flat, default);
+        Assert.Equal(("evaluated", "hyperliquid"), (fixedLeader.Status, fixedLeader.Leader));
+        Assert.All(fixedLeader.Scenarios, x => Assert.Empty(x.TradeLog));
         Assert.Equal("too-short", Run(Data(), 60000).Status);
         Assert.Equal("incomplete", StrategyReplay.Run(Recording with { Status = "failed" }, Settings, 1000, 0, 125000, Data(), default).Status);
     }

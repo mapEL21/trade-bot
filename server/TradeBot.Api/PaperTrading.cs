@@ -5,10 +5,11 @@ using TradeBot.Recorder;
 
 namespace TradeBot.Api;
 
-// For a bot, SourceExchange is its signal exchange and RequireSourceLeader refuses a run in which the bot's own exchange leads.
+// For a bot, SourceExchange is its signal exchange: the bot runs with Settings.Leader = "source", so the signal exchange
+// leads and trades go to the bot's own exchange; nothing is left to the calibration window but the normal basis.
 public sealed record PaperRequest(string Coin, string SourceExchange, string Exchange, int Seconds, ReplaySettings Settings,
     int DelayMs = 50, bool Counter = false, int MaxMb = 256, string? BotId = null, string? BotName = null, decimal? LossLimit = null,
-    bool RequireSourceLeader = false, decimal? Budget = null, int Leverage = 1);
+    decimal? Budget = null, int Leverage = 1);
 public sealed record PaperSnapshot(string? Id, string State, string Explanation, string? Coin, string? SourceExchange, string? Exchange,
     ReplaySettings? Settings, int DelayMs, bool Counter, string? RecordingDirectory, double SessionSeconds, string? Leader,
     string? ExecutionExchange, decimal? NormalBasisBps, ReplayLeader[] Candidates, ReplayDecision[] Decisions, ReplayTrade[] Trades,
@@ -78,7 +79,9 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
                 instruments = [ReplayInstrument.Read(manifest.RootElement, request.SourceExchange, request.Coin, true),
                     ReplayInstrument.Read(manifest.RootElement, request.Exchange, request.Coin, false)];
                 state = "calibrating";
-                explanation = $"Первые {settings.CalibrationSeconds} с — выбор поводыря и обычной разницы цен. Сделок в это время нет.";
+                explanation = settings.Leader == "source"
+                    ? $"Первые {settings.CalibrationSeconds} с — оценка обычной разницы цен между биржами. Сделок в это время нет."
+                    : $"Первые {settings.CalibrationSeconds} с — выбор поводыря и обычной разницы цен. Сделок в это время нет.";
             }
             catch (Exception e) when (e is IOException or JsonException or KeyNotFoundException or InvalidOperationException)
             {
@@ -278,11 +281,9 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
         var analysis = MarketAnalysis.Analyze(info, new(settings.ImpulseBps, settings.WindowMs, 100, 100, settings.MaxAgeMs, settings.FeeBps,
             settings.SlippageBps), frequency, first.Value, cutoff, window.Count, 0, window, CancellationToken.None);
         candidates = analysis.Directions.Select(d => new ReplayLeader(d.SourceExchange, d.Exchange, d.Horizons[0].Samples, d.Horizons[0].MeanMoveBps)).ToArray();
-        if (StrategyReplay.SelectLeader(candidates, settings) is not { } best)
+        if (StrategyReplay.ChooseLeader(candidates, settings, request.SourceExchange, request.Exchange) is not { } best)
         { Stop("no-leader", "Поводырь не определён: нужны минимум 10 наблюдений в каждом направлении, положительная реакция и достаточное преимущество. Сделки не моделировались."); return; }
         leader = best.SourceExchange == request.SourceExchange ? 0 : 1;
-        if (request.RequireSourceLeader && leader != 0)
-        { Stop("no-leader", $"Поводырём оказалась биржа бота ({best.SourceExchange}): на ней нечего догонять. Сделки не моделировались."); return; }
         var instrument = depth ? instruments[1 - leader] : null;
         if (depth && (instrument is null || books.All(x => x.Venue != 1 - leader || x.Update is null)))
         { Stop("no-execution-data", "Для отстающей биржи нет правил размера заявки или глубины стакана за время калибровки. Выберите упрощённую модель BBO или другую пару."); return; }
@@ -305,7 +306,8 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
             CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         inputs.Clear(); quoteEvents.Clear(); books.Clear(); trades.Clear();
         state = "running"; dirty = true;
-        explanation = $"Поводырь: {best.SourceExchange}, виртуальное исполнение на {best.Exchange}. Решения принимаются по живым данным; реальные заявки не отправляются.";
+        explanation = $"Поводырь{(settings.Leader == "source" ? " (задан)" : "")}: {best.SourceExchange}, виртуальное исполнение на {best.Exchange}. "
+            + StrategyReplay.LeaderNote(candidates, best) + " Решения принимаются по живым данным; реальные заявки не отправляются.";
     }
 
     private void Stop(string status, string reason) { state = status; explanation = reason; stopPending = true; dirty = true; }
@@ -392,7 +394,8 @@ public sealed class PaperTrading(MarketResearch research, PaperRunStore runs, IL
         if (bot.Strategy != "leader-lag" || bot.Parameters is not { } p)
             throw new InvalidOperationException("Для этой стратегии запуск недоступен: алгоритм ещё не реализован.");
         return Start(new(bot.Symbol[..^4], p.SignalExchange.ToLowerInvariant(), bot.Exchange.ToLowerInvariant(), options.Seconds, p.Settings,
-            p.DelayMs, p.Counter, BotId: bot.Id, BotName: bot.Name, LossLimit: bot.LossLimit, RequireSourceLeader: true, Budget: bot.Budget, Leverage: p.Leverage));
+            p.DelayMs, p.Counter, BotId: bot.Id, BotName: bot.Name, LossLimit: bot.LossLimit, Budget: bot.Budget, Leverage: p.Leverage)
+        { Settings = p.Settings with { Leader = "source" } });
     }
 
     public string Start(PaperRequest request)

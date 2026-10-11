@@ -341,7 +341,8 @@ export function LeaderLagFields({
         </div>
         <div className="form-grid">
           {settingMeta
-            .filter((m) => m.key !== 'feeBps' && m.key !== 'makerFeeBps')
+            // The bot's leader is its signal exchange, so the automatic leader threshold has no role here.
+            .filter((m) => !['feeBps', 'makerFeeBps', 'leaderAdvantageBps'].includes(m.key))
             .map((m) => numberField(m.key))}
         </div>
       </details>

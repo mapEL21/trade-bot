@@ -318,13 +318,30 @@ public sealed class PaperTradingTests : IDisposable
         Assert.Null(ResearchMarkets.MaxLeverage(okx.RootElement, "binance", "SOL"));
     }
     [Fact]
-    public void BotRunRefusesWhenItsOwnExchangeLeads()
+    public void FixedLeaderTradesWithoutTheCalibrationVerdictAndMatchesReplay()
     {
-        // The fixture leader is Hyperliquid; a bot trading on Hyperliquid with a Binance signal has nothing to follow.
-        var request = new PaperRequest("SOL", "binance", "hyperliquid", 600, Depth with { ExecutionModel = "bbo" }, RequireSourceLeader: true);
-        var (session, stops) = Drive(request, Events(), long.MaxValue, _ => { });
+        // An unreachable margin: "auto" finds no leader here; with the leader set, trading does not depend on it.
+        var settings = Depth with { LeaderAdvantageBps = 100, Leader = "source" };
+        var events = Events();
+        var expected = Replay(events, settings, 10);
+        Assert.NotEmpty(expected.TradeLog);
+        var snapshot = Live(events, settings, 10).Snapshot();
+        Assert.Equal(("finished", "hyperliquid"), (snapshot.State, snapshot.Leader));
+        Assert.Equal(expected.TradeLog, snapshot.Result!.TradeLog);
+        Assert.Equal(expected.Journal, snapshot.Result.Journal);
+    }
+
+    [Fact]
+    public void BotWithFixedLeaderRunsEvenWhenItsOwnExchangeMovedFirst()
+    {
+        // The fixture moves Hyperliquid first; a bot on Hyperliquid with a Binance signal still runs with Binance as the leader
+        // and is told that the reverse reaction was stronger.
+        var request = new PaperRequest("SOL", "binance", "hyperliquid", 600, Depth with { ExecutionModel = "bbo", Leader = "source" });
+        string? running = null;
+        var (session, _) = Drive(request, Events(), 121000, s => running = s.Snapshot().Explanation);
         var snapshot = session.Snapshot();
-        Assert.Equal("no-leader", snapshot.State); Assert.Contains("биржа бота", snapshot.Explanation); Assert.Equal(1, stops());
+        Assert.Equal(("finished", "binance", "hyperliquid"), (snapshot.State, snapshot.Leader, snapshot.ExecutionExchange));
+        Assert.Contains("(задан)", running); Assert.Contains("Обратная реакция сильнее", running);
     }
 
     [Fact]

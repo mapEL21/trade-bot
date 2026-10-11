@@ -3,7 +3,7 @@ import type { Exchange, LeaderLagSettings } from './model';
 // Settings are stored in basis points (1 b.p. = 0.01%); the bot form can show them in percent.
 export type NumericSetting = Exclude<
   keyof LeaderLagSettings,
-  'executionModel' | 'entryOrder' | 'orderQuantity'
+  'executionModel' | 'entryOrder' | 'orderQuantity' | 'leader'
 >;
 export interface SettingMeta {
   key: NumericSetting;
@@ -36,12 +36,12 @@ export const settingMeta: SettingMeta[] = [
   },
   {
     key: 'calibrationSeconds',
-    label: 'Калибровка',
+    label: 'Начальный участок',
     unit: 's',
     min: 30,
     max: 1800,
     step: 1,
-    hint: 'Сколько секунд в начале запуска бот только наблюдает: определяет, какая биржа ведёт, и обычную разницу цен между ними. Сделок в это время нет.',
+    hint: 'Сколько секунд в начале запуска бот только наблюдает и измеряет обычную разницу цен между биржами: от неё считается отставание. Сделок в это время нет. Поводырь не выбирается — это биржа сигнала.',
   },
   {
     key: 'impulseBps',
@@ -122,7 +122,7 @@ export const settingMeta: SettingMeta[] = [
     min: 0.1,
     max: 100,
     step: 0.01,
-    hint: 'На сколько реакция ведомой биржи на поводыря должна быть сильнее обратной, чтобы поводырь считался найденным.',
+    hint: 'Только для автоматического выбора поводыря при проверке записи: на сколько реакция ведомой биржи на поводыря должна быть сильнее обратной. Бот это не использует.',
   },
   {
     key: 'makerWaitMs',

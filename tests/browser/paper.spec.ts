@@ -238,7 +238,7 @@ test('leader-lag bot is created with its strategy parameters', async ({ page }) 
   await expect(dialog.getByRole('radio', { name: /Поводырь/ })).toBeChecked();
   await dialog.getByLabel('Название бота').fill('Поводырь · MAGIC');
   await dialog.getByLabel('Биржа бота (исполнение)').selectOption('OKX');
-  await dialog.getByLabel('Биржа сигнала').selectOption('Binance');
+  await dialog.getByLabel(/^Биржа сигнала/).selectOption('Binance');
   // Fees default to the bot exchange's table and are shown in percent.
   await expect(dialog.getByLabel('Комиссия taker, %')).toHaveValue('0.05');
   const pair = dialog.getByRole('combobox', { name: 'Торговая пара' });

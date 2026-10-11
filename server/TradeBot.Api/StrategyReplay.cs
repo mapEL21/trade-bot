@@ -6,8 +6,11 @@ public sealed record ReplaySettings(int CalibrationSeconds = 120, decimal Impuls
     int MaxAgeMs = 500, decimal FeeBps = 5, decimal SlippageBps = 1, decimal MinEdgeBps = 2,
     decimal StopLossBps = 20, int MaxHoldMs = 2000, decimal LeaderAdvantageBps = .5m,
     string ExecutionModel = "depth", decimal OrderNotional = 10, decimal PriceLimitBps = 5,
-    string EntryOrder = "taker", decimal MakerFeeBps = 2, int MakerWaitMs = 1000, decimal? OrderQuantity = null)
+    string EntryOrder = "taker", decimal MakerFeeBps = 2, int MakerWaitMs = 1000, decimal? OrderQuantity = null,
+    string Leader = "auto")
 {
+    // Leader: "source" — the signal exchange chosen by the user leads and trades go to the other exchange; "auto" — the
+    // leader is picked from the calibration window, which may find none. In both cases the window sets the normal basis.
     public void Validate()
     {
         new AnalysisSettings(ImpulseBps, WindowMs, 100, MaxHoldMs, MaxAgeMs, FeeBps, SlippageBps).Validate();
@@ -20,6 +23,8 @@ public sealed record ReplaySettings(int CalibrationSeconds = 120, decimal Impuls
             throw new ArgumentException("Вход: taker или maker; комиссия maker от −10 до 100 б.п., ожидание исполнения 10–60000 мс.");
         if (OrderQuantity is <= 0 or > 1_000_000_000)
             throw new ArgumentException("Размер заявки в монетах должен быть больше нуля.");
+        if (Leader is not ("auto" or "source"))
+            throw new ArgumentException("Поводырь: auto (определить по начальному участку) или source (биржа сигнала).");
     }
 }
 public sealed record ReplayDecision(double Seconds, string Action, string Reason, string? Side = null, decimal? Price = null, decimal? NetBps = null, decimal? Quantity = null);
@@ -72,7 +77,7 @@ public static class StrategyReplay
         if (recording.Status != "completed") return Empty("incomplete", "Нужна запись без ошибок и разрывов: текущая сессия завершена неполно.");
         if (duration <= settings.CalibrationSeconds + settings.MaxHoldMs / 1000.0 + .2)
             return Empty("too-short", "После участка выбора поводыря не осталось достаточно данных для проверки сделок.");
-        if (SelectLeader(candidates, settings) is not { } best)
+        if (ChooseLeader(candidates, settings, recording.SourceExchange, recording.Exchange) is not { } best)
             return Empty("no-leader", "Поводырь не определён: нужны минимум 10 наблюдений в каждом направлении, положительная реакция и достаточное преимущество. Сделки не моделировались.");
         var ticks = Normalize(recording, frequency, first, input, ct);
         var leader = best.SourceExchange == recording.SourceExchange ? 0 : 1;
@@ -96,8 +101,29 @@ public static class StrategyReplay
         var scenarios = new List<ReplayScenario>();
         foreach (var delay in new[] { 10, 25, 50, 100 })
             foreach (var counter in new[] { false, true }) scenarios.Add(LeaderLagEngine.Run(ticks, new(leader, basis, settings, delay, counter, instrument), ct, duration * 1000));
-        return new("leader-lag", Version, recording, settings, "evaluated", "Поводырь выбран на начальном участке. Результаты ниже относятся только к последующей части записи.",
+        return new("leader-lag", Version, recording, settings, "evaluated", (settings.Leader == "source"
+                ? "Поводырь задан: биржа сигнала. Начальный участок использован для обычной разницы цен. "
+                : "Поводырь выбран на начальном участке. ") + LeaderNote(candidates, best) + " Результаты ниже относятся только к последующей части записи.",
             best.SourceExchange, best.Exchange, basis, duration, candidates, scenarios.ToArray(), notes, settings.ExecutionModel == "depth" ? instrument : null);
+    }
+
+    // A fixed leader is the signal exchange whatever the calibration window showed; otherwise it is selected from it.
+    public static ReplayLeader? ChooseLeader(ReplayLeader[] candidates, ReplaySettings settings, string source, string exchange) =>
+        settings.Leader == "source"
+            ? candidates.FirstOrDefault(x => x.SourceExchange == source) ?? new(source, exchange, 0, null)
+            : SelectLeader(candidates, settings);
+
+    // Measured lead on the calibration window, shown for information: with a fixed leader it does not block trading.
+    public static string LeaderNote(ReplayLeader[] candidates, ReplayLeader leader)
+    {
+        static string Bps(decimal? v) => v is { } x ? x.ToString("0.##", System.Globalization.CultureInfo.GetCultureInfo("ru-RU")) + " б.п." : "нет данных";
+        var other = candidates.FirstOrDefault(x => x.SourceExchange != leader.SourceExchange);
+        var text = $"За начальный участок средняя реакция {leader.Exchange} на импульсы {leader.SourceExchange} через 100 мс — {Bps(leader.ResponseBps)} ({leader.Samples} набл.)";
+        if (other is null) return text + ".";
+        text += $", обратная — {Bps(other.ResponseBps)} ({other.Samples} набл.).";
+        return other.ResponseBps > (leader.ResponseBps ?? decimal.MinValue)
+            ? text + " Обратная реакция сильнее: на этом участке раньше двигалась биржа исполнения, сигнал может быть слабым."
+            : text;
     }
 
     // The leader must react positively, with enough samples both ways and a margin over the reverse direction.

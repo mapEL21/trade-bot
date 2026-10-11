@@ -175,6 +175,14 @@ test('leader-lag configuration keeps its parameters through export and import, a
   assert.throws(() => validateConfig(sized(0)));
   assert.throws(() => validateConfig(sized(126)));
   assert.equal(validateConfig(config).parameters!.leverage, 1);
+  // A bot always follows its signal exchange: missing or automatic leader settings become 'source'.
+  const withLeader = (leader: unknown) => ({
+    ...config,
+    parameters: { ...config.parameters, settings: { ...defaultLeaderLagSettings, leader } },
+  });
+  assert.equal(validateConfig(withLeader('auto')).parameters!.settings.leader, 'source');
+  assert.equal(validateConfig(withLeader(undefined)).parameters!.settings.leader, 'source');
+  assert.throws(() => validateConfig(withLeader('okx')));
   // A size in coins is not limited by the USDT nominal check, which needs a price.
   assert.equal(
     validateConfig({

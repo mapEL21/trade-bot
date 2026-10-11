@@ -21,8 +21,11 @@ export interface LeaderLagSettings {
   entryOrder: 'taker' | 'maker';
   // A fixed size in coins; null means the size is orderNotional in USDT.
   orderQuantity: number | null;
+  // source: the signal exchange leads, as set by the user; auto: the recording check picks the leader from the start
+  // of the data. Bots always use source.
+  leader: 'auto' | 'source';
 }
-// The bot trades (virtually) on its own exchange; the signal exchange must turn out to be the leader.
+// The bot trades (virtually) on its own exchange and follows the signal exchange, which the user sets as the leader.
 export interface LeaderLagParameters {
   signalExchange: Exchange;
   settings: LeaderLagSettings;
@@ -117,6 +120,7 @@ export const defaultLeaderLagSettings: LeaderLagSettings = {
   executionModel: 'depth',
   entryOrder: 'taker',
   orderQuantity: null,
+  leader: 'source',
 };
 const settingKeys = Object.keys(defaultLeaderLagSettings) as (keyof LeaderLagSettings)[];
 // Shape and obvious limits only; the server applies the full strategy validation.
@@ -170,6 +174,11 @@ function validateParameters(
     } else if (key === 'entryOrder') {
       if (v !== 'taker' && v !== 'maker') throw new Error('Вход: taker или maker.');
       settings.entryOrder = v;
+    } else if (key === 'leader') {
+      // Saved before the leader was a setting, or picked automatically: a bot always follows its signal exchange.
+      if (v !== undefined && v !== 'auto' && v !== 'source')
+        throw new Error('Поводырь: auto или source.');
+      settings.leader = 'source';
     } else if (key === 'orderQuantity') {
       if (v !== null && v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v <= 0))
         throw new Error('Размер заявки в монетах должен быть больше нуля.');
