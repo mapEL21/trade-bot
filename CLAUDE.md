@@ -22,7 +22,8 @@
 - `MarketResearch.cs` — управление записью и обновления интерфейса; `MarketQuote.cs` — только BBO. События глубины не освежают возраст BBO.
 - `RecordingAnalysisStore.cs` — безопасное чтение записей и сохранение отчётов, один расчёт одновременно.
 - `MarketAnalysis.cs` — оценка качества данных, реакции цены и условных BBO-сделок.
-- `StrategyReplay.cs` — стратегия `leader-lag`, симуляция на записи.
+- `StrategyReplay.cs` — воспроизведение записи: калибровка (`SelectLeader`, `NormalBasis`) и 8 сценариев.
+- `LeaderLagEngine.cs` — общий движок решений и виртуального исполнения `leader-lag`: получает поток `EngineEvent` (котировки, стакан, сделки, разрывы, ход времени) и используется и для записей, и для будущей живой симуляции. `QuoteNormalizer` — потоковый фильтр котировок. Правила стратегии менять только здесь, чтобы replay и живой режим не расходились.
 - `ReplayDepth.cs` — новый разбор стакана, правила размера заявки и модель исполнения. Детали — `docs/STRATEGY_REPLAY.md`.
 - `server/TradeBot.Api.Tests/` — xUnit, включая API-тесты. `tests/browser/research.spec.ts` — Playwright, мобильная ширина и axe. `tests/*.test.ts` — модель интерфейса.
 
