@@ -26,11 +26,11 @@ public sealed class PaperTradingTests : IDisposable
     public void Dispose() { try { Directory.Delete(directory, true); } catch (IOException) { } }
 
     // The fixture market as raw recorder events, in the order the file writer would emit them.
-    private static List<CaptureEvent> Events(bool makerTrades = false)
+    private static List<CaptureEvent> Events(bool makerTrades = false, List<MarketAnalysis.Input>? data = null)
     {
         static string S(decimal n) => n.ToString(CultureInfo.InvariantCulture);
         var events = new List<CaptureEvent>();
-        foreach (var input in StrategyReplayTests.Data())
+        foreach (var input in data ?? StrategyReplayTests.Data())
         {
             var payload = "";
             if (input.Quote is { } q)
@@ -82,7 +82,7 @@ public sealed class PaperTradingTests : IDisposable
         {
             session.Recorded(written[i], i + 1, 0);
             now = clockAt?.Invoke(i) ?? written[i].ReceivedTicks;
-            if (i % 7 == 0) Assert.False(session.Pump());
+            if (i % 7 == 0) { Assert.False(session.Pump()); session.WaitForEngine(); }
         }
         session.Finished(new(DateTimeOffset.UnixEpoch, "completed", null, 0, written.Count, 0, [], new { }));
         Assert.True(session.Pump());
@@ -153,7 +153,7 @@ public sealed class PaperTradingTests : IDisposable
         session.Started(directory);
         for (var i = 0; i < events.Count; i++)
         {
-            session.Recorded(events[i], i + 1, 0); now = events[i].ReceivedTicks; session.Pump();
+            session.Recorded(events[i], i + 1, 0); now = events[i].ReceivedTicks; session.Pump(); session.WaitForEngine();
             if (!acted && now >= actAt) { acted = true; act(session); }
         }
         session.Finished(new(DateTimeOffset.UnixEpoch, "completed", null, 0, events.Count, 0, [], new { }));
@@ -193,6 +193,36 @@ public sealed class PaperTradingTests : IDisposable
         Assert.True(snapshot.Stopping);
     }
 
+    // The target never catches up after 120.5 s, so without a stop the position would be held until the time limit.
+    private static List<CaptureEvent> StuckEvents() => Events(data: StrategyReplayTests.Data().Select(x =>
+        x.Ticks >= 120500 && x.Source == "binance-public" && x.Quote is { } q ? x with { Quote = q with { Bid = 119.99m, Ask = 120.01m } } : x).ToList());
+
+    [Fact]
+    public void OpenPositionIsReportedWithItsCurrentResultAfterFees()
+    {
+        PaperSnapshot? seen = null;
+        Drive(new("SOL", "hyperliquid", "binance", 600, Depth), StuckEvents(), 121200, s => seen = s.Snapshot());
+        var position = seen!.Position!;
+        Assert.Equal("long", position.Side);
+        Assert.Equal(9, position.Quantity);
+        Assert.True(position.MarkNetBps < 0); // bought on the jump, the follower never moved: fees and spread only
+        Assert.Equal(position.MarkNetBps / 10000 * 9 * position.EntryPrice, position.MarkNetQuote);
+        Assert.True(seen.PositionOpen);
+    }
+
+    [Fact]
+    public void CloseNowExitsTheOpenPositionAndThenStops()
+    {
+        var (session, stops) = Drive(new("SOL", "hyperliquid", "binance", 600, Depth), StuckEvents(), 121200, s => s.RequestStop("close"));
+        var result = session.Snapshot().Result!;
+        var trade = Assert.Single(result.TradeLog);
+        Assert.Equal("Остановка пользователем: закрытие позиции", trade.ExitReason);
+        Assert.True(trade.ExitSeconds < 121.3); // well before the 2 s hold limit at 122.26 s
+        Assert.Equal(0, result.UnresolvedPositions);
+        Assert.Equal(1, stops());
+        Assert.Null(session.Snapshot().Position);
+    }
+
     [Fact]
     public void ForcedStopLeavesTheOpenPositionUnresolved()
     {
@@ -201,7 +231,7 @@ public sealed class PaperTradingTests : IDisposable
         var session = new PaperSession("paper", new("SOL", "hyperliquid", "binance", 600, Depth), () => now) { StopRecording = () => stops++ };
         session.Started(directory);
         var i = 0;
-        for (; i < events.Count && events[i].ReceivedTicks <= 120450; i++) { session.Recorded(events[i], i + 1, 0); now = events[i].ReceivedTicks; session.Pump(); }
+        for (; i < events.Count && events[i].ReceivedTicks <= 120450; i++) { session.Recorded(events[i], i + 1, 0); now = events[i].ReceivedTicks; session.Pump(); session.WaitForEngine(); }
         session.RequestStop(true);
         Assert.Equal(1, stops);
         session.Finished(new(DateTimeOffset.UnixEpoch, "completed", null, 0, i, 0, [], new { }));

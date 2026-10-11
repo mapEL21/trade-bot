@@ -18,7 +18,15 @@ public interface IEngineObserver
     void Exposure(bool open) { }
     // A reason to send no new entry at this virtual time (pause, loss limit, stopping), or null. Exits are never blocked.
     string? EntryBlock(double ms) => null;
+    // The open position marked at the current exit price after fees, on each quote while it is held; null once flat.
+    void Position(OpenPosition? position) { }
+    // True when the user asked to close now: the position exits as if a strategy exit fired, a resting order is cancelled.
+    bool ExitNow(double ms) => false;
 }
+
+// MarkNetBps and MarkNetQuote are what closing now would give after both fees; in the BBO model the size is the configured one.
+public sealed record OpenPosition(string Side, double SinceSeconds, decimal EntryPrice, decimal Quantity, decimal MarkPrice,
+    decimal MarkNetBps, decimal? MarkNetQuote, bool ExitPending);
 
 internal sealed class VenueQuotes
 {
@@ -76,7 +84,7 @@ public static class LeaderLagEngine
     // Events must arrive in time order. A null end means "the last event seen", which is how a live session stops.
     public static ReplayScenario Run(IEnumerable<EngineEvent> events, EngineSetup setup, CancellationToken ct, double? end = null, IEngineObserver? observer = null)
     {
-        var (leader, basis, s, delay, counter, instrument, _) = setup; double lastMs = 0; var reportedExposure = false;
+        var (leader, basis, s, delay, counter, instrument, _) = setup; double lastMs = 0; bool reportedExposure = false, reportedPosition = false;
         var q = new[] { new VenueQuotes(), new VenueQuotes() }; var journal = new List<ReplayDecision>(); var trades = new List<ReplayTrade>();
         var depth = s.ExecutionModel == "depth"; var book = new ReplayBook(); string? bookConnection = null, tradeConnection = null;
         Position? position = null; Pending? pending = null; int skipped = 0, signals = 0, unresolved = 0, journalCount = 0;
@@ -234,6 +242,7 @@ public static class LeaderLagEngine
             ct.ThrowIfCancellationRequested(); lastMs = tick.Ms; Advance(tick.Ms); if (halted) break;
             var exposed = position is not null || pending is not null || resting is not null;
             if (exposed != reportedExposure) { reportedExposure = exposed; observer?.Exposure(exposed); }
+            if (position is null && reportedPosition) { reportedPosition = false; observer?.Position(null); }
             if (tick.IsClock) continue;
             if (tick.IsTrade)
             {
@@ -290,7 +299,9 @@ public static class LeaderLagEngine
             var residual = Residual();
             if (resting is not null)
             {
-                if (resting.CancelAt is null && Math.Sign(resting.Residual) * residual <= s.MinEdgeBps)
+                if (resting.CancelAt is null && observer?.ExitNow(tick.Ms) == true)
+                { resting = resting with { CancelAt = tick.Ms }; Log(tick.Ms, "отмена запрошена", "Остановка пользователем: заявка maker снимается."); }
+                else if (resting.CancelAt is null && Math.Sign(resting.Residual) * residual <= s.MinEdgeBps)
                 { resting = resting with { CancelAt = tick.Ms }; Log(tick.Ms, "отмена запрошена", "Отставание сократилось до исполнения заявки maker."); }
                 continue;
             }
@@ -307,8 +318,16 @@ public static class LeaderLagEngine
                         if (!insufficient) markPrice = estimate.Price;
                     }
                     var mark = Net(markPrice);
+                    if (observer is not null)
+                    {
+                        var held = position.Quantity > 0 ? position.Quantity : (s.OrderQuantity ?? s.OrderNotional / position.Price);
+                        observer.Position(new(position.Sign > 0 ? "long" : "short", position.At / 1000, position.Price, position.Quantity,
+                            markPrice, mark, mark / 10000 * held * position.Price, false));
+                        reportedPosition = true;
+                    }
                     var direction = Math.Sign(position.EntryResidual);
                     var reason = position.RetryReason is { } retry ? "Повтор выхода: " + retry
+                        : observer?.ExitNow(tick.Ms) == true ? "Остановка пользователем: закрытие позиции"
                         : insufficient ? "Недостаточно видимой ликвидности для полного выхода" : mark <= -s.StopLossBps ? "Ограничение убытка" : direction * residual <= s.MinEdgeBps ? "Отставание сократилось или сменило знак" : null;
                     var prior = q[leader].Before(tick.Ms - s.WindowMs, s.MaxAgeMs);
                     if (reason is null && prior is not null && direction * (q[leader].Current!.Mid / prior.Mid - 1) * 10000 <= -s.ImpulseBps)

@@ -2473,3 +2473,25 @@ tbody tr:hover {
   color: #b9c7da;
   vertical-align: middle;
 }
+.paper-position {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.paper-position.loss strong:last-of-type {
+  color: #f08a7a;
+}
+.paper-position.gain strong:last-of-type {
+  color: var(--green);
+}
+.stop-warning {
+  padding: 10px 12px;
+  border: 1px solid #8a4b42;
+  border-radius: 8px;
+  background: #2a1716;
+  color: #f3c3bb;
+  line-height: 1.55;
+}
+.stop-actions {
+  flex-wrap: wrap;
+}

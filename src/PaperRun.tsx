@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { Pause, Play, Square } from 'lucide-react';
-import { api, type PaperRunRecord, type PaperSnapshot, type PaperTrade } from './api';
+import {
+  api,
+  type OpenPosition,
+  type PaperRunRecord,
+  type PaperSnapshot,
+  type PaperTrade,
+} from './api';
+import { Modal } from './components';
 import type { Bot } from './model';
 
 export const activeStatuses = ['calibrating', 'running', 'paused', 'stopping'];
@@ -63,6 +70,26 @@ function Trades({ trades, caption }: { trades: PaperTrade[]; caption: string }) 
   );
 }
 
+// One line about the open simulated position: side, size, entry, current exit price and the result after both fees.
+function PositionLine({ position, coin }: { position: OpenPosition; coin: string }) {
+  const loss = (position.markNetQuote ?? position.markNetBps) < 0;
+  return (
+    <p className={`paper-position ${loss ? 'loss' : 'gain'}`}>
+      <strong>{position.side === 'long' ? 'Лонг' : 'Шорт'}</strong> {n(position.quantity, 8)} {coin}{' '}
+      · вход {price(position.entryPrice)} · сейчас {price(position.markPrice)} · результат при
+      закрытии сейчас{' '}
+      <strong>
+        {position.markNetQuote == null
+          ? '—'
+          : `${position.markNetQuote >= 0 ? '+' : ''}${n(position.markNetQuote, 4)} USDT`}{' '}
+        ({position.markNetBps >= 0 ? '+' : ''}
+        {n(position.markNetBps / 100, 4)}%)
+      </strong>{' '}
+      после комиссий
+    </p>
+  );
+}
+
 // Live paper run of a leader-lag bot: controls, current state while it runs, and the history of finished runs.
 export function PaperRun({ bot, onChanged }: { bot: Bot; onChanged: () => void }) {
   const active = activeStatuses.includes(bot.status);
@@ -71,6 +98,7 @@ export function PaperRun({ bot, onChanged }: { bot: Bot; onChanged: () => void }
   const [seconds, setSeconds] = useState(1800);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [confirmStop, setConfirmStop] = useState(false);
   const wasActive = useRef(active);
   const changed = useRef(onChanged);
   changed.current = onChanged;
@@ -135,6 +163,13 @@ export function PaperRun({ bot, onChanged }: { bot: Bot; onChanged: () => void }
     }
   }
   const live = active && snapshot?.botId === bot.id ? snapshot : null;
+  const coin = bot.symbol.replace(/USDT$/, '');
+  const position = live?.position ?? null;
+  // With nothing open the bot just turns off (an entry already in flight is awaited); with a position the user chooses.
+  function stop() {
+    if (position) setConfirmStop(true);
+    else void act(() => api.stopPaper(bot, 'wait'));
+  }
   const calibration =
     live?.settings?.calibrationSeconds ?? bot.parameters?.settings.calibrationSeconds ?? 120;
   return (
@@ -196,30 +231,38 @@ export function PaperRun({ bot, onChanged }: { bot: Bot; onChanged: () => void }
           </button>
         )}
         {active && bot.status !== 'stopping' && (
+          <button className="button secondary" disabled={busy} onClick={stop}>
+            <Square size={16} />
+            Остановить
+          </button>
+        )}
+        {bot.status === 'stopping' && live?.positionOpen && !live.closing && (
           <button
             className="button secondary"
             disabled={busy}
-            onClick={() => void act(() => api.stopPaper(bot, false))}
+            onClick={() => void act(() => api.stopPaper(bot, 'close'))}
           >
             <Square size={16} />
-            Остановить
+            Закрыть позицию сейчас
           </button>
         )}
         {bot.status === 'stopping' && (
           <button
             className="button danger"
             disabled={busy}
-            onClick={() => void act(() => api.stopPaper(bot, true))}
+            title="Завершить запись немедленно: открытая позиция останется без оценки"
+            onClick={() => void act(() => api.stopPaper(bot, 'force'))}
           >
             <Square size={16} />
-            Остановить сразу
+            Остановить без оценки
           </button>
         )}
       </div>
       {active && (
         <p className="field-hint">
-          Пауза запрещает новые входы, открытая позиция ведётся дальше. «Остановить» ждёт закрытия
-          позиции по правилам стратегии; «Остановить сразу» оставит её неоценённой.
+          Пауза запрещает новые входы, открытая позиция ведётся дальше. «Остановить» без открытой
+          позиции сразу выключает бота, а с позицией предложит дождаться выхода по правилам или
+          закрыть её сейчас. «Остановить без оценки» — аварийный вариант, если закрытие зависло.
         </p>
       )}
       {error && <p role="alert">{error}</p>}
@@ -234,6 +277,8 @@ export function PaperRun({ bot, onChanged }: { bot: Bot; onChanged: () => void }
             </p>
           )}
           {live.entriesBlocked && <p className="field-hint">{live.entriesBlocked}</p>}
+          {position && <PositionLine position={position} coin={coin} />}
+          {live.closing && <p className="field-hint">Позиция закрывается по команде остановки.</p>}
           <div className="paper-facts">
             <span>
               Поводырь
@@ -334,6 +379,62 @@ export function PaperRun({ bot, onChanged }: { bot: Bot; onChanged: () => void }
             </>
           )}
         </>
+      )}
+      {confirmStop && (
+        <Modal
+          title="Остановить бота?"
+          subtitle="Бот сейчас в сделке. Выберите, как её закрыть."
+          onClose={() => setConfirmStop(false)}
+        >
+          {position ? (
+            <PositionLine position={position} coin={coin} />
+          ) : (
+            <p>Позиция уже закрыта — бот просто выключится.</p>
+          )}
+          {position && (position.markNetQuote ?? position.markNetBps) < 0 && (
+            <p className="stop-warning" role="alert">
+              Сделка сейчас в минусе. «Закрыть сейчас» зафиксирует этот убыток. Если дождаться, бот
+              закроет её по правилам стратегии — по сближению цен, развороту поводыря, порогу убытка{' '}
+              {n((bot.parameters?.settings.stopLossBps ?? 0) / 100, 4)}% или через{' '}
+              {n((bot.parameters?.settings.maxHoldMs ?? 0) / 1000, 1)} с удержания. Итог может стать
+              и лучше, и хуже.
+            </p>
+          )}
+          <div className="modal-actions stop-actions">
+            <button
+              className="button secondary"
+              data-autofocus
+              onClick={() => setConfirmStop(false)}
+            >
+              Отмена
+            </button>
+            <button
+              className="button primary"
+              disabled={busy}
+              onClick={() => {
+                setConfirmStop(false);
+                void act(() => api.stopPaper(bot, 'wait'));
+              }}
+            >
+              Дождаться выхода по правилам
+            </button>
+            <button
+              className="button danger"
+              disabled={busy}
+              onClick={() => {
+                setConfirmStop(false);
+                void act(() => api.stopPaper(bot, position ? 'close' : 'wait'));
+              }}
+            >
+              Закрыть сейчас
+            </button>
+          </div>
+          <p className="field-hint">
+            В обоих случаях новые входы прекращаются сразу, а после закрытия позиции бот
+            выключается. «Закрыть сейчас» — виртуальный выход по текущему стакану с той же задержкой
+            и комиссией; реальных ордеров нет.
+          </p>
+        </Modal>
       )}
     </section>
   );

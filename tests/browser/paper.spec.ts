@@ -71,7 +71,15 @@ const simulatedTrade = () => ({
 });
 
 async function server(page: Page) {
-  const state = { status: 'draft', started: 0, paused: 0, stopped: 0, created: null as unknown };
+  const state = {
+    status: 'draft',
+    started: 0,
+    paused: 0,
+    stopped: 0,
+    created: null as unknown,
+    stopMode: '',
+    position: null as null | Record<string, unknown>,
+  };
   await page.route('**/api/v1/strategies', (route) => route.fulfill({ json: catalog }));
   await page.route('**/api/v1/research/markets*', (route) => {
     const url = new URL(route.request().url());
@@ -160,6 +168,7 @@ async function server(page: Page) {
       state.status = 'paused';
     }
     if (action === 'stop') {
+      state.stopMode = new URL(route.request().url()).searchParams.get('mode') ?? '';
       state.stopped++;
       state.status = 'stopped';
     }
@@ -204,7 +213,9 @@ async function server(page: Page) {
         paused: state.status === 'paused',
         stopping: false,
         entriesBlocked: state.status === 'paused' ? 'Пауза: новые входы не отправляются.' : null,
-        positionOpen: false,
+        positionOpen: state.position !== null,
+        position: state.position,
+        closing: false,
       },
     }),
   );
@@ -300,4 +311,38 @@ test('bot page starts, shows, pauses and stops a live paper run', async ({ page 
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect((await new AxeBuilder({ page }).include('.paper-run').analyze()).violations).toEqual([]);
+});
+
+test('stopping a bot in a losing trade warns and can close the position now', async ({ page }) => {
+  const state = await server(page);
+  state.status = 'running';
+  state.position = {
+    side: 'long',
+    sinceSeconds: 130.2,
+    entryPrice: 0.4012,
+    quantity: 24,
+    markPrice: 0.4005,
+    markNetBps: -24.4,
+    markNetQuote: -0.0235,
+  };
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Поводырь · MAGIC Поводырь v0.3.2' }).first().click();
+  await expect(page.locator('.paper-live .paper-position')).toContainText('-0,0235 USDT');
+  await page.getByRole('button', { name: 'Остановить', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Остановить бота?' });
+  await expect(dialog.getByRole('alert')).toContainText('Сделка сейчас в минусе');
+  expect((await new AxeBuilder({ page }).include('dialog.modal').analyze()).violations).toEqual([]);
+  await dialog.getByRole('button', { name: 'Закрыть сейчас' }).click();
+  await expect.poll(() => state.stopMode).toBe('close');
+});
+
+test('stopping a bot without a position turns it off at once', async ({ page }) => {
+  const state = await server(page);
+  state.status = 'running';
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Поводырь · MAGIC Поводырь v0.3.2' }).first().click();
+  await expect(page.locator('.paper-facts')).toContainText('binance → okx');
+  await page.getByRole('button', { name: 'Остановить', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect.poll(() => state.stopMode).toBe('wait');
 });

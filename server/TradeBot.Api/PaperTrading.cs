@@ -13,7 +13,8 @@ public sealed record PaperSnapshot(string? Id, string State, string Explanation,
     ReplaySettings? Settings, int DelayMs, bool Counter, string? RecordingDirectory, double SessionSeconds, string? Leader,
     string? ExecutionExchange, decimal? NormalBasisBps, ReplayLeader[] Candidates, ReplayDecision[] Decisions, ReplayTrade[] Trades,
     int Decided, decimal SumNetBps, decimal? ClosedNetQuote, int LateEvents, ReplayScenario? Result, string Version, bool ExecutionEnabled = false,
-    string? BotId = null, string? BotName = null, bool Paused = false, bool Stopping = false, string? EntriesBlocked = null, bool PositionOpen = false);
+    string? BotId = null, string? BotName = null, bool Paused = false, bool Stopping = false, string? EntriesBlocked = null, bool PositionOpen = false,
+    OpenPosition? Position = null, bool Closing = false);
 public sealed record PaperRunReport(string Strategy, string Version, string Id, DateTimeOffset EndedUtc, string State, string Explanation,
     string Coin, string SourceExchange, string Exchange, ReplaySettings Settings, int DelayMs, bool Counter, string? Leader,
     string? ExecutionExchange, decimal? NormalBasisBps, ReplayLeader[] Candidates, int LateEvents, ReplayScenario? Result);
@@ -49,7 +50,10 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
     private Task<ReplayScenario>? engine;
     private double lastClockMs = double.NegativeInfinity;
     private ReplayScenario? result;
-    private volatile bool finished, paused, stopping, lossHalted, open, dirty = true;
+    private volatile bool finished, paused, stopping, closeNow, lossHalted, open, dirty = true;
+    private double closeFromMs = double.PositiveInfinity;
+    private OpenPosition? position;
+    private long added, consumed;
     // Virtual time at which a pause or stop was requested: it applies to signals from then on, not to ones already shown.
     private double pausedFromMs = double.PositiveInfinity, stoppingFromMs = double.PositiveInfinity;
     private bool complete, stopPending, stopIssued;
@@ -111,6 +115,10 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
 
     public void Exposure(bool exposed) => open = exposed;
 
+    public void Position(OpenPosition? view) { lock (outputGate) position = view; }
+
+    public bool ExitNow(double ms) => closeNow && ms >= closeFromMs;
+
     public string? EntryBlock(double ms) =>
         stopping && ms >= stoppingFromMs ? "Остановка: новые входы не отправляются, текущая позиция закрывается по правилам стратегии."
         : lossHalted ? $"Достигнут лимит убытка {request.LossLimit:0.##}: новые входы запрещены до конца запуска."
@@ -126,14 +134,18 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
         dirty = true;
     }
 
-    // A graceful stop blocks entries and lets an open position close; force (or a timeout) stops the recording at once,
-    // and whatever is still open becomes an unresolved result.
-    public void RequestStop(bool force)
+    public void RequestStop(bool force) => RequestStop(force ? "force" : "wait");
+
+    // Every stop blocks new entries; with nothing open the recording stops at once. "wait" lets the position close by the
+    // strategy rules, "close" exits it now (virtually, through the book) and then stops, "force" stops the recording at once
+    // and whatever is still open becomes an unresolved result. A stuck close falls back to force after a timeout.
+    public void RequestStop(string mode)
     {
         lock (gate)
         {
             if (!stopping) { stoppingFromMs = NowMs(); stopping = true; stopRequestedAt = clock(); }
-            if (force || state != "running" || !open) stopPending = true;
+            if (mode == "close" && !closeNow) { closeFromMs = NowMs(); closeNow = true; stopRequestedAt = clock(); }
+            if (mode == "force" || state != "running" || !open) stopPending = true;
         }
         dirty = true;
         RequestStopIfNeeded();
@@ -182,16 +194,16 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
             {
                 var now = ending ? Ms(lastTicks) : Ms(watermark);
                 if (state == "calibrating" && now >= settings.CalibrationSeconds * 1000) Calibrate();
-                if (state == "running" && !ending && now > lastClockMs) { feed!.Add(new(now, 0, null, false, 0, "", IsClock: true)); lastClockMs = now; }
+                if (state == "running" && !ending && now > lastClockMs) { Feed(new(now, 0, null, false, 0, "", IsClock: true)); lastClockMs = now; }
             }
             if (stopping && !ending && !stopPending && state == "running"
-                && (!open || clock() - stopRequestedAt > (long)((settings.MaxHoldMs / 1000.0 + 10) * frequency)))
+                && (!open || clock() - stopRequestedAt > (long)(((closeNow ? 0 : settings.MaxHoldMs / 1000.0) + 15) * frequency)))
                 stopPending = true;
             if (!ending || !incoming.IsEmpty) return false;
             if (state == "running")
             {
                 // The session ends at its last received event, as replay ends at the last line of the file.
-                feed!.Add(new(Ms(lastTicks), 0, null, false, 0, "", IsClock: true)); feed.CompleteAdding();
+                Feed(new(Ms(lastTicks), 0, null, false, 0, "", IsClock: true)); feed!.CompleteAdding();
                 waitFor = engine;
             }
             else if (state is "calibrating" or "starting")
@@ -234,10 +246,24 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
         }
         else if (state == "running")
         {
-            if (parsed.Point is { } point && normalizer.Push(point, ms) is { } tick) feed!.Add(tick);
-            if (parsed.Book is { Venue: var venue } book && venue == 1 - leader) feed!.Add(BookEvent(book));
-            if (makerDepth && parsed.Trade is { } trade && trade.Venue == 1 - leader) feed!.Add(TradeEvent(trade));
+            if (parsed.Point is { } point && normalizer.Push(point, ms) is { } tick) Feed(tick);
+            if (parsed.Book is { Venue: var venue } book && venue == 1 - leader) Feed(BookEvent(book));
+            if (makerDepth && parsed.Trade is { } trade && trade.Venue == 1 - leader) Feed(TradeEvent(trade));
         }
+    }
+
+    private void Feed(EngineEvent tick) { feed!.Add(tick); Interlocked.Increment(ref added); }
+
+    // Counts an event as consumed once the engine asks for the next one, i.e. after it has fully processed it.
+    private IEnumerable<EngineEvent> Consume()
+    {
+        foreach (var tick in feed!.GetConsumingEnumerable()) { yield return tick; Interlocked.Increment(ref consumed); }
+    }
+
+    // Waits until the engine has processed everything fed so far; lets tests read state deterministically.
+    public void WaitForEngine()
+    {
+        SpinWait.SpinUntil(() => Interlocked.Read(ref consumed) >= Interlocked.Read(ref added) || engine is not { IsCompleted: false }, 5000);
     }
 
     private EngineEvent BookEvent(ReplayBookEvent x) => new(Ms(x.Ticks), x.Venue, null, false, x.Sequence, x.Connection, true, x.Update);
@@ -271,10 +297,10 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
             .Concat(makerDepth ? trades.Where(x => x.Venue == 1 - leader).Select(TradeEvent) : [])
             .OrderBy(x => x.Ms).ThenBy(x => x.Sequence).ToList();
         feed = new();
-        foreach (var tick in initial) feed.Add(tick);
+        foreach (var tick in initial) Feed(tick);
         lastClockMs = initial.Count == 0 ? double.NegativeInfinity : initial[^1].Ms;
         var setup = new EngineSetup(leader, normal, settings, request.DelayMs, request.Counter, instrument, request.Budget);
-        engine = Task.Factory.StartNew(() => LeaderLagEngine.Run(feed.GetConsumingEnumerable(), setup, CancellationToken.None, null, this),
+        engine = Task.Factory.StartNew(() => LeaderLagEngine.Run(Consume(), setup, CancellationToken.None, null, this),
             CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         inputs.Clear(); quoteEvents.Clear(); books.Clear(); trades.Clear();
         state = "running"; dirty = true;
@@ -306,7 +332,7 @@ public sealed class PaperSession(string id, PaperRequest request, Func<long> clo
                 directory, first is null ? 0 : Math.Max(0, Ms(lastTicks) / 1000), leaderName, executionName, basis, candidates,
                 decisions.AsEnumerable().Reverse().Take(50).ToArray(), closed.TakeLast(100).Reverse().ToArray(), decided,
                 ClosedSumBps(), ClosedNetQuote(), late, result, StrategyReplay.Version, false, request.BotId, request.BotName,
-                paused, stopping, complete ? null : CurrentBlock(), open);
+                paused, stopping, complete ? null : CurrentBlock(), open, complete ? null : position, closeNow && !complete);
     }
 
     public PaperRunRecord Record()
@@ -401,10 +427,11 @@ public sealed class PaperTrading(MarketResearch research, PaperRunStore runs, IL
         session.Pause(paused); return true;
     }
 
-    public bool Stop(string id, bool force = false)
+    public bool Stop(string id, string mode = "wait")
     {
+        if (mode is not ("wait" or "close" or "force")) throw new ArgumentException("Режим остановки: wait, close или force.");
         if (Find(id) is not { } session) return false;
-        session.RequestStop(force); return true;
+        session.RequestStop(mode); return true;
     }
 
     public string StatusFor(string botId, PaperRunRecord? latest) =>

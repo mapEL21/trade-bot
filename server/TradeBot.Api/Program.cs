@@ -146,9 +146,16 @@ api.MapPost("/paper", (PaperRequest request, PaperTrading paper) =>
     catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
     catch (InvalidOperationException e) { return Results.Problem(statusCode: 409, title: e.Message); }
 });
-api.MapPost("/paper/{id:guid}/stop", (Guid id, bool? force, PaperTrading paper) => paper.Stop(id.ToString(), force == true)
-    ? Results.Accepted("/api/v1/paper", new { id = id.ToString() })
-    : Results.Problem(statusCode: 409, title: "Симуляция уже сменилась. Обновите состояние перед остановкой."));
+api.MapPost("/paper/{id:guid}/stop", (Guid id, bool? force, string? mode, PaperTrading paper) =>
+{
+    try
+    {
+        return paper.Stop(id.ToString(), force == true ? "force" : mode ?? "wait")
+            ? Results.Accepted("/api/v1/paper", new { id = id.ToString() })
+            : Results.Problem(statusCode: 409, title: "Симуляция уже сменилась. Обновите состояние перед остановкой.");
+    }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+});
 api.MapPost("/paper/{id:guid}/pause", (Guid id, PaperTrading paper) => paper.Pause(id.ToString(), true)
     ? Results.Accepted("/api/v1/paper") : Results.Problem(statusCode: 409, title: "Симуляция уже завершена или сменилась."));
 api.MapPost("/paper/{id:guid}/resume", (Guid id, PaperTrading paper) => paper.Pause(id.ToString(), false)
@@ -217,8 +224,15 @@ api.MapPost("/bots/{id:guid}/start", async (Guid id, PaperStart? options, IWorks
     catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
     catch (InvalidOperationException e) { return Results.Problem(statusCode: 409, title: e.Message); }
 });
-api.MapPost("/bots/{id:guid}/stop", (Guid id, bool? force, PaperTrading paper) => paper.ForBot(id.ToString()) is { } session && paper.Stop(session.Id, force == true)
-    ? Results.Accepted("/api/v1/paper") : Results.Problem(statusCode: 409, title: "Бот сейчас не работает в симуляции."));
+api.MapPost("/bots/{id:guid}/stop", (Guid id, bool? force, string? mode, PaperTrading paper) =>
+{
+    try
+    {
+        return paper.ForBot(id.ToString()) is { } session && paper.Stop(session.Id, force == true ? "force" : mode ?? "wait")
+            ? Results.Accepted("/api/v1/paper") : Results.Problem(statusCode: 409, title: "Бот сейчас не работает в симуляции.");
+    }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+});
 api.MapPost("/bots/{id:guid}/pause", (Guid id, PaperTrading paper) => paper.ForBot(id.ToString()) is { } session && paper.Pause(session.Id, true)
     ? Results.Accepted("/api/v1/paper") : Results.Problem(statusCode: 409, title: "Бот сейчас не работает в симуляции."));
 api.MapPost("/bots/{id:guid}/resume", (Guid id, PaperTrading paper) => paper.ForBot(id.ToString()) is { } session && paper.Pause(session.Id, false)

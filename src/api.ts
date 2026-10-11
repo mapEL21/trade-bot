@@ -115,8 +115,10 @@ export const api = {
     }),
   pausePaper: (bot: Bot, paused: boolean) =>
     request<void>(`/bots/${bot.id}/${paused ? 'pause' : 'resume'}`, { method: 'POST' }),
-  stopPaper: (bot: Bot, force: boolean) =>
-    request<void>(`/bots/${bot.id}/stop${force ? '?force=true' : ''}`, { method: 'POST' }),
+  // wait: close by the strategy rules, then stop; close: exit now through the book, then stop; force: stop at once,
+  // leaving anything open unresolved.
+  stopPaper: (bot: Bot, mode: 'wait' | 'close' | 'force') =>
+    request<void>(`/bots/${bot.id}/stop?mode=${mode}`, { method: 'POST' }),
   paper: (signal?: AbortSignal) => request<PaperSnapshot>('/paper', { signal }),
   paperRuns: (bot: Bot, signal?: AbortSignal) =>
     request<PaperRunRecord[]>(`/bots/${bot.id}/runs`, { signal }),
@@ -171,6 +173,18 @@ export interface PaperSnapshot {
   stopping: boolean;
   entriesBlocked: string | null;
   positionOpen: boolean;
+  position: OpenPosition | null;
+  closing: boolean;
+}
+// The open simulated position and what closing it now would give after both fees.
+export interface OpenPosition {
+  side: string;
+  sinceSeconds: number;
+  entryPrice: number;
+  quantity: number;
+  markPrice: number;
+  markNetBps: number;
+  markNetQuote: number | null;
 }
 export interface PaperRunRecord {
   id: string;
