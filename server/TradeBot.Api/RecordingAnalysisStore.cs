@@ -5,6 +5,7 @@ using TradeBot.Recorder;
 namespace TradeBot.Api;
 
 public sealed record RecordingList(AnalysisRecording[] Items, int Unavailable);
+internal sealed record RecordingData(AnalysisRecording Recording, long Frequency, long First, long Last, int Events, int Gaps, List<MarketAnalysis.Input> Points);
 
 public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEnvironment environment) : IDisposable
 {
@@ -78,9 +79,26 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
             ?? throw new InvalidDataException("Не удалось прочитать отчёт.");
     }
 
-    public async Task<AnalysisReport> AnalyzeAsync(string id, AnalysisSettings settings, CancellationToken ct)
+    public Task<AnalysisReport> AnalyzeAsync(string id, AnalysisSettings settings, CancellationToken ct)
     {
         settings.Validate();
+        return ProcessAsync(id, "analysis-v1.json", (data, token) => MarketAnalysis.Analyze(data.Recording, settings,
+            data.Frequency, data.First, data.Last, data.Events, data.Gaps, data.Points, token), ct);
+    }
+
+    public Task<ReplayReport> ReplayAsync(string id, ReplaySettings settings, CancellationToken ct)
+    {
+        settings.Validate();
+        return ProcessAsync(id, "strategy-replay-v1.json", (data, token) => StrategyReplay.Run(data.Recording, settings,
+            data.Frequency, data.First, data.Last, data.Points, token), ct);
+    }
+
+    public async Task<ReplayReport> ReadReplayAsync(string id, CancellationToken ct) =>
+        JsonSerializer.Deserialize<ReplayReport>(await File.ReadAllTextAsync(FileFor(DirectoryFor(id), "strategy-replay-v1.json", 8 * 1048576), ct), Json)
+            ?? throw new InvalidDataException("Не удалось прочитать отчёт стратегии.");
+
+    private async Task<T> ProcessAsync<T>(string id, string reportFile, Func<RecordingData, CancellationToken, T> calculate, CancellationToken ct)
+    {
         var directory = DirectoryFor(id);
         if (!await gate.WaitAsync(0, ct)) throw new InvalidOperationException("Уже выполняется анализ. Дождитесь завершения.");
         try
@@ -117,9 +135,9 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
                     if (points.Count > MarketAnalysis.MaxPoints) throw new InvalidDataException("Лимит анализатора — 300 тысяч обновлений котировок. Используйте более короткую запись.");
                 }
                 if (events == 0) throw new InvalidDataException("В записи нет событий.");
-                return MarketAnalysis.Analyze(recording, settings, frequency, first, last, events, gaps, points, token);
+                return calculate(new(recording, frequency, first, last, events, gaps, points), token);
             }, token);
-            var output = Path.Combine(directory, "analysis-v1.json");
+            var output = Path.Combine(directory, reportFile);
             if (File.Exists(output)) CheckLink(output);
             var temporary = Path.Combine(directory, "analysis-" + Guid.NewGuid().ToString("N") + ".tmp");
             try

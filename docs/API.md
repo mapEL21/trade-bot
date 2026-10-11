@@ -36,6 +36,8 @@ Vite пересылает запросы `/api` на этот адрес. Опи
 
 Анализ сохранённых записей:
 
+Первая стратегия: `GET /api/v1/research/recordings/{id}/replay` читает сохранённый результат, `POST` по тому же пути рассчитывает его. POST требует `X-TradeBot-Client: web`. Тело по умолчанию: `{ "calibrationSeconds": 120, "impulseBps": 3, "windowMs": 250, "maxAgeMs": 500, "feeBps": 5, "slippageBps": 1, "minEdgeBps": 2, "stopLossBps": 20, "maxHoldMs": 2000, "leaderAdvantageBps": 0.5 }`. Ответ содержит `status`, `explanation`, `candidates`, выбранные `leader`/`executionExchange`, `normalBasisBps` и восемь `scenarios`, если возможна проверка. Статусы без сценариев: `too-short`, `incomplete`, `no-leader`, `no-basis`. Отчёт сохраняется отдельно; недостающий GET возвращает 404. Ошибки и лимит параллельного расчёта общие с анализатором. Подробнее: [методика стратегии](STRATEGY_REPLAY.md).
+
 | Метод | Путь | Результат |
 | --- | --- | --- |
 | GET | `/api/v1/research/recordings` | `{ items, unavailable }`; до 100 последних каталогов, повреждённые пропускаются и считаются в `unavailable`. |

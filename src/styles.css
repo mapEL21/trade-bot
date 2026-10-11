@@ -2205,6 +2205,34 @@ tbody tr:hover {
   min-width: 0;
   padding: 24px;
 }
+.strategy-replay {
+  margin: 24px 0;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  min-width: 0;
+}
+.strategy-replay p {
+  margin: 12px 0;
+  line-height: 1.6;
+}
+.strategy-replay h4 {
+  margin-top: 24px;
+  font-size: 15px;
+}
+.replay-selection {
+  display: grid;
+  gap: 8px;
+}
+.replay-selection select {
+  max-width: 100%;
+  padding: 10px;
+  background: var(--panel);
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
 .research-analysis > p,
 .research-analysis article p {
   line-height: 1.65;

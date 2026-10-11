@@ -49,7 +49,8 @@ Acceptance: recordings support reproducible replay, gaps are flagged, and a cand
 - [x] Draft DEX → CEX research rules: DEX signal, CEX-only futures execution; see [strategy specification](STRATEGY_DEX_LEAD_LAG.md).
 - [ ] Validate lead–lag for the selected Hyperliquid → X Binance setup and select one asset and concrete entry/exit/risk parameters from recordings. The existing planned impulse catalog entry is not an implementation of this hypothesis.
 - [ ] Model latency, fees, partial fills, and conservative limit-order execution.
-- [ ] Evaluate on a separate period not used for parameter selection.
+- [x] Add an initial offline leader-lag replay with a fixed calibration prefix, eight direction/latency scenarios, explicit costs and decision journals; see [v0.1 rules](STRATEGY_REPLAY.md).
+- [ ] Evaluate on new independent recordings not used to choose strategy parameters; the prefix split within one recording is only a first check.
 - [ ] Show persistent per-bot statistics from simulation.
 
 Acceptance: results are reproducible, costs are explicit, and simulated fills are never presented as real trades. Profitability remains an empirical question.

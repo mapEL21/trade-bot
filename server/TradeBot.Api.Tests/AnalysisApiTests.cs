@@ -78,5 +78,25 @@ public sealed class AnalysisApiTests : IDisposable
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/research/recordings/not-a-recording/analysis", new AnalysisSettings())).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync($"/api/v1/research/recordings/{Id}/analysis", new AnalysisSettings(FeeBps: -1))).StatusCode);
     }
+    [Fact]
+    public async Task ReplayPersistsSeparatelyAndRejectsInvalidSettings()
+    {
+        await Seed();
+        using (var factory = Factory())
+        using (var client = Client(factory))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/v1/research/recordings/{Id}/replay")).StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync($"/api/v1/research/recordings/{Id}/replay", new ReplaySettings(CalibrationSeconds: 0))).StatusCode);
+            var response = await client.PostAsJsonAsync($"/api/v1/research/recordings/{Id}/replay", new ReplaySettings());
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var report = (await response.Content.ReadFromJsonAsync<ReplayReport>())!;
+            Assert.Equal("too-short", report.Status); Assert.Empty(report.Scenarios);
+            Assert.False(File.Exists(Path.Combine(root, Id, "analysis-v1.json")));
+        }
+        using var restarted = Factory(); using var reader = Client(restarted);
+        var saved = await reader.GetFromJsonAsync<ReplayReport>($"/api/v1/research/recordings/{Id}/replay");
+        Assert.Equal("too-short", saved!.Status);
+        Assert.Equal(Id, saved.Recording.Id);
+    }
     public void Dispose() { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); if (Directory.Exists(root)) Directory.Delete(root, true); }
 }

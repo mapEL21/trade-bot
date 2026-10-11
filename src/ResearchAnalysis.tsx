@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { request } from './api';
+import { StrategyReplay } from './StrategyReplay';
 
 interface Recording {
   id: string;
@@ -213,6 +214,7 @@ export function ResearchAnalysis({ active }: { active: boolean }) {
         </button>
       </form>
       {error && <p role="alert">{error}</p>}
+      <StrategyReplay key={id} id={id} disabled={busy || selected?.status !== 'completed'} />
       {report && (
         <div aria-live="polite">
           <h3>Отчёт: {report.recording.coin}</h3>
@@ -269,7 +271,7 @@ export function ResearchAnalysis({ active }: { active: boolean }) {
                 {number(direction.model.meanFeeBps)} б.п. Это условные входы по BBO, не исполненные
                 сделки.
               </p>
-              <div className="analysis-table">
+              <div className="analysis-table" tabIndex={0}>
                 <table>
                   <caption>Движение второй площадки после импульса</caption>
                   <thead>

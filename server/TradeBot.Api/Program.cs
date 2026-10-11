@@ -121,6 +121,8 @@ api.MapGet("/research/stream", async (HttpContext context, MarketResearch resear
     catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
 });
 api.MapGet("/strategies", (StrategyCatalog catalog) => Results.Ok(catalog.Items));
+api.MapGet("/research/recordings/{id}/replay", (string id, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReadReplayAsync(id, ct)));
+api.MapPost("/research/recordings/{id}/replay", (string id, ReplaySettings settings, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReplayAsync(id, settings, ct)));
 api.MapGet("/workspace", async (IWorkspaceStore store, CancellationToken ct) => Results.Ok(await store.ReadAsync(ct)));
 api.MapPost("/bots", async (BotConfig config, StrategyCatalog catalog, IWorkspaceStore store, CancellationToken ct) =>
 {

@@ -534,3 +534,135 @@ test('analysis shows a server error without fabricated report', async ({ page })
   await expect(page.getByRole('alert')).toContainText('Повреждённая строка 2');
   await expect(page.getByRole('heading', { name: 'Отчёт: SOL' })).toHaveCount(0);
 });
+
+const replayFixture = {
+  status: 'evaluated',
+  explanation: 'Поводырь выбран только на начальном участке.',
+  version: '0.1.0',
+  leader: 'binance',
+  executionExchange: 'okx',
+  normalBasisBps: 1,
+  durationSeconds: 600,
+  settings: {
+    calibrationSeconds: 120,
+    impulseBps: 3,
+    windowMs: 250,
+    maxAgeMs: 500,
+    feeBps: 5,
+    slippageBps: 1,
+    minEdgeBps: 2,
+    stopLossBps: 20,
+    maxHoldMs: 2000,
+    leaderAdvantageBps: 0.5,
+  },
+  candidates: [
+    { sourceExchange: 'binance', exchange: 'okx', samples: 15, responseBps: 2 },
+    { sourceExchange: 'okx', exchange: 'binance', samples: 12, responseBps: 0.2 },
+  ],
+  scenarios: [10, 25, 50, 100].flatMap((delayMs) =>
+    ['follow', 'counter'].map((mode) => ({
+      mode,
+      delayMs,
+      trades: 1,
+      meanNetBps: -2,
+      winPercent: 0,
+      sumNetBps: -2,
+      closedTradeDrawdownBps: 2,
+      unresolvedPositions: 0,
+      skipped: 2,
+      signals: 3,
+      journalTruncated: false,
+      journal: [
+        {
+          seconds: 121,
+          action: 'пропуск',
+          reason: 'Оставшееся отставание меньше порога расходов и запаса.',
+          side: null,
+          price: null,
+          netBps: null,
+        },
+      ],
+      tradeLog: [
+        {
+          entrySeconds: 125,
+          exitSeconds: 126,
+          side: 'long',
+          entryPrice: 100,
+          exitPrice: 100.01,
+          netBps: -2,
+          exitReason: 'Лимит времени удержания',
+        },
+      ],
+    })),
+  ),
+  notes: ['Симуляция не отправляет реальные заявки.'],
+};
+
+test('strategy replay compares eight scenarios, shows journals and restores a saved result', async ({
+  page,
+}) => {
+  await installFeed(page, idle);
+  await page.route('**/api/v1/research/recordings', (route) =>
+    route.fulfill({
+      json: { items: [{ ...analysisRecording, hasReport: false }], unavailable: 0 },
+    }),
+  );
+  let saved = false;
+  await page.route('**/api/v1/research/recordings/*/replay', (route) => {
+    if (route.request().method() === 'POST') {
+      expect(route.request().postDataJSON().calibrationSeconds).toBe(120);
+      saved = true;
+    }
+    return saved
+      ? route.fulfill({ json: replayFixture })
+      : route.fulfill({ status: 404, json: { title: 'Нет отчёта' } });
+  });
+  await openResearch(page);
+  await page.getByRole('button', { name: 'Проверить первую стратегию' }).click();
+  await expect(page.getByRole('heading', { name: 'Результат стратегии v0.1.0' })).toBeVisible();
+  await expect(
+    page.getByRole('table', { name: 'Сравнение независимых сценариев' }).getByRole('row'),
+  ).toHaveCount(9);
+  await page.getByLabel('Журнал сценария').selectOption('counter-10');
+  await page.getByText('Причины входов, пропусков и выходов', { exact: true }).click();
+  await expect(
+    page.getByText('Оставшееся отставание меньше порога расходов и запаса.', { exact: true }),
+  ).toBeVisible();
+  await page.getByText('Условные сделки', { exact: true }).click();
+  await expect(page.getByText('Лимит времени удержания', { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect((await new AxeBuilder({ page }).include('.strategy-replay').analyze()).violations).toEqual(
+    [],
+  );
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.reload();
+  await page.getByRole('button', { name: 'Исследование рынка', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Результат стратегии v0.1.0' })).toBeVisible();
+});
+
+test('strategy without a leader explains why no trades were simulated', async ({ page }) => {
+  await installFeed(page, idle);
+  await page.route('**/api/v1/research/recordings', (route) =>
+    route.fulfill({
+      json: { items: [{ ...analysisRecording, hasReport: false }], unavailable: 0 },
+    }),
+  );
+  await page.route('**/api/v1/research/recordings/*/replay', (route) =>
+    route.fulfill({
+      json: {
+        ...replayFixture,
+        status: 'no-leader',
+        leader: null,
+        executionExchange: null,
+        scenarios: [],
+        explanation: 'Поводырь не определён. Сделки не моделировались.',
+      },
+    }),
+  );
+  await openResearch(page);
+  await expect(
+    page.getByText('Поводырь не определён. Сделки не моделировались.', { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Сравнение независимых сценариев' })).toHaveCount(0);
+});
