@@ -28,6 +28,8 @@ builder.Services.AddHostedService(services => services.GetRequiredService<Market
 builder.Services.AddSingleton<IScanRunner, ScanRunner>();
 builder.Services.AddSingleton<MarketScanner>();
 builder.Services.AddHostedService(services => services.GetRequiredService<MarketScanner>());
+builder.Services.AddSingleton<StorageHousekeeper>();
+builder.Services.AddHostedService(services => services.GetRequiredService<StorageHousekeeper>());
 var storagePath = builder.Configuration["Storage:Path"] ?? Path.Combine(builder.Environment.ContentRootPath, "data", "workspace.db");
 builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(storagePath));
 builder.Services.AddSingleton(_ => new PaperRunStore(storagePath));
@@ -50,6 +52,7 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+var remoteHost = builder.Configuration["Remote:Host"] is { Length: > 0 } host ? host.Trim() : null;
 app.UseExceptionHandler(handler => handler.Run(async context =>
 {
     var exception = context.Features.Get<IExceptionHandlerFeature>()?.Error;
@@ -62,14 +65,17 @@ app.UseStatusCodePages(async context =>
         .ExecuteAsync(context.HttpContext));
 app.Use(async (context, next) =>
 {
-    // Local single-user API. Never expose it through a public proxy without authentication.
-    if (context.Request.Host.Host is not ("localhost" or "127.0.0.1" or "[::1]"))
+    // Local single-user API. Never expose it through a public proxy without authentication. On a server it is reached
+    // only through a private network (Tailscale) under one configured host name, Remote:Host.
+    if (context.Request.Host.Host is not ("localhost" or "127.0.0.1" or "[::1]")
+        && !(remoteHost is not null && string.Equals(context.Request.Host.Host, remoteHost, StringComparison.OrdinalIgnoreCase)))
     {
         await Results.Problem(statusCode: 403, title: "Разрешён только локальный доступ.").ExecuteAsync(context);
         return;
     }
     var origin = context.Request.Headers.Origin.ToString();
-    var allowedOrigins = new[] { builder.Configuration["Ui:Origin"] ?? "http://127.0.0.1:5173", "http://localhost:5173", $"http://localhost:{port}", $"http://127.0.0.1:{port}" };
+    string[] allowedOrigins = [builder.Configuration["Ui:Origin"] ?? "http://127.0.0.1:5173", "http://localhost:5173", $"http://localhost:{port}",
+        $"http://127.0.0.1:{port}", .. remoteHost is null ? Array.Empty<string>() : [$"https://{remoteHost}"]];
     if ((origin.Length > 0 && !allowedOrigins.Contains(origin)) || context.Request.Headers["Sec-Fetch-Site"] == "cross-site")
     {
         await Results.Problem(statusCode: 403, title: "Источник запроса не разрешён.").ExecuteAsync(context);
@@ -87,6 +93,7 @@ app.UseRateLimiter();
 app.MapOpenApi();
 var api = app.MapGroup("/api/v1").RequireRateLimiting("local");
 api.MapGet("/health", () => Results.Ok(new { status = "ok", executionEnabled = false }));
+api.MapGet("/storage", (StorageHousekeeper storage) => Results.Ok(storage.Status));
 api.MapGet("/research", (MarketResearch research) => Results.Ok(research.Snapshot()));
 api.MapGet("/research/recordings", (RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ListAsync(ct)));
 api.MapGet("/research/recordings/{id}/analysis", (string id, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReadAsync(id, ct)));
@@ -272,6 +279,14 @@ api.MapPost("/bots/{id:guid}/resume", (Guid id, PaperTrading paper) => paper.For
 _ = app.Services.GetRequiredService<IWorkspaceStore>();
 // Marks runs cut off by the previous shutdown as interrupted before anything reads them.
 _ = app.Services.GetRequiredService<PaperRunStore>();
+// On a server the built interface is served by the API itself: one process, one port. The app has no client-side routes,
+// so only "/" maps to index.html and unknown API paths stay 404.
+if (builder.Configuration["Ui:Path"] is { Length: > 0 } ui && Directory.Exists(ui))
+{
+    var files = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(Path.GetFullPath(ui));
+    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
+    app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
+}
 app.Run();
 
 static bool TryRevision(HttpContext context, out long revision) =>

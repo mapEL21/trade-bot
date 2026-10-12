@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { Play, ScanSearch, Square } from 'lucide-react';
 import {
   api,
+  type StorageStatus,
   type ScanCandidate,
   type ScanLevel,
   type ScanSnapshot,
@@ -35,6 +36,8 @@ const pct = (n: number, signed = true) =>
   `${signed && n > 0 ? '+' : ''}${n.toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%`;
 const moscow = (ms: number) =>
   new Date(ms).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
+const gb = (bytes: number) =>
+  `${(bytes / 1073741824).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} ГБ`;
 const levelText = (l: ScanLevel | null) =>
   l ? `${price(l.price)} · ${l.touches} кас. · ${pct(l.distancePct, false)}` : '—';
 
@@ -48,6 +51,8 @@ export function Scanner() {
   const [minVolume, setMinVolume] = useState(150);
   const [maxSymbols, setMaxSymbols] = useState(20);
   const [exclude, setExclude] = useState('');
+  const [continuous, setContinuous] = useState(false);
+  const [storage, setStorage] = useState<StorageStatus | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<ScanSymbolDetail | null>(null);
   const running = snapshot ? live(snapshot.state) : false;
@@ -75,6 +80,15 @@ export function Scanner() {
       clearTimeout(timer);
     };
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    api
+      .storage(controller.signal)
+      .then(setStorage)
+      .catch(() => setStorage(null));
+    return () => controller.abort();
+  }, [snapshot?.id]);
 
   useEffect(() => {
     if (!selected) return;
@@ -121,6 +135,7 @@ export function Scanner() {
         minQuoteVolume: minVolume * 1_000_000,
         maxSymbols,
         exclude: symbols,
+        continuous,
       }),
     );
   }
@@ -187,6 +202,14 @@ export function Scanner() {
                 onChange={(e) => setExclude(e.target.value)}
               />
             </label>
+            <label className="checkbox-field">
+              <input
+                type="checkbox"
+                checked={continuous}
+                onChange={(e) => setContinuous(e.target.checked)}
+              />
+              <span>Непрерывно: после окончания сразу новая запись, пока не остановлю</span>
+            </label>
             <button className="button primary" disabled={busy}>
               <Play size={16} /> Запустить сканер
             </button>
@@ -208,7 +231,20 @@ export function Scanner() {
           </div>
         )}
         {snapshot && snapshot.state !== 'idle' && (
-          <p className="field-hint">{snapshot.explanation}</p>
+          <p className="field-hint">
+            {snapshot.continuous && `Непрерывный режим · запись № ${snapshot.segment}. `}
+            {snapshot.explanation}
+          </p>
+        )}
+        {storage?.enabled && (
+          <p className="field-hint">
+            Диск: свободно {storage.freeBytes != null ? gb(storage.freeBytes) : '—'}
+            {storage.totalBytes != null && ` из ${gb(storage.totalBytes)}`} · записи{' '}
+            {gb(storage.recordingBytes)} ({storage.recordings}) · хранятся{' '}
+            {storage.retentionDays > 0 ? `${storage.retentionDays} дн.` : 'без ограничения'}
+            {storage.lastBackup && ` · копия базы ${storage.lastBackup}`}
+            {storage.error && ` · ошибка обслуживания: ${storage.error}`}
+          </p>
         )}
         {error && <p role="alert">{error}</p>}
         <p className="field-hint">

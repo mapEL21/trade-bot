@@ -79,6 +79,21 @@ async function server(page: Page) {
     route.fulfill({ json: { schemaVersion: 1, bots: [], events: [] } }),
   );
   await page.route('**/api/v1/strategies', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/v1/storage', (route) =>
+    route.fulfill({
+      json: {
+        enabled: true,
+        checkedUtc: new Date().toISOString(),
+        recordings: 12,
+        recordingBytes: 8 * 1073741824,
+        retentionDays: 14,
+        freeBytes: 70 * 1073741824,
+        totalBytes: 100 * 1073741824,
+        lastBackup: 'workspace-20261012-000000.db',
+        error: null,
+      },
+    }),
+  );
   await page.route('**/api/v1/scanner', (route) => {
     if (route.request().method() === 'POST') {
       state.started = route.request().postDataJSON();
@@ -116,6 +131,7 @@ test('scanner starts with chosen limits, shows scored breakouts, coins and a cha
   await page.getByLabel('Объём за 24 ч от, млн $').fill('200');
   await page.getByLabel('Монет не больше').fill('15');
   await page.getByLabel('Исключить').fill('btc, ethusdt');
+  await page.getByLabel(/^Непрерывно/).check();
   await page.getByRole('button', { name: 'Запустить сканер' }).click();
   await expect
     .poll(() => state.started)
@@ -124,7 +140,11 @@ test('scanner starts with chosen limits, shows scored breakouts, coins and a cha
       minQuoteVolume: 200_000_000,
       maxSymbols: 15,
       exclude: ['BTCUSDT', 'ETHUSDT'],
+      continuous: true,
     });
+  await expect(
+    page.getByText(/Диск: свободно 70 ГБ из 100 ГБ · записи 8 ГБ \(12\) · хранятся 14 дн\./),
+  ).toBeVisible();
   await expect(page.getByRole('status').filter({ hasText: 'Сканирует' })).toBeVisible();
   const breakouts = page.getByRole('table', { name: /Пробои уровней/ });
   await expect(breakouts).toContainText('XUSDT');

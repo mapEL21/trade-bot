@@ -150,6 +150,20 @@ export interface ScanSnapshot {
     outcomeMinutes: number;
     breakoutBufferPct: number;
   };
+  continuous?: boolean;
+  segment?: number;
+}
+// Disk upkeep on a server: compression, retention and database copies; off on a laptop.
+export interface StorageStatus {
+  enabled: boolean;
+  checkedUtc: string | null;
+  recordings: number;
+  recordingBytes: number;
+  retentionDays: number;
+  freeBytes: number | null;
+  totalBytes: number | null;
+  lastBackup: string | null;
+  error: string | null;
 }
 export interface ScanCandle {
   openMs: number;
@@ -168,11 +182,13 @@ export interface ScanSymbolDetail {
 
 export const api = {
   scanner: (signal?: AbortSignal) => request<ScanSnapshot>('/scanner', { signal }),
+  storage: (signal?: AbortSignal) => request<StorageStatus>('/storage', { signal }),
   startScanner: (options: {
     seconds: number;
     minQuoteVolume: number;
     maxSymbols: number;
     exclude: string[];
+    continuous: boolean;
   }) => request<{ id: string }>('/scanner', { method: 'POST', body: JSON.stringify(options) }),
   stopScanner: (id: string) => request<void>(`/scanner/${id}/stop`, { method: 'POST' }),
   scannerSymbol: (symbol: string, signal?: AbortSignal) =>

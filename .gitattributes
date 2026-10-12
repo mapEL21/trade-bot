@@ -1,0 +1,2 @@
+# Files executed or read on the Linux server must keep LF line endings even on a Windows checkout.
+scripts/server/** text eol=lf

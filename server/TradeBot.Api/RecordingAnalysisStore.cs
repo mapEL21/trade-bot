@@ -35,6 +35,11 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
         return path;
     }
 
+    // Finished recordings on a server are compressed by StorageHousekeeper; both forms are read the same way.
+    private static string EventsName(string directory) =>
+        File.Exists(Path.Combine(directory, StorageHousekeeper.Events)) ? StorageHousekeeper.Events
+        : File.Exists(Path.Combine(directory, StorageHousekeeper.Compressed)) ? StorageHousekeeper.Compressed : StorageHousekeeper.Events;
+
     private async Task<(AnalysisRecording Recording, long Frequency)> Metadata(string directory, CancellationToken ct)
     {
         using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(FileFor(directory, "manifest.json", 8 * 1048576), ct));
@@ -52,7 +57,7 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
             using var summary = JsonDocument.Parse(await File.ReadAllTextAsync(FileFor(directory, "summary.json", 65536), ct));
             status = summary.RootElement.GetProperty("status").GetString() ?? "unknown";
         }
-        var path = FileFor(directory, "events.ndjson", long.MaxValue);
+        var path = FileFor(directory, EventsName(directory), long.MaxValue);
         return (new(Path.GetFileName(directory), coin, source, target, root.GetProperty("startedUtc").GetDateTimeOffset(), status,
             new FileInfo(path).Length, File.Exists(Path.Combine(directory, "analysis-v1.json"))), root.GetProperty("stopwatchFrequency").GetInt64());
     }
@@ -152,7 +157,9 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
             var token = timeout.Token;
             var (recording, frequency) = await Metadata(directory, token);
             if (recording.Status == "recording") throw new InvalidOperationException("Сначала завершите запись. Незавершённые файлы не анализируются.");
-            var file = FileFor(directory, "events.ndjson", 256L * 1048576);
+            var name = EventsName(directory);
+            // A compressed file is about ten times smaller; the event limits below bound the uncompressed size anyway.
+            var file = FileFor(directory, name, name.EndsWith(".gz") ? 64L * 1048576 : 256L * 1048576);
             var report = await Task.Run(async () =>
             {
                 var points = new List<MarketAnalysis.Input>();
@@ -166,7 +173,8 @@ public sealed class RecordingAnalysisStore(IConfiguration configuration, IHostEn
                 }
                 long first = long.MaxValue, last = 0;
                 int events = 0, gaps = 0, levels = 0;
-                using var reader = new StreamReader(file);
+                using var reader = new StreamReader(name.EndsWith(".gz")
+                    ? new System.IO.Compression.GZipStream(File.OpenRead(file), System.IO.Compression.CompressionMode.Decompress) : File.OpenRead(file));
                 while (await reader.ReadLineAsync(token) is { } line)
                 {
                     token.ThrowIfCancellationRequested();

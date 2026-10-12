@@ -1,0 +1,26 @@
+# Trade Bot on a Linux server: market recording, level scanner and paper simulation. No real orders are sent.
+[Unit]
+Description=Trade Bot (research and paper simulation, no real orders)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=trade-bot
+Group=trade-bot
+WorkingDirectory=/opt/trade-bot
+ExecStart=/opt/trade-bot/TradeBot.Api
+EnvironmentFile=/etc/trade-bot/trade-bot.env
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+# Restart after a crash or a reboot; on stop the server finishes recordings and saves the scanner journal first.
+Restart=always
+RestartSec=5
+TimeoutStopSec=90
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/trade-bot
+
+[Install]
+WantedBy=multi-user.target
