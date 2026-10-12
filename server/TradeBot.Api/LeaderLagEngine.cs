@@ -341,7 +341,8 @@ public static class LeaderLagEngine
                         : mark <= -liquidationBps ? $"Риск ликвидации: убыток подошёл к марже позиции при плече {leverage}x"
                         : insufficient ? "Недостаточно видимой ликвидности для полного выхода" : mark <= -s.StopLossBps ? "Ограничение убытка" : direction * residual <= s.MinEdgeBps ? "Отставание сократилось или сменило знак" : null;
                     var prior = q[leader].Before(tick.Ms - s.WindowMs, s.MaxAgeMs);
-                    if (reason is null && prior is not null && direction * (q[leader].Current!.Mid / prior.Mid - 1) * 10000 <= -s.ImpulseBps)
+                    // The reversal threshold is separate from the entry impulse: a low entry threshold need not make exits jumpy.
+                    if (reason is null && prior is not null && direction * (q[leader].Current!.Mid / prior.Mid - 1) * 10000 <= -(s.ReversalBps ?? s.ImpulseBps))
                         reason = "Поводырь развернулся";
                     if (reason is not null) { pending = Order(position.Sign, tick.Ms, reason, true); Log(tick.Ms, "выход запрошен", reason); }
                 }

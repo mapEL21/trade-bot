@@ -31,11 +31,11 @@ import { Research } from './Research';
 import { activeStatuses } from './PaperRun';
 import { strategyView } from './strategyViews';
 import { LeaderLagFields, sizeProblem } from './LeaderLagFields';
-import { defaultFees } from './strategySettings';
+import { builtInTemplates, defaultFees } from './strategySettings';
+import { TemplatePicker } from './BotTemplates';
 import { DownloadButton, Empty, Modal, SelectField, Toast, download } from './components';
 import { Performance, Stats, TradeQuality, TradesTable } from './TradeAnalysis';
 import {
-  defaultLeaderLagSettings,
   exchanges,
   exportConfig,
   formatMoney,
@@ -74,21 +74,27 @@ const defaultConfig: BotConfig = {
   strategy: 'impulse',
   strategyVersion: '0.1.0',
 };
+// A new leader-lag bot starts from the first built-in template: 100 USDT balance, 2x leverage, 200 USDT orders.
 function leaderLagConfig(version: string): BotConfig {
+  const t = builtInTemplates[0];
   return {
     name: '',
     exchange: 'Binance',
     symbol: 'ARBUSDT',
-    budget: 10,
-    lossLimit: 1,
+    budget: t.budget,
+    lossLimit: t.lossLimit,
     strategy: 'leader-lag',
     strategyVersion: version,
     parameters: {
       signalExchange: 'OKX',
-      settings: { ...defaultLeaderLagSettings },
-      delayMs: 50,
-      counter: false,
-      leverage: 1,
+      settings: {
+        ...t.settings,
+        feeBps: defaultFees.Binance.taker,
+        makerFeeBps: defaultFees.Binance.maker,
+      },
+      delayMs: t.delayMs,
+      counter: t.counter,
+      leverage: t.leverage,
     },
   };
 }
@@ -125,6 +131,11 @@ export default function App() {
   const budget = bot?.budget ?? workspace.bots.reduce((s, b) => s + b.budget, 0);
   // Allocated balance plus every closed simulated trade so far, whatever the period shown.
   const balance = budget + metrics(bot?.trades ?? allTrades).pnl;
+  // Open simulated positions right now: the bot's, or the sum over all bots on the overview.
+  const open = (bot ? [bot] : workspace.bots).flatMap((b) =>
+    b.unrealized != null ? [b.unrealized] : [],
+  );
+  const unrealized = open.length ? open.reduce((a, b) => a + b, 0) : null;
   const visibleBots = workspace.bots.filter(
     (b) =>
       `${b.name} ${b.symbol} ${b.exchange}`.toLowerCase().includes(query.toLowerCase()) &&
@@ -465,7 +476,7 @@ export default function App() {
                     </span>
                     {period}
                   </div>
-                  <Stats stat={stat} budget={budget} balance={balance} />
+                  <Stats stat={stat} budget={budget} balance={balance} unrealized={unrealized} />
                   <div className="overview-grid">
                     <Performance trades={trades} pnl={stat.pnl} />
                     <div className="panel bot-facts">
@@ -589,7 +600,7 @@ export default function App() {
                     </span>
                     {period}
                   </div>
-                  <Stats stat={stat} budget={budget} balance={balance} />
+                  <Stats stat={stat} budget={budget} balance={balance} unrealized={unrealized} />
                   <div className="overview-grid">
                     <Performance trades={trades} pnl={stat.pnl} />
                     <div className="panel workspace-health">
@@ -1013,12 +1024,7 @@ function ConfigForm({
   function chooseStrategy(id: BotConfig['strategy']) {
     if (id === form.strategy) return;
     if (id === 'leader-lag' && leaderLagDefinition)
-      setForm({
-        ...leaderLagConfig(leaderLagDefinition.version),
-        name: form.name,
-        budget: form.budget,
-        lossLimit: form.lossLimit,
-      });
+      setForm({ ...leaderLagConfig(leaderLagDefinition.version), name: form.name });
     else setForm({ ...defaultConfig, name: form.name });
   }
   function chooseExchange(exchange: Exchange) {
@@ -1128,6 +1134,7 @@ function ConfigForm({
           </label>
         )}
       </fieldset>
+      {leaderLag && params && <TemplatePicker form={form} setForm={setForm} />}
       <div className="form-grid">
         <SelectField
           label={leaderLag ? 'Биржа бота (исполнение)' : 'Биржа'}

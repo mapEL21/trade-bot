@@ -23,6 +23,8 @@ public sealed class WorkspaceTests : IDisposable
             // Never let a test open the real workspace database.
             services.RemoveAll<PaperRunStore>();
             services.AddSingleton(_ => new PaperRunStore(Database));
+            services.RemoveAll<BotTemplateStore>();
+            services.AddSingleton(_ => new BotTemplateStore(Database));
         }));
 
     private static HttpClient Client(WebApplicationFactory<Program> factory)
@@ -30,6 +32,30 @@ public sealed class WorkspaceTests : IDisposable
         var client = factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-TradeBot-Client", "web");
         return client;
+    }
+
+    [Fact]
+    public async Task TemplatesAreSavedByNameValidatedAndDeleted()
+    {
+        using var factory = Factory();
+        using var client = Client(factory);
+        var settings = new ReplaySettings(OrderNotional: 200, Leader: "source", ReversalBps: 4);
+        var input = new BotTemplateInput("Сбор статистики", "leader-lag", 100, 10, 2, 50, false, settings);
+        var saved = (await (await client.PostAsJsonAsync("/api/v1/templates", input)).Content.ReadFromJsonAsync<BotTemplate>())!;
+        Assert.Equal((200m, 2, 4m), (saved.Settings.OrderNotional, saved.Leverage, saved.Settings.ReversalBps!.Value));
+        // The same name replaces the template instead of adding a second one.
+        var replaced = (await (await client.PostAsJsonAsync("/api/v1/templates", input with { Name = " Сбор статистики ", Leverage = 4 }))
+            .Content.ReadFromJsonAsync<BotTemplate>())!;
+        Assert.Equal((saved.Id, 4), (replaced.Id, replaced.Leverage));
+        // 200 USDT at 1x does not fit a 100 USDT balance; a template with no name is refused too.
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/templates", input with { Name = "Другой", Leverage = 1 })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/templates", input with { Name = " " })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/templates", input with { Strategy = "impulse" })).StatusCode);
+        var list = (await client.GetFromJsonAsync<BotTemplate[]>("/api/v1/templates"))!;
+        Assert.Equal(saved.Id, Assert.Single(list).Id);
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/v1/templates/{saved.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.DeleteAsync($"/api/v1/templates/{saved.Id}")).StatusCode);
+        Assert.Empty((await client.GetFromJsonAsync<BotTemplate[]>("/api/v1/templates"))!);
     }
 
     [Fact]

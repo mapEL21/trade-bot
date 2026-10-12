@@ -236,6 +236,26 @@ test('leader-lag bot is created with its strategy parameters', async ({ page }) 
     .click();
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByRole('radio', { name: /Поводырь/ })).toBeChecked();
+  // A new leader-lag bot starts from the statistics template: 100 USDT, 2x, 200 USDT orders.
+  await expect(dialog.getByLabel('Выделенный баланс, USDT')).toHaveValue('100');
+  await expect(dialog.getByLabel('Плечо, x')).toHaveValue('2');
+  await expect(dialog.getByLabel('Номинал заявки, USDT')).toHaveValue('200');
+  // Templates: save the current settings under a name, switch to another template, then back to the saved one.
+  await dialog.getByLabel('Сохранить текущие настройки как шаблон').fill('Тест · 3x');
+  await dialog.getByLabel('Плечо, x').fill('3');
+  await dialog.getByRole('button', { name: 'Сохранить шаблон' }).click();
+  await expect(dialog.getByRole('status').filter({ hasText: 'сохранён' })).toBeVisible();
+  await dialog.getByLabel(/^Шаблон/).selectOption({ label: 'Поводырь · осторожный' });
+  await dialog.getByRole('button', { name: 'Применить' }).click();
+  await expect(dialog.getByLabel('Плечо, x')).toHaveValue('2');
+  await dialog.getByLabel(/^Шаблон/).selectOption({ label: 'Тест · 3x' });
+  await dialog.getByRole('button', { name: 'Применить' }).click();
+  await expect(dialog.getByLabel('Плечо, x')).toHaveValue('3');
+  await dialog.getByRole('button', { name: 'Удалить шаблон' }).click();
+  await expect(dialog.getByRole('status').filter({ hasText: 'удалён' })).toBeVisible();
+  await dialog.getByLabel('Выделенный баланс, USDT').fill('10');
+  await dialog.getByLabel('Лимит убытка, USDT').fill('1');
+  await dialog.getByLabel('Плечо, x').fill('1');
   await dialog.getByLabel('Название бота').fill('Поводырь · MAGIC');
   await dialog.getByLabel('Биржа бота (исполнение)').selectOption('OKX');
   await dialog.getByLabel(/^Биржа сигнала/).selectOption('Binance');
@@ -264,9 +284,9 @@ test('leader-lag bot is created with its strategy parameters', async ({ page }) 
   await dialog.getByLabel('Комиссия taker, %').fill('0.0275');
   await dialog.getByLabel('Вход в сделку').selectOption('maker');
   await dialog.getByText('Остальные параметры стратегии').click();
-  await expect(dialog.getByLabel('Порог импульса, %')).toHaveValue('0.03');
+  await expect(dialog.getByLabel('Порог импульса, %')).toHaveValue('0.02');
   await dialog.getByRole('button', { name: 'б.п.', exact: true }).click();
-  await expect(dialog.getByLabel('Порог импульса, б.п.')).toHaveValue('3');
+  await expect(dialog.getByLabel('Порог импульса, б.п.')).toHaveValue('2');
   expect((await new AxeBuilder({ page }).include('dialog.modal').analyze()).violations).toEqual([]);
   await dialog.getByRole('button', { name: 'Создать бота', exact: true }).click();
   await expect.poll(() => state.created).not.toBeNull();
@@ -314,7 +334,10 @@ test('bot page starts, shows, pauses and stops a live paper run', async ({ page 
   // The finished run's trade now counts in the bot's simulated balance, chart and history.
   await expect(page.getByText('СТАТИСТИКА СИМУЛЯЦИИ · НЕ РЕАЛЬНАЯ ТОРГОВЛЯ')).toBeVisible();
   await expect(page.locator('.stat', { hasText: 'Баланс · симуляция' })).toContainText('21,00');
-  await expect(page.locator('.stat', { hasText: 'Чистый результат' })).toContainText('+1,00');
+  await expect(page.locator('.stat', { hasText: /^Реализованный PnL/ })).toContainText('+1,00');
+  await expect(page.locator('.stat', { hasText: 'Нереализованный PnL' })).toContainText(
+    'Открытых позиций нет',
+  );
   await expect(page.getByRole('img', { name: /накопленного результата/ })).toBeVisible();
   await expect(page.locator('.trades-panel')).toContainText('SIM');
   expect(state.stopped).toBe(1);

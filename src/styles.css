@@ -508,7 +508,7 @@ h1 {
 }
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 14px;
   margin-bottom: 22px;
 }
@@ -1129,6 +1129,30 @@ h2 {
   margin: 0;
   padding: 0;
   border: 0;
+  min-width: 0;
+}
+.template-picker {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid #2a3646;
+  border-radius: 6px;
+  min-width: 0;
+}
+.template-picker legend {
+  padding: 0 6px;
+  font-size: 11px;
+  color: #9fb0c6;
+}
+.template-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+.template-row .field {
+  flex: 1 1 220px;
   min-width: 0;
 }
 .strategy-choice legend {

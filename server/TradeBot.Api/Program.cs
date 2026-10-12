@@ -28,6 +28,7 @@ builder.Services.AddHostedService(services => services.GetRequiredService<Market
 var storagePath = builder.Configuration["Storage:Path"] ?? Path.Combine(builder.Environment.ContentRootPath, "data", "workspace.db");
 builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(storagePath));
 builder.Services.AddSingleton(_ => new PaperRunStore(storagePath));
+builder.Services.AddSingleton(_ => new BotTemplateStore(storagePath));
 builder.Services.AddRateLimiter(options =>
 {
     options.AddFixedWindowLimiter("local", settings =>
@@ -176,11 +177,22 @@ api.MapGet("/workspace", async (IWorkspaceStore store, PaperRunStore runs, Paper
             return b with
             {
                 Status = paper.StatusFor(b.Id, botRuns.FirstOrDefault()),
+                Unrealized = paper.ForBot(b.Id)?.Snapshot().Position?.MarkNetQuote,
                 Trades = botRuns.SelectMany(BotTrade.FromRun).OrderBy(t => t.At, StringComparer.Ordinal).TakeLast(10000).ToArray()
             };
         }).ToArray()
     });
 });
+api.MapGet("/templates", async (BotTemplateStore templates, CancellationToken ct) => Results.Ok(await templates.ListAsync(ct)));
+api.MapPost("/templates", async (BotTemplateInput input, StrategyCatalog catalog, BotTemplateStore templates, CancellationToken ct) =>
+{
+    var errors = BotTemplateStore.Validate(input, catalog);
+    if (errors.Count > 0) return Results.ValidationProblem(errors);
+    return await templates.SaveAsync(input, ct) is { } saved ? Results.Ok(saved)
+        : Results.Problem(statusCode: 409, title: $"Сохранено максимальное число шаблонов ({BotTemplateStore.MaxTemplates}). Удалите ненужный.");
+});
+api.MapDelete("/templates/{id:guid}", async (Guid id, BotTemplateStore templates, CancellationToken ct) =>
+    await templates.DeleteAsync(id.ToString(), ct) ? Results.NoContent() : Results.Problem(statusCode: 404, title: "Шаблон не найден."));
 api.MapGet("/bots/{id:guid}/runs", async (Guid id, PaperRunStore runs, CancellationToken ct) => Results.Ok(await runs.ListAsync(id.ToString(), 20, ct)));
 api.MapPost("/bots", async (BotConfig config, StrategyCatalog catalog, IWorkspaceStore store, CancellationToken ct) =>
 {

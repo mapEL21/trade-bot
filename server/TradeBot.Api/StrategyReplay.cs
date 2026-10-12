@@ -7,8 +7,9 @@ public sealed record ReplaySettings(int CalibrationSeconds = 120, decimal Impuls
     decimal StopLossBps = 20, int MaxHoldMs = 2000, decimal LeaderAdvantageBps = .5m,
     string ExecutionModel = "depth", decimal OrderNotional = 10, decimal PriceLimitBps = 5,
     string EntryOrder = "taker", decimal MakerFeeBps = 2, int MakerWaitMs = 1000, decimal? OrderQuantity = null,
-    string Leader = "auto")
+    string Leader = "auto", decimal? ReversalBps = null)
 {
+    // ReversalBps: how far the leader must move against the position within WindowMs to exit; null keeps the entry impulse.
     // Leader: "source" — the signal exchange chosen by the user leads and trades go to the other exchange; "auto" — the
     // leader is picked from the calibration window, which may find none. In both cases the window sets the normal basis.
     public void Validate()
@@ -23,6 +24,8 @@ public sealed record ReplaySettings(int CalibrationSeconds = 120, decimal Impuls
             throw new ArgumentException("Вход: taker или maker; комиссия maker от −10 до 100 б.п., ожидание исполнения 10–60000 мс.");
         if (OrderQuantity is <= 0 or > 1_000_000_000)
             throw new ArgumentException("Размер заявки в монетах должен быть больше нуля.");
+        if (ReversalBps is < 0.1m or > 1000)
+            throw new ArgumentException("Разворот поводыря для выхода — от 0,1 до 1000 б.п.");
         if (Leader is not ("auto" or "source"))
             throw new ArgumentException("Поводырь: auto (определить по начальному участку) или source (биржа сигнала).");
     }

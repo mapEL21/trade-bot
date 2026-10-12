@@ -254,6 +254,8 @@ public class ResearchTests
         await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
         async Task<string> Status() => (await client.GetFromJsonAsync<Workspace>("/api/v1/workspace"))!.Bots.Single(x => x.Id == bot.Id).Status;
         Assert.Equal("calibrating", await Status());
+        // Nothing is open during calibration, so there is no unrealized result.
+        Assert.Null((await client.GetFromJsonAsync<Workspace>("/api/v1/workspace"))!.Bots.Single(x => x.Id == bot.Id).Unrealized);
         // One session per bot: a second start of the same bot is refused.
         Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync($"/api/v1/bots/{bot.Id}/start", new PaperStart(600))).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync($"/api/v1/bots/{bot.Id}", Config(new("OKX", settings)))).StatusCode);
@@ -286,6 +288,8 @@ public class ResearchTests
             // Never let a test open the real workspace database.
             services.RemoveAll<PaperRunStore>();
             services.AddSingleton(_ => new PaperRunStore(Path.Combine(directory, "workspace.db")));
+            services.RemoveAll<BotTemplateStore>();
+            services.AddSingleton(_ => new BotTemplateStore(Path.Combine(directory, "workspace.db")));
         });
         protected override void Dispose(bool disposing)
         {

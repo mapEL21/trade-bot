@@ -21,6 +21,8 @@ public sealed record Bot(string Id, string Name, string Exchange, string Symbol,
     public string Status { get; init; } = "draft";
     // Closed trades of the bot's paper runs, filled when the workspace is read; never real executions.
     public BotTrade[] Trades { get; init; } = [];
+    // Result of the open simulated position if it were closed now through the book, after both fees; null without one.
+    public decimal? Unrealized { get; init; }
 }
 
 // One closed paper trade in USDT, in the shape the workspace UI uses for statistics and charts.

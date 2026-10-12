@@ -13,6 +13,8 @@ export interface LeaderLagSettings {
   stopLossBps: number;
   maxHoldMs: number;
   leaderAdvantageBps: number;
+  // How far the leader must move back against the position to exit; the server treats a missing value as impulseBps.
+  reversalBps: number;
   orderNotional: number;
   priceLimitBps: number;
   makerFeeBps: number;
@@ -77,6 +79,8 @@ export interface Bot extends BotConfig {
   status: Status;
   trades: Trade[];
   createdAt: string;
+  // Result of the open simulated position if closed now, after fees; set by the server while a run holds one.
+  unrealized?: number | null;
 }
 export interface Event {
   botId?: string;
@@ -113,6 +117,7 @@ export const defaultLeaderLagSettings: LeaderLagSettings = {
   stopLossBps: 20,
   maxHoldMs: 2000,
   leaderAdvantageBps: 0.5,
+  reversalBps: 3,
   orderNotional: 10,
   priceLimitBps: 5,
   makerFeeBps: 2,
@@ -179,6 +184,9 @@ function validateParameters(
       if (v !== undefined && v !== 'auto' && v !== 'source')
         throw new Error('Поводырь: auto или source.');
       settings.leader = 'source';
+    } else if (key === 'reversalBps' && (v === null || v === undefined)) {
+      // Saved before the reversal had its own threshold: it was the entry impulse, filled in after the loop.
+      settings.reversalBps = NaN;
     } else if (key === 'orderQuantity') {
       if (v !== null && v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v <= 0))
         throw new Error('Размер заявки в монетах должен быть больше нуля.');
@@ -189,6 +197,7 @@ function validateParameters(
       settings[key] = v;
     }
   }
+  if (Number.isNaN(settings.reversalBps)) settings.reversalBps = settings.impulseBps;
   if (settings.orderQuantity === null && settings.orderNotional > budget * leverage)
     throw new Error('Номинал заявки не может превышать выделенный баланс, умноженный на плечо.');
   return {
@@ -429,7 +438,7 @@ export function parseWorkspace(text: string): Workspace {
     if (!bot || typeof bot !== 'object') throw new Error('Invalid bot');
     const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion, parameters } =
       bot;
-    validateConfig({
+    const checked = validateConfig({
       name,
       exchange,
       symbol,
@@ -439,8 +448,12 @@ export function parseWorkspace(text: string): Workspace {
       strategyVersion,
       ...(parameters ? { parameters } : {}),
     });
+    // Older records lack later settings (leverage, reversal threshold): use the filled-in values.
+    if (checked.parameters) bot.parameters = checked.parameters;
     if (
       typeof bot.id !== 'string' ||
+      (bot.unrealized != null &&
+        (typeof bot.unrealized !== 'number' || !Number.isFinite(bot.unrealized))) ||
       ids.has(bot.id) ||
       !Object.hasOwn(statusLabels, bot.status) ||
       !Number.isFinite(Date.parse(bot.createdAt)) ||

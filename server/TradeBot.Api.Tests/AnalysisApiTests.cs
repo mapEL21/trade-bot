@@ -26,6 +26,8 @@ public sealed class AnalysisApiTests : IDisposable
             services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(Path.Combine(root, "workspace.db")));
             services.RemoveAll<PaperRunStore>();
             services.AddSingleton(_ => new PaperRunStore(Path.Combine(root, "workspace.db")));
+            services.RemoveAll<BotTemplateStore>();
+            services.AddSingleton(_ => new BotTemplateStore(Path.Combine(root, "workspace.db")));
         }));
     private async Task Seed(bool finished = true, bool malformed = false, int version = 3)
     {

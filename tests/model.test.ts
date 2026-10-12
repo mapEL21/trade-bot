@@ -183,6 +183,14 @@ test('leader-lag configuration keeps its parameters through export and import, a
   assert.equal(validateConfig(withLeader('auto')).parameters!.settings.leader, 'source');
   assert.equal(validateConfig(withLeader(undefined)).parameters!.settings.leader, 'source');
   assert.throws(() => validateConfig(withLeader('okx')));
+  // Saved before the reversal threshold existed: it equals the entry impulse, as the server treats it.
+  const oldSettings: Record<string, unknown> = { ...defaultLeaderLagSettings, impulseBps: 7 };
+  delete oldSettings.reversalBps;
+  assert.equal(
+    validateConfig({ ...config, parameters: { ...config.parameters, settings: oldSettings } })
+      .parameters!.settings.reversalBps,
+    7,
+  );
   // A size in coins is not limited by the USDT nominal check, which needs a price.
   assert.equal(
     validateConfig({

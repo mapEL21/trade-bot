@@ -109,6 +109,22 @@ public class StrategyReplayTests
     }
 
     [Fact]
+    public void ReversalThresholdIsSeparateFromTheEntryImpulse()
+    {
+        // The follower never catches up; 350 ms after the impulse the leader gives back about 5 b.p.
+        var data = Data().Select(x => x.Quote is not { } q ? x
+            : x.Source == "binance-public" && x.Ticks >= 120500 ? x with { Quote = q with { Bid = 119.99m, Ask = 120.01m } }
+            : x.Source == "hyperliquid" && x.Ticks >= 120600 ? x with { Quote = q with { Bid = 120.93m, Ask = 120.95m } } : x).ToList();
+        string Exit(ReplaySettings settings) => Assert.Single(StrategyReplay.Run(Recording, settings, 1000, 0, 125000, data, default)
+            .Scenarios.Single(x => x.Mode == "follow" && x.DelayMs == 10).TradeLog).ExitReason;
+        // By default a reversal as large as the entry impulse (3 b.p.) closes the position.
+        Assert.Equal("Поводырь развернулся", Exit(Settings));
+        // With a 6 b.p. reversal threshold the 5 b.p. pull-back is noise and the position runs to its hold limit.
+        Assert.Equal("Лимит времени удержания", Exit(Settings with { ReversalBps = 6 }));
+        Assert.Throws<ArgumentException>(() => (Settings with { ReversalBps = 0 }).Validate());
+    }
+
+    [Fact]
     public void FlatCalibrationAndShortRecordingsDoNotForceTrades()
     {
         var flat = Data().Select(x => x.Quote is { } q ? x with { Quote = q with { Bid = 99.99m, Ask = 100.01m } } : x).ToList();

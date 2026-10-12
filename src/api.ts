@@ -1,4 +1,27 @@
-import { parseWorkspace, type Bot, type BotConfig, type Workspace } from './model';
+import {
+  parseWorkspace,
+  type Bot,
+  type BotConfig,
+  type LeaderLagSettings,
+  type Workspace,
+} from './model';
+
+// Bot settings saved for reuse, without the bot's name, exchanges or pair. Built-in templates live in the UI
+// (strategySettings.ts) and have builtIn set; the user's own are kept on the server.
+export interface BotTemplate {
+  id: string;
+  name: string;
+  strategy: 'leader-lag';
+  budget: number;
+  lossLimit: number;
+  leverage: number;
+  delayMs: number;
+  counter: boolean;
+  settings: LeaderLagSettings;
+  savedAt?: string;
+  builtIn?: boolean;
+  description?: string;
+}
 
 export interface StrategyDefinition {
   id: string;
@@ -93,6 +116,10 @@ export const api = {
     sourceExchange: string;
   }) => request<{ id: string }>('/research', { method: 'POST', body: JSON.stringify(config) }),
   stopResearch: (id: string) => request<void>(`/research/${id}/stop`, { method: 'POST' }),
+  templates: (signal?: AbortSignal) => request<BotTemplate[]>('/templates', { signal }),
+  saveTemplate: (template: Omit<BotTemplate, 'id' | 'savedAt' | 'builtIn' | 'description'>) =>
+    request<BotTemplate>('/templates', { method: 'POST', body: JSON.stringify(template) }),
+  deleteTemplate: (id: string) => request<void>(`/templates/${id}`, { method: 'DELETE' }),
   workspace: async (): Promise<Workspace> =>
     parseWorkspace(JSON.stringify(await request('/workspace'))),
   strategies: () => request<StrategyDefinition[]>('/strategies'),

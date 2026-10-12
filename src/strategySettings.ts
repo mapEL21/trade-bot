@@ -1,4 +1,5 @@
-import type { Exchange, LeaderLagSettings } from './model';
+import type { BotTemplate } from './api';
+import { defaultLeaderLagSettings, type Exchange, type LeaderLagSettings } from './model';
 
 // Settings are stored in basis points (1 b.p. = 0.01%); the bot form can show them in percent.
 export type NumericSetting = Exclude<
@@ -116,6 +117,15 @@ export const settingMeta: SettingMeta[] = [
     hint: 'Котировка старше этого считается устаревшей: бот не входит, а открытая позиция получает неопределённый результат.',
   },
   {
+    key: 'reversalBps',
+    label: 'Разворот поводыря для выхода',
+    unit: 'bps',
+    min: 0.1,
+    max: 1000,
+    step: 0.1,
+    hint: 'Если цена на бирже-поводыре за окно движения ушла против позиции на столько, бот выходит. Больше порога импульса — меньше выходов на шуме.',
+  },
+  {
     key: 'leaderAdvantageBps',
     label: 'Преимущество поводыря',
     unit: 'bps',
@@ -163,3 +173,46 @@ export const fromDisplay = (value: number, percent: boolean) =>
   percent ? round(value * 100) : value;
 export const unitLabel = (unit: SettingMeta['unit'], percent: boolean) =>
   unit === 'bps' ? (percent ? '%' : 'б.п.') : unit === 'ms' ? 'мс' : unit === 's' ? 'с' : 'USDT';
+
+// Built-in starting points. Fees are not part of them: applying one keeps the fees of the bot's exchange.
+const statsSettings: LeaderLagSettings = {
+  ...defaultLeaderLagSettings,
+  calibrationSeconds: 60,
+  impulseBps: 2,
+  slippageBps: 0,
+  minEdgeBps: 0.5,
+  stopLossBps: 25,
+  maxHoldMs: 5000,
+  reversalBps: 4,
+  orderNotional: 200,
+};
+export const builtInTemplates: BotTemplate[] = [
+  {
+    id: 'builtin-stats',
+    name: 'Поводырь · сбор статистики',
+    description:
+      'Больше входов при той же логике: сигнал от 2 б.п., вход только если отставание покрывает комиссии, спред и запас 0,5 б.п.; выход при сближении цен, развороте поводыря от 4 б.п., убытке 25 б.п. или через 5 с. Начальный участок 60 с. Проскальзывание 0: в модели стакана цена считается по уровням.',
+    strategy: 'leader-lag',
+    budget: 100,
+    lossLimit: 10,
+    leverage: 2,
+    delayMs: 50,
+    counter: false,
+    settings: statsSettings,
+    builtIn: true,
+  },
+  {
+    id: 'builtin-careful',
+    name: 'Поводырь · осторожный',
+    description:
+      'Прежние пороги: импульс 3 б.п., запас 2 б.п. и проскальзывание 1 б.п. сверх комиссий, выход при развороте от 3 б.п., убытке 20 б.п. или через 2 с. Входов меньше.',
+    strategy: 'leader-lag',
+    budget: 100,
+    lossLimit: 10,
+    leverage: 2,
+    delayMs: 50,
+    counter: false,
+    settings: { ...defaultLeaderLagSettings, orderNotional: 200 },
+    builtIn: true,
+  },
+];

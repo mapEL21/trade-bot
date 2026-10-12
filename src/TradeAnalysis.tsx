@@ -14,31 +14,51 @@ import {
 
 // The analysis every strategy gets for free from its closed trades: result, balance, curve, trade quality and history.
 // Strategy-specific views (for example the leader analysis of leader-lag) live next to their strategy, see strategyViews.tsx.
+// Realized: closed trades of the chosen period. Unrealized: open positions right now, if closed through the book after
+// both fees; null when nothing is open. The balance counts closed trades only, with the open result shown beside it.
 export function Stats({
   stat,
   budget,
   balance,
+  unrealized,
 }: {
   stat: ReturnType<typeof metrics>;
   budget: number;
   balance: number;
+  unrealized: number | null;
 }) {
   return (
     <div className="stats-grid">
       <Stat
-        label="Чистый результат"
+        label="Реализованный PnL"
         value={`${formatMoney(stat.pnl, true)}`}
         unit="USDT"
         icon={<TrendingUp size={18} />}
         accent={stat.pnl >= 0 ? 'positive' : 'negative'}
-        note={`После комиссий · ${formatMoney(stat.fees)} USDT`}
+        note={`Закрытые сделки за период, после комиссий · ${formatMoney(stat.fees)} USDT`}
+      />
+      <Stat
+        label="Нереализованный PnL"
+        value={unrealized === null ? '—' : formatMoney(unrealized, true)}
+        unit={unrealized === null ? '' : 'USDT'}
+        icon={<Activity size={18} />}
+        accent={unrealized === null ? '' : unrealized >= 0 ? 'positive' : 'negative'}
+        note={
+          unrealized === null
+            ? 'Открытых позиций нет'
+            : 'Открытая позиция сейчас: при закрытии по стакану, после обеих комиссий'
+        }
       />
       <Stat
         label={'Баланс · симуляция'}
         value={formatMoney(balance)}
         unit="USDT"
         icon={<Wallet size={18} />}
-        note={`Выделено ${formatMoney(budget)} USDT, изменение — по закрытым сделкам симуляции`}
+        note={
+          unrealized === null
+            ? `Выделено ${formatMoney(budget)} USDT, изменение — по закрытым сделкам симуляции`
+            : `С открытой позицией ${formatMoney(balance + unrealized)} USDT · выделено ${formatMoney(budget)} USDT`
+        }
       />
       <Stat
         label="Прибыльных сделок"
