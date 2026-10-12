@@ -95,7 +95,88 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   return response.json();
 }
 
+// Level scanner: public Binance data, levels and scored breakouts; it never trades.
+export interface ScanLevel {
+  side: 'resistance' | 'support';
+  price: number;
+  zoneLow: number;
+  zoneHigh: number;
+  touches: number;
+  distancePct: number;
+}
+export interface ScanScoreItem {
+  name: string;
+  points: number;
+  detail: string;
+}
+export interface ScanCandidate {
+  id: string;
+  symbol: string;
+  side: 'long' | 'short';
+  atMs: number;
+  level: number;
+  price: number;
+  touches: number;
+  score: number;
+  items: ScanScoreItem[];
+  result: 'open' | 'target' | 'stop' | 'timeout';
+  maxFavorablePct: number;
+  maxAdversePct: number;
+  lastPct: number;
+  resolvedMs: number | null;
+}
+export interface ScanSymbol {
+  symbol: string;
+  quoteVolume: number;
+  price: number | null;
+  resistance: ScanLevel | null;
+  support: ScanLevel | null;
+  candidates: number;
+}
+export interface ScanSnapshot {
+  id: string | null;
+  state: 'idle' | 'starting' | 'scanning' | 'finished' | 'stopped' | 'failed' | 'no-data';
+  explanation: string;
+  startedUtc: string | null;
+  seconds: number;
+  events: number;
+  bytes: number;
+  ignored: number;
+  symbols: ScanSymbol[];
+  candidates: ScanCandidate[];
+  settings: {
+    targetPct: number;
+    stopBufferPct: number;
+    outcomeMinutes: number;
+    breakoutBufferPct: number;
+  };
+}
+export interface ScanCandle {
+  openMs: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  quoteVolume: number;
+}
+export interface ScanSymbolDetail {
+  symbol: string;
+  candles: ScanCandle[];
+  levels: ScanLevel[];
+  candidates: ScanCandidate[];
+}
+
 export const api = {
+  scanner: (signal?: AbortSignal) => request<ScanSnapshot>('/scanner', { signal }),
+  startScanner: (options: {
+    seconds: number;
+    minQuoteVolume: number;
+    maxSymbols: number;
+    exclude: string[];
+  }) => request<{ id: string }>('/scanner', { method: 'POST', body: JSON.stringify(options) }),
+  stopScanner: (id: string) => request<void>(`/scanner/${id}/stop`, { method: 'POST' }),
+  scannerSymbol: (symbol: string, signal?: AbortSignal) =>
+    request<ScanSymbolDetail>(`/scanner/symbols/${encodeURIComponent(symbol)}`, { signal }),
   researchMarkets: (exchange: string, sourceExchange: string, signal: AbortSignal) =>
     request<ResearchMarketList>(
       `/research/markets?exchange=${encodeURIComponent(exchange)}&sourceExchange=${encodeURIComponent(sourceExchange)}`,

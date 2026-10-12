@@ -140,6 +140,18 @@ try {
                 # The final record is written right after a session ends.
                 Start-Sleep -Seconds 1
             }
+            # A running level scanner saves its breakout journal when it stops; older servers have no scanner.
+            try { $scan = (Request-Local "$api/scanner") | ConvertFrom-Json } catch { $scan = $null }
+            if ($scan -and $scan.state -in @('starting', 'scanning')) {
+                Write-Host 'Останавливаем сканер и ждём сохранения журнала пробоев...'
+                Request-Local "$api/scanner/$($scan.id)/stop" 'POST' | Out-Null
+                $deadline = [DateTime]::UtcNow.AddSeconds(45)
+                do {
+                    Start-Sleep -Milliseconds 500
+                    $scan = (Request-Local "$api/scanner") | ConvertFrom-Json
+                } while ($scan.state -in @('starting', 'scanning') -and [DateTime]::UtcNow -lt $deadline)
+                if ($scan.state -in @('starting', 'scanning')) { throw 'Сканер ещё сохраняет запись. Сервер оставлен работающим; повторите остановку позже.' }
+            }
             $snapshot = (Request-Local "$api/research") | ConvertFrom-Json
             if ($snapshot.active) {
                 Write-Host 'Завершаем запись и ждём сохранения событий...'

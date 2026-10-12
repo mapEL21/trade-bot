@@ -18,6 +18,7 @@ import {
   Play,
   Plus,
   Radio,
+  ScanSearch,
   Search,
   ShieldCheck,
   Trash2,
@@ -28,6 +29,7 @@ import {
 import { api, type InstrumentInfo, type StrategyDefinition } from './api';
 import { Strategies } from './Strategies';
 import { Research } from './Research';
+import { Scanner } from './Scanner';
 import { activeStatuses } from './PaperRun';
 import { strategyView } from './strategyViews';
 import { LeaderLagFields, sizeProblem } from './LeaderLagFields';
@@ -54,12 +56,14 @@ import {
 
 const emptyWorkspace: Workspace = { schemaVersion: 1, bots: [], events: [] };
 
-type Page = 'strategies' | 'overview' | 'bots' | 'trades' | 'events' | 'connections' | 'research';
+type Page =
+  'strategies' | 'overview' | 'bots' | 'trades' | 'events' | 'connections' | 'research' | 'scanner';
 type Tab = 'overview' | 'trades' | 'settings' | 'events';
 const nav: { id: Page; label: string; icon: typeof BotIcon }[] = [
   { id: 'overview', label: 'Обзор', icon: LayoutDashboard },
   { id: 'bots', label: 'Мои боты', icon: BotIcon },
   { id: 'strategies', label: 'Стратегии', icon: Zap },
+  { id: 'scanner', label: 'Сканер', icon: ScanSearch },
   { id: 'research', label: 'Исследование рынка', icon: Radio },
   { id: 'trades', label: 'Сделки', icon: Activity },
   { id: 'events', label: 'Журнал событий', icon: Clock3 },
@@ -567,6 +571,7 @@ export default function App() {
                         overview: 'Результаты, стратегии и боты — в одном пространстве.',
                         bots: 'Экземпляры стратегий: настройки, состояние и статистика.',
                         strategies: 'Наши алгоритмы, их версии и готовность к запуску.',
+                        scanner: 'Ищем уровни и оцениваем пробои на живых данных Binance.',
                         research: 'Сравниваем выбранные биржи на реальных данных.',
                         trades: 'История исполнений всех ботов в одном месте.',
                         events: 'Все изменения вашего рабочего пространства.',
@@ -580,6 +585,7 @@ export default function App() {
                 </div>
               </div>
               {page === 'research' && <Research />}
+              {page === 'scanner' && <Scanner />}
               {page === 'strategies' && (
                 <Strategies
                   items={strategies}

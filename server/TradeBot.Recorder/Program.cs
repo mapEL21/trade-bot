@@ -72,7 +72,11 @@ public static class RecorderProgram
         }
         async Task FeedTask(Feed feed)
         {
-            try { await CaptureAsync(feed, options, capture, () => Interlocked.Increment(ref gaps), stop.Token); }
+            try
+            {
+                await CaptureAsync(feed, raw => MarketWire.Classify(feed.Name, raw, options.Coin, options.SymbolForFeed(feed.Name)),
+                    MarketWire.SubscriptionMessages(feed, options), capture, () => Interlocked.Increment(ref gaps), stop.Token);
+            }
             catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
             catch { stop.Cancel(); throw; }
         }
@@ -100,7 +104,9 @@ public static class RecorderProgram
             throw new ArgumentException("Нет активного инструмента на обеих площадках. Подписки не запущены.");
     }
 
-    private static async Task CaptureAsync(Feed feed, RecorderOptions options, CaptureFile capture, Action gap, CancellationToken ct)
+    // One feed with reconnects: every message is classified and queued for the file; a gap is recorded, never hidden.
+    internal static async Task CaptureAsync(Feed feed, Func<string, string> classify, IEnumerable<string> subscriptions,
+        CaptureFile capture, Action gap, CancellationToken ct)
     {
         var retry = 0;
         while (!ct.IsCancellationRequested)
@@ -121,7 +127,7 @@ public static class RecorderProgram
                     await socket.ConnectAsync(feed.Endpoint, connect.Token);
                 }
                 Record("connected", "Новая сессия; данные до подключения не восстанавливаются.");
-                foreach (var message in MarketWire.SubscriptionMessages(feed, options))
+                foreach (var message in subscriptions)
                 {
                     var bytes = Encoding.UTF8.GetBytes(message);
                     await socket.SendAsync(bytes.AsMemory(), WebSocketMessageType.Text, true, ct);
@@ -136,7 +142,7 @@ public static class RecorderProgram
                     var ticks = Stopwatch.GetTimestamp();
                     var utc = DateTimeOffset.UtcNow;
                     string kind;
-                    try { kind = MarketWire.Classify(feed.Name, raw, options.Coin, options.SymbolForFeed(feed.Name)); }
+                    try { kind = classify(raw); }
                     catch (Exception e) when (e is JsonException or InvalidDataException or KeyNotFoundException or InvalidOperationException)
                     {
                         capture.Publish(new(feed.Name, connection, "invalid", utc, ticks, raw));

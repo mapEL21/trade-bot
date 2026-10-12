@@ -25,6 +25,9 @@ builder.Services.AddSingleton<RecordingAnalysisStore>();
 builder.Services.AddSingleton<PaperTrading>();
 builder.Services.AddSingleton(_ => new ResearchMarkets(new HttpClient { Timeout = TimeSpan.FromSeconds(8) }));
 builder.Services.AddHostedService(services => services.GetRequiredService<MarketResearch>());
+builder.Services.AddSingleton<IScanRunner, ScanRunner>();
+builder.Services.AddSingleton<MarketScanner>();
+builder.Services.AddHostedService(services => services.GetRequiredService<MarketScanner>());
 var storagePath = builder.Configuration["Storage:Path"] ?? Path.Combine(builder.Environment.ContentRootPath, "data", "workspace.db");
 builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(storagePath));
 builder.Services.AddSingleton(_ => new PaperRunStore(storagePath));
@@ -118,6 +121,19 @@ api.MapPost("/research", (ResearchRequest request, MarketResearch research) =>
     catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
     catch (InvalidOperationException e) { return Results.Problem(statusCode: 409, title: e.Message); }
 });
+// Level scanner: public Binance data only; it finds levels and scores breakouts, it never trades.
+api.MapGet("/scanner", (MarketScanner scanner) => Results.Ok(scanner.Snapshot()));
+api.MapPost("/scanner", (ScanStart request, MarketScanner scanner) =>
+{
+    try { return Results.Accepted("/api/v1/scanner", new { id = scanner.Start(request) }); }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+    catch (InvalidOperationException e) { return Results.Problem(statusCode: 409, title: e.Message); }
+});
+api.MapPost("/scanner/{id:guid}/stop", (Guid id, MarketScanner scanner) => scanner.Stop(id.ToString())
+    ? Results.Accepted("/api/v1/scanner", new { id = id.ToString() })
+    : Results.Problem(statusCode: 409, title: "Сканер уже сменился. Обновите состояние перед остановкой."));
+api.MapGet("/scanner/symbols/{symbol}", (string symbol, MarketScanner scanner) => scanner.Detail(symbol) is { } detail
+    ? Results.Ok(detail) : Results.Problem(statusCode: 404, title: "Монета не найдена в текущем сканере."));
 api.MapPost("/research/{id:guid}/stop", (Guid id, MarketResearch research) => research.Stop(id.ToString())
     ? Results.Accepted("/api/v1/research", new { id = id.ToString() })
     : Results.Problem(statusCode: 409, title: "Сессия уже сменилась. Обновите состояние перед остановкой."));
