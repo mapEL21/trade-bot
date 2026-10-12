@@ -1041,9 +1041,15 @@ h2 {
 }
 .filter-select select {
   border: 0;
-  background: none;
+  background: #111924;
   color: #b9c6d8;
   font-size: 11px;
+}
+/* Windows draws the opened list from the select's background: a transparent one becomes a white list. */
+option,
+optgroup {
+  background-color: #111924;
+  color: #e6ecf5;
 }
 .filter-bar > .muted {
   margin-left: auto;

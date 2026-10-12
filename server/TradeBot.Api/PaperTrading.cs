@@ -8,8 +8,14 @@ namespace TradeBot.Api;
 // For a bot, SourceExchange is its signal exchange: the bot runs with Settings.Leader = "source", so the signal exchange
 // leads and trades go to the bot's own exchange; nothing is left to the calibration window but the normal basis.
 public sealed record PaperRequest(string Coin, string SourceExchange, string Exchange, int Seconds, ReplaySettings Settings,
-    int DelayMs = 50, bool Counter = false, int MaxMb = 256, string? BotId = null, string? BotName = null, decimal? LossLimit = null,
+    int DelayMs = 50, bool Counter = false, int MaxMb = PaperRequestLimits.MaxMb, string? BotId = null, string? BotName = null, decimal? LossLimit = null,
     decimal? Budget = null, int Leverage = 1);
+public static class PaperRequestLimits
+{
+    // An active pair with depth on both exchanges writes about 10 MB a minute; a 60-minute run needs well over the old
+    // 256 MB, which stopped such runs midway. 1024 MB is the recorder's upper limit.
+    public const int MaxMb = 1024;
+}
 public sealed record PaperSnapshot(string? Id, string State, string Explanation, string? Coin, string? SourceExchange, string? Exchange,
     ReplaySettings? Settings, int DelayMs, bool Counter, string? RecordingDirectory, double SessionSeconds, string? Leader,
     string? ExecutionExchange, decimal? NormalBasisBps, ReplayLeader[] Candidates, ReplayDecision[] Decisions, ReplayTrade[] Trades,

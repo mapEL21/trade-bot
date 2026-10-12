@@ -78,7 +78,7 @@ public sealed class CaptureFile
         {
             lock (bufferGate) { pending--; pendingBytes -= EstimatedBytes(item); }
             var bytes = JsonSerializer.SerializeToUtf8Bytes(item);
-            if (bytes.Length + 1L > maxBytes - Bytes) throw new IOException("Достигнут лимит размера записи. Сессия остановлена.");
+            if (bytes.Length + 1L > maxBytes - Bytes) throw new IOException($"Достигнут лимит размера записи ({maxBytes / 1048576} МБ). Сессия остановлена.");
             await output.WriteAsync(bytes);
             await output.WriteAsync(NewLine);
             Bytes += bytes.Length + 1;
