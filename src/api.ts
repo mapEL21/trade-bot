@@ -153,6 +153,30 @@ export interface ScanSnapshot {
   continuous?: boolean;
   segment?: number;
 }
+// Would the breakouts have paid if every one was entered at the breakout price (upper bound, no slippage)?
+export interface ScanGroup {
+  name: string;
+  count: number;
+  targets: number;
+  stops: number;
+  timeouts: number;
+  targetShare: number;
+  meanPct: number;
+  meanR: number;
+  sumR: number;
+}
+export interface ScanStats {
+  journals: number;
+  unreadable: number;
+  total: number;
+  open: number;
+  feePct: number;
+  all: ScanGroup;
+  byScore: ScanGroup[];
+  bySide: ScanGroup[];
+  features: { name: string; with: ScanGroup; without: ScanGroup }[];
+  notes: string[];
+}
 // Disk upkeep on a server: compression, retention and database copies; off on a laptop.
 export interface StorageStatus {
   enabled: boolean;
@@ -182,6 +206,8 @@ export interface ScanSymbolDetail {
 
 export const api = {
   scanner: (signal?: AbortSignal) => request<ScanSnapshot>('/scanner', { signal }),
+  scannerStats: (feePct: number, signal?: AbortSignal) =>
+    request<ScanStats>(`/scanner/stats?feePct=${encodeURIComponent(feePct)}`, { signal }),
   storage: (signal?: AbortSignal) => request<StorageStatus>('/storage', { signal }),
   startScanner: (options: {
     seconds: number;

@@ -8,6 +8,7 @@ import {
   type ScanSnapshot,
   type ScanSymbolDetail,
 } from './api';
+import { ScanStatsPanel } from './ScanStats';
 
 const durations: [number, string][] = [
   [1800, '30 минут'],
@@ -251,6 +252,8 @@ export function Scanner() {
           Около 1 МБ записи в минуту на монету: час по 20 монетам занимает до 1,5 ГБ на диске.
         </p>
       </section>
+
+      <ScanStatsPanel />
 
       {snapshot && snapshot.candidates.length > 0 && (
         <section className="panel" aria-labelledby="scanner-candidates">

@@ -79,6 +79,39 @@ async function server(page: Page) {
     route.fulfill({ json: { schemaVersion: 1, bots: [], events: [] } }),
   );
   await page.route('**/api/v1/strategies', (route) => route.fulfill({ json: [] }));
+  const group = (name: string, count: number, targets: number, meanR: number) => ({
+    name,
+    count,
+    targets,
+    stops: count - targets,
+    timeouts: 0,
+    targetShare: count ? (targets * 100) / count : 0,
+    meanPct: meanR / 3,
+    meanR,
+    sumR: meanR * count,
+  });
+  await page.route('**/api/v1/scanner/stats*', (route) =>
+    route.fulfill({
+      json: {
+        journals: 3,
+        unreadable: 0,
+        total: 42,
+        open: 2,
+        feePct: 0.1,
+        all: group('Все пробои', 40, 14, 0.25),
+        byScore: [group('Оценка 0–39', 10, 2, -0.4), group('Оценка 60–79', 30, 12, 0.47)],
+        bySide: [group('Лонг', 25, 9, 0.3), group('Шорт', 15, 5, 0.17)],
+        features: [
+          {
+            name: 'Крупный принт',
+            with: group('С признаком', 12, 7, 0.9),
+            without: group('Без признака', 28, 7, -0.03),
+          },
+        ],
+        notes: ['Завершённых пробоев 40: для выводов нужно хотя бы 200–300.'],
+      },
+    }),
+  );
   await page.route('**/api/v1/storage', (route) =>
     route.fulfill({
       json: {
@@ -128,6 +161,16 @@ test('scanner starts with chosen limits, shows scored breakouts, coins and a cha
   await page.goto('/');
   await page.getByRole('button', { name: 'Сканер', exact: true }).first().click();
   await expect(page.getByRole('heading', { name: /Сканер пробоев уровня/ })).toBeVisible();
+  // Statistics over the saved journals: overall edge, by score band and by each sign.
+  const stats = page.locator('.scan-stats');
+  await expect(stats).toContainText('Завершённых пробоев');
+  await expect(stats).toContainText('+0,25 R');
+  await expect(stats).toContainText('+10% депозита');
+  await expect(stats.getByRole('table', { name: 'По оценке' })).toContainText('Оценка 60–79');
+  await expect(stats.getByRole('table', { name: 'По признакам оценки' })).toContainText(
+    '12 · 58% · +0,9 R',
+  );
+  await expect(stats).toContainText('нужно хотя бы 200–300');
   await page.getByLabel('Объём за 24 ч от, млн $').fill('200');
   await page.getByLabel('Монет не больше').fill('15');
   await page.getByLabel('Исключить').fill('btc, ethusdt');

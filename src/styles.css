@@ -2650,3 +2650,19 @@ tbody tr:hover {
   fill: #8d9bb0;
   font-size: 10px;
 }
+.scan-stats-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+.scan-stats-controls .field {
+  width: 150px;
+}
+.scan-stats .table-scroll {
+  margin-top: 14px;
+}
+.scan-stats-notes {
+  margin: 14px 0 0;
+  padding-left: 18px;
+}

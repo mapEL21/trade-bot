@@ -139,6 +139,11 @@ api.MapPost("/scanner", (ScanStart request, MarketScanner scanner) =>
 api.MapPost("/scanner/{id:guid}/stop", (Guid id, MarketScanner scanner) => scanner.Stop(id.ToString())
     ? Results.Accepted("/api/v1/scanner", new { id = id.ToString() })
     : Results.Problem(statusCode: 409, title: "Сканер уже сменился. Обновите состояние перед остановкой."));
+api.MapGet("/scanner/stats", (decimal? feePct, MarketScanner scanner) =>
+{
+    try { return Results.Ok(scanner.Stats(feePct ?? 0.1m)); }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+});
 api.MapGet("/scanner/symbols/{symbol}", (string symbol, MarketScanner scanner) => scanner.Detail(symbol) is { } detail
     ? Results.Ok(detail) : Results.Problem(statusCode: 404, title: "Монета не найдена в текущем сканере."));
 api.MapPost("/research/{id:guid}/stop", (Guid id, MarketResearch research) => research.Stop(id.ToString())

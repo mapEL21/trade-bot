@@ -175,6 +175,10 @@ public class LevelScannerTests
             var report = JsonSerializer.Deserialize<ScanReport>(File.ReadAllText(Path.Combine(runner.Recording, "scan-candidates-v1.json")),
                 new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
             Assert.Equal("target", Assert.Single(report.Candidates).Result);
+            // Statistics read the saved journal; an out-of-range fee is refused.
+            var stats = (await client.GetFromJsonAsync<ScanStats>("/api/v1/scanner/stats"))!;
+            Assert.Equal((1, 1, 1), (stats.Journals, stats.All.Count, stats.All.Targets));
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/v1/scanner/stats?feePct=5")).StatusCode);
         }
         finally
         {

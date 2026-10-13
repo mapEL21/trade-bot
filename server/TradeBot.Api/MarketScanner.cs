@@ -87,6 +87,8 @@ public sealed class ScanSession(string id, ScanStart request, ScanSettings setti
     }
 
     public ScanSymbolDetail? Detail(string symbol) { lock (gate) return scanner?.Detail(symbol); }
+    // Everything this recording has found so far, for statistics before its journal is written at the end.
+    public (ScanCandidate[] Candidates, ScanSettings Settings) Journal() { lock (gate) return (scanner?.Candidates.ToArray() ?? [], settings); }
     public void Dispose() => stop.Dispose();
 }
 
@@ -109,6 +111,37 @@ public sealed class MarketScanner(IScanRunner runner, IConfiguration configurati
     }
 
     public ScanSymbolDetail? Detail(string symbol) { lock (gate) return current?.Detail(symbol); }
+
+    // Statistics over every saved scanner journal plus the recording in progress; a candidate is counted once.
+    public ScanStats Stats(decimal feePct)
+    {
+        if (feePct is < 0 or > 1) throw new ArgumentException("Комиссии круга — от 0 до 1%.");
+        var root = configuration["Scanner:Path"] ?? Path.Combine(environment.ContentRootPath, "data", "scans");
+        var found = new Dictionary<string, (ScanCandidate, ScanSettings)>(StringComparer.Ordinal);
+        int journals = 0, unreadable = 0;
+        if (Directory.Exists(root))
+            foreach (var file in Directory.EnumerateDirectories(root).OrderDescending().Take(5000)
+                .Select(d => Path.Combine(d, "scan-candidates-v1.json")).Where(File.Exists))
+            {
+                try
+                {
+                    if (new FileInfo(file).Length > 64 * 1048576) throw new InvalidDataException("Журнал слишком большой.");
+                    var report = JsonSerializer.Deserialize<ScanReport>(File.ReadAllText(file), new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                        ?? throw new InvalidDataException();
+                    foreach (var c in report.Candidates) found[c.Id] = (c, report.Settings);
+                    journals++;
+                }
+                catch (Exception e) when (e is IOException or JsonException or InvalidDataException or UnauthorizedAccessException) { unreadable++; }
+            }
+        ScanSession? live;
+        lock (gate) live = current;
+        if (live is not null)
+        {
+            var (candidates, settings) = live.Journal();
+            foreach (var c in candidates) found[c.Id] = (c, settings);
+        }
+        return ScanStatistics.Compute(found.Values.ToList(), feePct, journals, unreadable);
+    }
 
     public string Start(ScanStart request)
     {
