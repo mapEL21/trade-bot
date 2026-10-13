@@ -53,13 +53,14 @@ public static class ScanRecorder
     private static decimal Number(JsonElement e, string name) =>
         decimal.Parse(e.GetProperty(name).GetString()!, NumberStyles.Float, CultureInfo.InvariantCulture);
 
-    // Public streams of the chosen symbols: best prices and 20 book levels every 500 ms, and aggregated trades.
+    // Public streams of the chosen symbols: best prices and 20 book levels every 500 ms, aggregated trades and liquidations.
+    // Binance sends at most one liquidation per symbol a second (the latest), so the liquidation stream is a sample.
     public static Feed[] Feeds(IEnumerable<string> symbols)
     {
         var lower = symbols.Select(s => s.ToLowerInvariant()).ToArray();
         return [
             new(Public, new("wss://fstream.binance.com/public/stream?streams=" + string.Join('/', lower.SelectMany(s => new[] { s + "@bookTicker", s + "@depth20@500ms" }))), []),
-            new(Market, new("wss://fstream.binance.com/market/stream?streams=" + string.Join('/', lower.Select(s => s + "@aggTrade"))), [])
+            new(Market, new("wss://fstream.binance.com/market/stream?streams=" + string.Join('/', lower.SelectMany(s => new[] { s + "@aggTrade", s + "@forceOrder" }))), [])
         ];
     }
 
@@ -70,6 +71,10 @@ public static class ScanRecorder
         if (root.TryGetProperty("result", out _) && root.TryGetProperty("id", out _)) return "control";
         if (root.TryGetProperty("data", out var data) && data.TryGetProperty("e", out var e) && e.GetString() is "bookTicker" or "depthUpdate" or "aggTrade"
             && data.TryGetProperty("s", out var s) && s.GetString() is { } symbol && symbols.Contains(symbol)) return "market";
+        // A liquidation carries its symbol inside the order.
+        if (data.ValueKind == JsonValueKind.Object && data.TryGetProperty("e", out var kind) && kind.GetString() == "forceOrder"
+            && data.TryGetProperty("o", out var order) && order.TryGetProperty("s", out var forced) && forced.GetString() is { } liquidated
+            && symbols.Contains(liquidated)) return "market";
         throw new InvalidDataException("Неизвестное сообщение или чужой инструмент в потоке сканера.");
     }
 
@@ -101,6 +106,7 @@ public static class ScanRecorder
             // Instrument rules of the chosen symbols as they were at the start: a later replay must not use today's API.
             instruments = info.RootElement.GetProperty("symbols").EnumerateArray().Where(x => symbols.Contains(x.GetProperty("symbol").GetString()!)).ToArray(),
             feeds = Feeds(symbols.Order(StringComparer.Ordinal)),
+            liquidations = true,
             executionEnabled = false,
             scope = "Raw public Binance capture for the level scanner: 1-minute history, best prices, 20 book levels, aggregated trades. No orders."
         };

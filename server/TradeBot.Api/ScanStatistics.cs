@@ -13,6 +13,9 @@ public sealed record ScanStats(int Journals, int Unreadable, int Total, int Open
 public static class ScanStatistics
 {
     public static readonly (int From, int To)[] ScoreBands = [(0, 39), (40, 59), (60, 79), (80, 100)];
+    // Signs that are always written when their data was recorded: a missing one means "no data", not "without".
+    // The others are written only when they fired, so their absence means "without".
+    public static readonly HashSet<string> NeedData = ["Ликвидации"];
 
     public static (decimal Pct, decimal R) Value(ScanCandidate c, ScanSettings s, decimal feePct)
     {
@@ -53,7 +56,7 @@ public static class ScanStatistics
             ScoreBands.Select(b => Group($"Оценка {b.From}–{b.To}", done.Where(x => x.Candidate.Score >= b.From && x.Candidate.Score <= b.To))).ToArray(),
             [Group("Лонг", done.Where(x => x.Candidate.Side == "long")), Group("Шорт", done.Where(x => x.Candidate.Side == "short"))],
             names.Select(n => new ScanFeature(n, Group("С признаком", done.Where(x => Has(x.Candidate, n))),
-                Group("Без признака", done.Where(x => !Has(x.Candidate, n))))).ToArray(),
+                Group("Без признака", done.Where(x => !Has(x.Candidate, n) && (!NeedData.Contains(n) || x.Candidate.Items.Any(i => i.Name == n)))))).ToArray(),
             notes.ToArray());
     }
 }

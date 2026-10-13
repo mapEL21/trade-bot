@@ -23,7 +23,8 @@ public sealed record ScanSymbolDetail(string Symbol, Candle[] Candles, ScanLevel
 
 // Turns the scan recording into candles, levels and scored breakouts with their outcome. Events are processed in file order,
 // the order a live scan writes them, so a replay of the file gives the same candidates. No orders are sent anywhere.
-public sealed class LevelScanner(ScanSettings settings, IReadOnlyDictionary<string, decimal> quoteVolumes)
+// Liquidations: whether the recording has the liquidation stream; without it the sign is left out, not scored as "none".
+public sealed class LevelScanner(ScanSettings settings, IReadOnlyDictionary<string, decimal> quoteVolumes, bool liquidations = false)
 {
     private sealed class Book { public (decimal Price, decimal Size)[] Bids = [], Asks = []; }
     private sealed class Tracked(ScanCandidate candidate, ScanLevel level) { public ScanCandidate Candidate = candidate; public ScanLevel Level = level; }
@@ -32,6 +33,8 @@ public sealed class LevelScanner(ScanSettings settings, IReadOnlyDictionary<stri
         public readonly List<Candle> Candles = [];
         public Candle? Current;
         public readonly Queue<(long Ms, decimal Quote, bool Buy)> Trades = new();
+        // Forced orders: Buy closes a short (pushes the price up), sell closes a long.
+        public readonly Queue<(long Ms, decimal Quote, bool Buy)> Liquidations = new();
         public decimal? Price;
         public Book Book = new();
         public List<ScanLevel> Levels = [];
@@ -52,7 +55,7 @@ public sealed class LevelScanner(ScanSettings settings, IReadOnlyDictionary<stri
         if (item.Kind != "market") return;
         using var doc = JsonDocument.Parse(item.Payload);
         var data = doc.RootElement.GetProperty("data");
-        var symbol = data.GetProperty("s").GetString()!;
+        var symbol = (data.TryGetProperty("s", out var s) ? s : data.GetProperty("o").GetProperty("s")).GetString()!;
         if (!states.TryGetValue(symbol, out var state)) return;
         switch (data.GetProperty("e").GetString())
         {
@@ -61,6 +64,14 @@ public sealed class LevelScanner(ScanSettings settings, IReadOnlyDictionary<stri
                 break;
             case "depthUpdate":
                 state.Book = new() { Bids = Levels(data.GetProperty("b")), Asks = Levels(data.GetProperty("a")) };
+                break;
+            case "forceOrder":
+                var order = data.GetProperty("o");
+                var filled = Dec(order, "z");
+                var average = Dec(order, "ap");
+                var ms = order.GetProperty("T").GetInt64();
+                state.Liquidations.Enqueue((ms, (average > 0 ? average : Dec(order, "p")) * filled, order.GetProperty("S").GetString() == "BUY"));
+                while (state.Liquidations.TryPeek(out var old) && old.Ms < ms - settings.BaselineMinutes * 60000L) state.Liquidations.Dequeue();
                 break;
         }
     }
@@ -217,6 +228,14 @@ public sealed class LevelScanner(ScanSettings settings, IReadOnlyDictionary<stri
             var p99 = sizes[(int)Math.Ceiling(.99 * sizes.Length) - 1];
             var big = recent.Where(t => t.Buy == up).Select(t => t.Quote).DefaultIfEmpty(0).Max();
             if (big >= p99) items.Add(new("Крупный принт", 10, $"Сделка {big:0} USDT — крупнее 99% сделок за {settings.BaselineMinutes} мин"));
+        }
+        if (liquidations)
+        {
+            // Stops and liquidations taken out by the breakout itself: forced orders in its direction just before it.
+            var forced = state.Liquidations.Where(l => l.Buy == up && l.Ms > ms - settings.ActivitySeconds * 1000L && l.Ms <= ms).Sum(l => l.Quote);
+            items.Add(new("Ликвидации", forced > 0 ? 10 : 0, forced > 0
+                ? $"Ликвидации {(up ? "шортов" : "лонгов")} на {forced:0} USDT за {settings.ActivitySeconds} с"
+                : $"Ликвидаций {(up ? "шортов" : "лонгов")} за {settings.ActivitySeconds} с не было"));
         }
 
         var dayVolume = quoteVolumes.GetValueOrDefault(symbol);

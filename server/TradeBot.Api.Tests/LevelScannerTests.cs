@@ -55,9 +55,13 @@ public class LevelScannerTests
         return events;
     }
 
-    private static LevelScanner Run(List<CaptureEvent> events, string symbol = "XUSDT")
+    private static CaptureEvent Liquidation(string symbol, long ms, decimal price, decimal quantity, bool buy) =>
+        new(ScanRecorder.Market, "c", "market", DateTimeOffset.UnixEpoch, ms,
+            $"{{\"stream\":\"{symbol.ToLowerInvariant()}@forceOrder\",\"data\":{{\"e\":\"forceOrder\",\"E\":{ms},\"o\":{{\"s\":\"{symbol}\",\"S\":\"{(buy ? "BUY" : "SELL")}\",\"o\":\"LIMIT\",\"f\":\"IOC\",\"q\":\"{S(quantity)}\",\"p\":\"{S(price)}\",\"ap\":\"{S(price)}\",\"X\":\"FILLED\",\"l\":\"{S(quantity)}\",\"z\":\"{S(quantity)}\",\"T\":{ms}}}}}}}");
+
+    private static LevelScanner Run(List<CaptureEvent> events, string symbol = "XUSDT", bool liquidations = false)
     {
-        var scanner = new LevelScanner(new ScanSettings(), new Dictionary<string, decimal> { [symbol] = 300_000_000 });
+        var scanner = new LevelScanner(new ScanSettings(), new Dictionary<string, decimal> { [symbol] = 300_000_000 }, liquidations);
         foreach (var e in events) scanner.Process(e);
         return scanner;
     }
@@ -95,6 +99,25 @@ public class LevelScannerTests
         Assert.Equal(candidate.Items.Sum(x => x.Points), candidate.Score);
         // A level breaks once; it is not drawn again in this session.
         Assert.DoesNotContain(scanner.Detail("XUSDT")!.Levels, l => l.Price == 100);
+    }
+
+    [Fact]
+    public void LiquidationsInTheBreakoutDirectionScoreOnlyWhenTheStreamWasRecorded()
+    {
+        var events = Breakout("XUSDT", 100.5m);
+        // Shorts liquidated (forced buys) a few seconds before the upward breakout; a long liquidated does not count.
+        var breakout = events.FindIndex(e => e.Payload.Contains("\"p\":\"100.06\""));
+        events.Insert(breakout, Liquidation("XUSDT", events[breakout].ReceivedTicks - 2000, 100m, 50, buy: true));
+        events.Insert(breakout, Liquidation("XUSDT", events[breakout].ReceivedTicks - 1000, 100m, 70, buy: false));
+        var item = Assert.Single(Assert.Single(Run(events, liquidations: true).Candidates).Items, i => i.Name == "Ликвидации");
+        Assert.Equal(10, item.Points); Assert.Contains("шортов на 5000 USDT", item.Detail);
+        // None in the window: the sign is written with no points, so statistics count it as "without".
+        Assert.Equal(0, Assert.Single(Assert.Single(Run(Breakout("XUSDT", 100.5m), liquidations: true).Candidates).Items, i => i.Name == "Ликвидации").Points);
+        // A recording without the stream does not claim there were none.
+        Assert.DoesNotContain(Assert.Single(Run(events).Candidates).Items, i => i.Name == "Ликвидации");
+        var symbols = new HashSet<string> { "XUSDT" };
+        Assert.Equal("market", ScanRecorder.Classify(Liquidation("XUSDT", 1, 1, 1, true).Payload, symbols));
+        Assert.Throws<InvalidDataException>(() => ScanRecorder.Classify(Liquidation("ZUSDT", 1, 1, 1, true).Payload, symbols));
     }
 
     [Fact]

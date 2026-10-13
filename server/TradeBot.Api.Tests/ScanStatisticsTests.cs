@@ -43,6 +43,12 @@ public class ScanStatisticsTests
         var print = stats.Features.Single(f => f.Name == "Крупный принт");
         Assert.Equal((1, 1, 2, 0), (print.With.Count, print.With.Targets, print.Without.Count, print.Without.Targets));
         Assert.Contains(stats.Notes, n => n.Contains("Завершённых пробоев 3"));
+        // Liquidations are known only where the stream was recorded: candidates without the sign are left out of "without".
+        var withLiquidations = ScanStatistics.Compute([
+            (Candidate("a", "long", 100.06m, "target", 70) with { Items = [new("Ликвидации", 10, "")] }, Settings),
+            (Candidate("b", "long", 100.06m, "stop", 50) with { Items = [new("Ликвидации", 0, "")] }, Settings),
+            (Candidate("c", "long", 100.06m, "stop", 50), Settings)], .1m).Features.Single(f => f.Name == "Ликвидации");
+        Assert.Equal((1, 1), (withLiquidations.With.Count, withLiquidations.Without.Count));
         Assert.Equal(Math.Round(new[] { "a", "b", "c" }.Select((id, i) => ScanStatistics.Value(
             Candidate(id, i == 2 ? "short" : "long", i == 2 ? 99.94m : 100.06m, new[] { "target", "stop", "timeout" }[i], 0, last: .3m), Settings, .1m).R).Sum(), 2),
             stats.All.SumR);

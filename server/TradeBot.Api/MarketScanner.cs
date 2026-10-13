@@ -38,7 +38,8 @@ public sealed class ScanSession(string id, ScanStart request, ScanSettings setti
             using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(path, "manifest.json")));
             var volumes = manifest.RootElement.GetProperty("symbols").EnumerateArray()
                 .ToDictionary(x => x.GetProperty("Symbol").GetString()!, x => x.GetProperty("QuoteVolume").GetDecimal(), StringComparer.Ordinal);
-            scanner = new LevelScanner(settings, volumes);
+            var liquidations = manifest.RootElement.TryGetProperty("liquidations", out var flag) && flag.GetBoolean();
+            scanner = new LevelScanner(settings, volumes, liquidations);
             state = "scanning";
             explanation = $"Сканер следит за {volumes.Count} монетами. Уровни строятся по минутным свечам, каждый пробой оценивается и отслеживается {settings.OutcomeMinutes} минут. Сделок нет.";
         }
