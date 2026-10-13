@@ -53,13 +53,15 @@ public static class ScanRecorder
     private static decimal Number(JsonElement e, string name) =>
         decimal.Parse(e.GetProperty(name).GetString()!, NumberStyles.Float, CultureInfo.InvariantCulture);
 
-    // Public streams of the chosen symbols: best prices and 20 book levels every 500 ms, aggregated trades and liquidations.
+    // Public streams of the chosen symbols: 20 book levels every 500 ms, aggregated trades and liquidations. Best prices
+    // (bookTicker) are not recorded: the scanner does not use them, and on 20 coins they were 85% of the file and enough
+    // traffic in one connection for Binance to drop it.
     // Binance sends at most one liquidation per symbol a second (the latest), so the liquidation stream is a sample.
     public static Feed[] Feeds(IEnumerable<string> symbols)
     {
         var lower = symbols.Select(s => s.ToLowerInvariant()).ToArray();
         return [
-            new(Public, new("wss://fstream.binance.com/public/stream?streams=" + string.Join('/', lower.SelectMany(s => new[] { s + "@bookTicker", s + "@depth20@500ms" }))), []),
+            new(Public, new("wss://fstream.binance.com/public/stream?streams=" + string.Join('/', lower.Select(s => s + "@depth20@500ms"))), []),
             new(Market, new("wss://fstream.binance.com/market/stream?streams=" + string.Join('/', lower.SelectMany(s => new[] { s + "@aggTrade", s + "@forceOrder" }))), [])
         ];
     }
@@ -128,11 +130,24 @@ public static class ScanRecorder
         {
             // History goes into the recording first, so the live scanner and a later replay start from the same candles.
             // The last kline is still open; it is dropped and rebuilt from trades.
+            // One failed request must not stop the whole scan: it is retried, and a coin whose history still did not load
+            // is marked in the recording and starts its levels from live candles.
             foreach (var symbol in symbols.Order(StringComparer.Ordinal))
             {
-                var klines = await http.GetStringAsync($"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=1m&limit={options.HistoryMinutes + 1}", stop.Token);
-                capture.Publish(new(Rest, "history", "history", DateTimeOffset.UtcNow, Stopwatch.GetTimestamp(),
-                    JsonSerializer.Serialize(new { symbol, interval = "1m", klines = JsonSerializer.Deserialize<JsonElement>(klines) })));
+                string? klines = null, reason = null;
+                for (var attempt = 1; attempt <= 3 && klines is null; attempt++)
+                {
+                    try { klines = await http.GetStringAsync($"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=1m&limit={options.HistoryMinutes + 1}", stop.Token); }
+                    catch (Exception e) when (e is HttpRequestException || e is TaskCanceledException && !stop.IsCancellationRequested)
+                    {
+                        reason = e.Message;
+                        if (attempt < 3) await Task.Delay(TimeSpan.FromSeconds(attempt), stop.Token);
+                    }
+                }
+                capture.Publish(klines is not null
+                    ? new(Rest, "history", "history", DateTimeOffset.UtcNow, Stopwatch.GetTimestamp(),
+                        JsonSerializer.Serialize(new { symbol, interval = "1m", klines = JsonSerializer.Deserialize<JsonElement>(klines) }))
+                    : new(Rest, "history", "history-failed", DateTimeOffset.UtcNow, Stopwatch.GetTimestamp(), JsonSerializer.Serialize(new { symbol, reason })));
             }
             async Task FeedTask(Feed feed)
             {

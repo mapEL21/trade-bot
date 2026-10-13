@@ -191,7 +191,9 @@ try {
             & $dotnet build (Join-Path $root 'server\TradeBot.Api\TradeBot.Api.csproj') --nologo *> (Join-Path $runtime 'build.log')
             if ($LASTEXITCODE -ne 0) { throw "Не удалось собрать сервер. Подробности: $runtime\build.log" }
             $assembly = Join-Path $root 'server\TradeBot.Api\bin\Debug\net10.0\TradeBot.Api.dll'
-            Start-Owned 'api' $dotnet ('"' + $assembly + '" --Api:Port=5080') (Join-Path $root 'server\TradeBot.Api')
+            # Housekeeping here only compresses finished recordings and copies the database daily; nothing is deleted
+            # (Storage:RetentionDays stays 0).
+            Start-Owned 'api' $dotnet ('"' + $assembly + '" --Api:Port=5080 --Storage:Housekeeping=true') (Join-Path $root 'server\TradeBot.Api')
             $started += 'api'
         }
         Wait-Ready 'api' 5080 "$api/health"
