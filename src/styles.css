@@ -2198,3 +2198,23 @@ tbody tr:hover {
 .legend-gross {
   border-top: 1.6px dashed rgba(159, 176, 198, 0.7);
 }
+.signal-lab {
+  display: grid;
+  gap: 20px;
+}
+.signal-lab > .panel {
+  padding: 20px;
+  min-width: 0;
+}
+.lab-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+}
+.scanner-form .lab-fee {
+  flex: 0 0 150px;
+}
+.lab-selected td {
+  background: #16212e;
+}

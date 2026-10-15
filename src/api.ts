@@ -3,6 +3,7 @@ import {
   type Bot,
   type BotConfig,
   type LeaderLagSettings,
+  type Trade,
   type Workspace,
 } from './model';
 
@@ -90,9 +91,10 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
       response.status,
     );
   }
-  if (response.status === 204 || response.headers.get('content-length') === '0')
-    return undefined as T;
-  return response.json();
+  if (response.status === 204) return undefined as T;
+  // A command answered without a body (202 Accepted, for example) has nothing to parse.
+  const text = await response.text();
+  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 // Level scanner: public Binance data, levels and scored breakouts; it never trades.
@@ -177,6 +179,35 @@ export interface ScanStats {
   features: { name: string; with: ScanGroup; without: ScanGroup }[];
   notes: string[];
 }
+// Signal lab: events found in the scanner recordings and what trading on them would have made after fees.
+export interface LabStatus {
+  state: 'idle' | 'running' | 'finished' | 'stopped';
+  explanation: string;
+  done: number;
+  total: number;
+  lines: number;
+  current: string | null;
+}
+export interface LabRow {
+  type: string;
+  mode: 'follow' | 'fade';
+  horizon: number;
+  count: number;
+  meanPct: number;
+  winRate: number;
+  firstHalf: number | null;
+  secondHalf: number | null;
+  stable: boolean;
+}
+export interface LabReport {
+  recordings: number;
+  hours: number;
+  events: number;
+  feePct: number;
+  counts: { type: string; count: number; perHour: number }[];
+  rows: LabRow[];
+  notes: string[];
+}
 // Disk upkeep on a server: compression, retention and database copies; off on a laptop.
 export interface StorageStatus {
   enabled: boolean;
@@ -208,6 +239,14 @@ export const api = {
   scanner: (signal?: AbortSignal) => request<ScanSnapshot>('/scanner', { signal }),
   scannerStats: (feePct: number, signal?: AbortSignal) =>
     request<ScanStats>(`/scanner/stats?feePct=${encodeURIComponent(feePct)}`, { signal }),
+  labStatus: (signal?: AbortSignal) => request<LabStatus>('/lab/status', { signal }),
+  runLab: () => request<void>('/lab/run', { method: 'POST' }),
+  labReport: (feePct: number) =>
+    request<LabReport>(`/lab/report?feePct=${encodeURIComponent(feePct)}`),
+  labTrades: (row: LabRow, feePct: number) =>
+    request<Trade[]>(
+      `/lab/trades?type=${encodeURIComponent(row.type)}&mode=${row.mode}&horizon=${row.horizon}&feePct=${encodeURIComponent(feePct)}`,
+    ),
   storage: (signal?: AbortSignal) => request<StorageStatus>('/storage', { signal }),
   startScanner: (options: {
     seconds: number;

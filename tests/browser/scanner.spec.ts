@@ -160,6 +160,7 @@ test('scanner starts with chosen limits, shows scored breakouts, coins and a cha
   const state = await server(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'Лаборатория', exact: true }).first().click();
+  await page.getByRole('button', { name: 'Сканер и запись данных' }).click();
   await expect(page.getByRole('heading', { name: /Сканер пробоев уровня/ })).toBeVisible();
   // Statistics over the saved journals: overall edge, by score band and by each sign.
   const stats = page.locator('.scan-stats');
@@ -211,5 +212,116 @@ test('scanner starts with chosen limits, shows scored breakouts, coins and a cha
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.getByRole('button', { name: 'Остановить' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Остановлен' })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('signal lab runs the recordings, ranks signals after fees and charts the chosen one', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  let state = 'idle';
+  await page.route('**/api/v1/workspace', (route) =>
+    route.fulfill({ json: { schemaVersion: 1, bots: [], events: [] } }),
+  );
+  await page.route('**/api/v1/strategies', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/v1/lab/status', (route) =>
+    route.fulfill({
+      json: {
+        state,
+        explanation: 'Обработано записей: 2 из 2.',
+        done: 2,
+        total: 2,
+        lines: 400000,
+        current: null,
+      },
+    }),
+  );
+  await page.route('**/api/v1/lab/run', (route) => {
+    state = 'finished';
+    return route.fulfill({ status: 202 });
+  });
+  const row = (
+    type: string,
+    mode: string,
+    horizon: number,
+    count: number,
+    mean: number,
+    stable: boolean,
+  ) => ({
+    type,
+    mode,
+    horizon,
+    count,
+    meanPct: mean,
+    winRate: 55,
+    firstHalf: mean + 0.01,
+    secondHalf: stable ? mean - 0.01 : -0.02,
+    stable,
+  });
+  await page.route('**/api/v1/lab/report*', (route) =>
+    route.fulfill({
+      json: {
+        recordings: 2,
+        hours: 1.5,
+        events: 420,
+        feePct: 0.1,
+        counts: [
+          { type: 'Каскад ликвидаций', count: 140, perHour: 93.3 },
+          { type: 'Перекос стакана', count: 280, perHour: 186.7 },
+        ],
+        rows: [
+          row('Перекос стакана', 'follow', 5, 280, -0.09, false),
+          row('Каскад ликвидаций', 'fade', 15, 140, 0.05, true),
+          row('Каскад ликвидаций', 'follow', 300, 12, 0.3, false),
+        ],
+        notes: ['Комбинаций 48: часть может оказаться в плюсе случайно.'],
+      },
+    }),
+  );
+  await page.route('**/api/v1/lab/trades*', (route) =>
+    route.fulfill({
+      json: [0, 1, 2].map((i) => ({
+        id: `lab-${i}`,
+        at: new Date(Date.parse('2026-10-15T10:00:00Z') + i * 60000).toISOString(),
+        side: 'short',
+        gross: i === 1 ? -0.05 : 0.2,
+        fee: 0.1,
+        entry: 100,
+        exit: 99.8,
+        quantity: 1,
+        runId: 'lab',
+        simulated: true,
+        symbol: 'XUSDT',
+        exchange: 'Binance',
+        holdSeconds: 15,
+        notional: 100,
+        exitReason: '4 ликвидации шортов за 10 с',
+      })),
+    }),
+  );
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Лаборатория', exact: true }).first().click();
+  await expect(page.getByRole('heading', { name: /Лаборатория сигналов/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Обработать новые записи' }).click();
+  await expect(page.getByText('Устойчиво в плюсе после комиссий: 1')).toBeVisible();
+  await expect(page.locator('.signal-lab [role="alert"]')).toHaveCount(0);
+  const table = page.getByRole('table', { name: /Результат сигналов/ });
+  // Rare combinations (under 30 events) are hidden until asked for; the best one comes first.
+  await expect(table.locator('tbody tr')).toHaveCount(2);
+  await expect(table.locator('tbody tr').first()).toContainText('Каскад ликвидаций');
+  await expect(table.locator('tbody tr').first()).toContainText('Против движения');
+  await page.getByLabel(/Показывать и редкие/).check();
+  await expect(table.locator('tbody tr')).toHaveCount(3);
+  await table.locator('tbody tr').nth(1).getByRole('button', { name: 'Каскад ликвидаций' }).click();
+  await expect(
+    page.getByRole('heading', { name: /Каскад ликвидаций · против движения · 15 с/ }),
+  ).toBeVisible();
+  await expect(page.getByRole('img', { name: /Кривая накопленного результата/ })).toBeVisible();
+  await expect(page.locator('.trades-panel')).toContainText('Расчёт по записям сканера');
+  expect((await new AxeBuilder({ page }).include('.signal-lab').analyze()).violations).toEqual([]);
+  await page.screenshot({ path: 'artifacts/lab-desktop.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(errors).toEqual([]);
 });

@@ -28,6 +28,7 @@ builder.Services.AddSingleton<IScanRunner, ScanRunner>();
 builder.Services.AddSingleton<MarketScanner>();
 builder.Services.AddHostedService(services => services.GetRequiredService<MarketScanner>());
 builder.Services.AddSingleton<StorageHousekeeper>();
+builder.Services.AddSingleton<SignalLab>();
 builder.Services.AddHostedService(services => services.GetRequiredService<StorageHousekeeper>());
 var storagePath = builder.Configuration["Storage:Path"] ?? Path.Combine(builder.Environment.ContentRootPath, "data", "workspace.db");
 builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(storagePath));
@@ -131,6 +132,20 @@ api.MapPost("/scanner/{id:guid}/stop", (Guid id, MarketScanner scanner) => scann
 api.MapGet("/scanner/stats", (decimal? feePct, MarketScanner scanner) =>
 {
     try { return Results.Ok(scanner.Stats(feePct ?? 0.1m)); }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+});
+// Signal lab: events found in the scanner recordings and what price did after them; research only, no orders.
+api.MapGet("/lab/status", (SignalLab lab) => Results.Ok(lab.Status));
+api.MapPost("/lab/run", (SignalLab lab) => lab.Start()
+    ? Results.Accepted("/api/v1/lab/status") : Results.Problem(statusCode: 409, title: "Записи уже обрабатываются."));
+api.MapGet("/lab/report", (decimal? feePct, SignalLab lab) =>
+{
+    try { return Results.Ok(lab.Report(feePct ?? 0.1m)); }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+});
+api.MapGet("/lab/trades", (string type, string mode, int horizon, decimal? feePct, SignalLab lab) =>
+{
+    try { return Results.Ok(lab.Trades(type, mode, horizon, feePct ?? 0.1m)); }
     catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
 });
 api.MapGet("/scanner/symbols/{symbol}", (string symbol, MarketScanner scanner) => scanner.Detail(symbol) is { } detail

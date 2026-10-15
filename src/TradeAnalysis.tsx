@@ -320,10 +320,12 @@ export function TradesTable({
   trades,
   botName,
   showBot = false,
+  note = 'Сделки живой симуляции: исполнения смоделированы по публичным данным, реальных ордеров не было.',
 }: {
   trades: (Trade & { botName?: string })[];
   botName?: string;
   showBot?: boolean;
+  note?: string;
 }) {
   const sorted = [...trades].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
   const withLeader = trades.some((t) => t.leader);
@@ -462,12 +464,7 @@ export function TradesTable({
           </table>
         </div>
       )}
-      <div className="table-note">
-        {
-          'Сделки живой симуляции: исполнения смоделированы по публичным данным, реальных ордеров не было.'
-        }{' '}
-        Комиссии и результаты указаны в USDT.
-      </div>
+      <div className="table-note">{note} Комиссии и результаты указаны в USDT.</div>
     </section>
   );
 }

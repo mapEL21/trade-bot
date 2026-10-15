@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { api, type InstrumentInfo, type StrategyDefinition } from './api';
 import { Scanner } from './Scanner';
+import { Laboratory } from './SignalLab';
 import { activeStatuses } from './PaperRun';
 import { strategyView } from './strategyViews';
 import { LeaderLagFields, sizeProblem } from './LeaderLagFields';
@@ -565,7 +566,7 @@ export default function App() {
                   {(page === 'overview' || page === 'bots') && actions}
                 </div>
               </div>
-              {page === 'scanner' && <Scanner />}
+              {page === 'scanner' && <Laboratory scanner={<Scanner />} />}
               {page === 'overview' && (
                 <>
                   <div className="section-line">
