@@ -29,6 +29,7 @@ builder.Services.AddSingleton<MarketScanner>();
 builder.Services.AddHostedService(services => services.GetRequiredService<MarketScanner>());
 builder.Services.AddSingleton<StorageHousekeeper>();
 builder.Services.AddSingleton<SignalLab>();
+builder.Services.AddHostedService(services => services.GetRequiredService<SignalLab>());
 builder.Services.AddHostedService(services => services.GetRequiredService<StorageHousekeeper>());
 var storagePath = builder.Configuration["Storage:Path"] ?? Path.Combine(builder.Environment.ContentRootPath, "data", "workspace.db");
 builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(storagePath));
@@ -141,6 +142,7 @@ api.MapGet("/lab/report", (decimal? feePct, long? fromMs, SignalLab lab) =>
     try { return Results.Ok(lab.Report(feePct ?? 0.1m, fromMs)); }
     catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
 });
+api.MapGet("/lab/hypothesis", (SignalLab lab) => Results.Ok(lab.Hypothesis()));
 api.MapGet("/lab/trades", (string type, string mode, int horizon, decimal? feePct, long? fromMs, SignalLab lab) =>
 {
     try { return Results.Ok(lab.Trades(type, mode, horizon, feePct ?? 0.1m, fromMs)); }

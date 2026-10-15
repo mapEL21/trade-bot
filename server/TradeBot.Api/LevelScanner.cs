@@ -18,7 +18,6 @@ public sealed record ScoreItem(string Name, int Points, string Detail);
 public sealed record ScanCandidate(string Id, string Symbol, string Side, long AtMs, decimal Level, decimal Price, int Touches, int Score,
     ScoreItem[] Items, string Result, decimal MaxFavorablePct, decimal MaxAdversePct, decimal LastPct, long? ResolvedMs);
 public sealed record ScanLevelView(string Side, decimal Price, decimal ZoneLow, decimal ZoneHigh, int Touches, decimal DistancePct);
-public sealed record ScanSymbolView(string Symbol, decimal QuoteVolume, decimal? Price, ScanLevelView? Resistance, ScanLevelView? Support, int Candidates);
 public sealed record ScanSymbolDetail(string Symbol, Candle[] Candles, ScanLevelView[] Levels, ScanCandidate[] Candidates);
 
 // Turns the scan recording into candles, levels and scored breakouts with their outcome. Events are processed in file order,
@@ -255,10 +254,6 @@ public sealed class LevelScanner(ScanSettings settings, IReadOnlyDictionary<stri
         return items;
     }
 
-    public ScanSymbolView[] Symbols() => states.Select(x => new ScanSymbolView(x.Key, quoteVolumes[x.Key], x.Value.Price,
-            Nearest(x.Value, "resistance"), Nearest(x.Value, "support"), candidates.Count(c => c.Symbol == x.Key)))
-        .OrderBy(x => Math.Min(x.Resistance?.DistancePct ?? 99, x.Support?.DistancePct ?? 99)).ToArray();
-
     public ScanSymbolDetail? Detail(string symbol, int candles = 180)
     {
         if (!states.TryGetValue(symbol, out var state)) return null;
@@ -266,9 +261,6 @@ public sealed class LevelScanner(ScanSettings settings, IReadOnlyDictionary<stri
         if (state.Current is { } current) list.Add(current);
         return new(symbol, list.ToArray(), state.Levels.Select(l => View(l, state.Price)).ToArray(), candidates.Where(c => c.Symbol == symbol).ToArray());
     }
-
-    private static ScanLevelView? Nearest(State state, string side) =>
-        state.Levels.Where(l => l.Side == side).OrderBy(l => Math.Abs(l.Price - (state.Price ?? l.Price))).Select(l => View(l, state.Price)).FirstOrDefault();
 
     private static ScanLevelView View(ScanLevel l, decimal? price) => new(l.Side, l.Price, l.Price - l.Tolerance, l.Price + l.Tolerance, l.Touches,
         price is { } p && p > 0 ? Math.Round(Math.Abs(l.Price / p - 1) * 100, 3) : 0);

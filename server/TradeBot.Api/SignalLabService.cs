@@ -10,11 +10,16 @@ public sealed record LabRow(string Type, string Mode, int Horizon, int Count, de
 public sealed record LabCount(string Type, int Count, decimal PerHour, int Episodes = 0);
 public sealed record LabReport(int Recordings, decimal Hours, int Events, decimal FeePct, LabCount[] Counts, LabRow[] Rows, string[] Notes,
     long? FromMs = null);
+// One signal of the pre-registered hypothesis and where its check stands: "collecting", "confirmed" or "rejected".
+public sealed record HypothesisSignal(string Type, string Mode, int Horizon, int Episodes, int Needed, decimal? MeanPct, decimal? WinRate,
+    decimal? FirstHalf, decimal? SecondHalf, string Verdict);
+public sealed record HypothesisCheck(string Statement, long FromMs, decimal FeePct, decimal Hours, HypothesisSignal[] Signals, string Verdict,
+    string Explanation);
 
 // The signal lab: runs every finished scanner recording through SignalDetector once (the result is kept next to the recording
 // as signal-lab-v1.json) and then sums up, for every event type, both trading directions and every horizon, what the trade
 // would have made after fees — overall and separately on the earlier and later half of the events.
-public sealed class SignalLab(IConfiguration configuration, IHostEnvironment environment, ILogger<SignalLab> logger) : IDisposable
+public sealed class SignalLab(IConfiguration configuration, IHostEnvironment environment, ILogger<SignalLab> logger) : IHostedService, IDisposable
 {
     public const string File = "signal-lab-v1.json";
     public const int MinCount = 100;
@@ -40,7 +45,7 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
     private readonly object gate = new();
     private readonly CancellationTokenSource shutdown = new();
     private LabStatus status = new("idle", "Записи ещё не обрабатывались.", 0, 0, 0, null);
-    private Task? task;
+    private Task? task, auto;
 
     private string Root => Path.GetFullPath(configuration["Scanner:Path"] ?? Path.Combine(environment.ContentRootPath, "data", "scans"));
     public LabStatus Status { get { lock (gate) return status; } }
@@ -56,6 +61,41 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
         if (!System.IO.File.Exists(path)) return null;
         try { return JsonSerializer.Deserialize<LabRecording>(System.IO.File.ReadAllText(path), Json) is { Version: SignalDetector.Version } r ? r : null; }
         catch (Exception e) when (e is JsonException or IOException) { return null; }
+    }
+
+    // With Lab:AutoProcess (the launcher and the server turn it on) new finished recordings are processed on their own every few
+    // minutes, so the report is up to date without pressing the button; the button still starts a run at once. Off by default,
+    // so tests and other hosts never start reading the real recordings.
+    public Task StartAsync(CancellationToken ct)
+    {
+        if (configuration.GetValue<bool>("Lab:AutoProcess")) auto = Task.Run(AutoLoop);
+        return Task.CompletedTask;
+    }
+
+    private async Task AutoLoop()
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30), shutdown.Token);
+            while (true)
+            {
+                bool pending;
+                lock (gate) pending = task is not { IsCompleted: false } && Recordings().Any(d => Cached(d) is null);
+                if (pending) Start();
+                await Task.Delay(TimeSpan.FromMinutes(5), shutdown.Token);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { logger.LogWarning(e, "Signal lab auto processing stopped"); }
+    }
+
+    public async Task StopAsync(CancellationToken ct)
+    {
+        shutdown.Cancel();
+        Task? running;
+        lock (gate) running = task;
+        foreach (var t in new[] { auto, running }.OfType<Task>())
+            try { await t.WaitAsync(ct); } catch (OperationCanceledException) { }
     }
 
     public bool Start()
@@ -140,6 +180,40 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
         return new(recordings.Count, Math.Round(hours, 2), events.Count, feePct, counts, rows.ToArray(), notes, fromMs);
     }
 
+    // The hypothesis fixed on 16 October 2026 from the first 2.2 hours, before any of the data it is checked on existed: after a
+    // forced price jerk (price spike or liquidation cascade) a trade with the move, held 5 minutes, makes money after 0.1% fees.
+    // The verdict rule was fixed at the same time: each signal needs 50 episodes from the start moment; then it is confirmed when
+    // the mean after fees is above zero on the whole and on both halves, otherwise rejected. Changing these after seeing the
+    // result would make the check worthless.
+    public static readonly long HypothesisFromMs = new DateTimeOffset(2026, 10, 16, 0, 0, 0, TimeSpan.FromHours(3)).ToUnixTimeMilliseconds();
+    public const int HypothesisEpisodes = 50;
+    public const decimal HypothesisFee = 0.1m;
+    private static readonly (string Type, string Mode, int Horizon)[] HypothesisSignals = [("Вынос цены", "follow", 300), ("Каскад ликвидаций", "follow", 300)];
+
+    public HypothesisCheck Hypothesis()
+    {
+        var report = Report(HypothesisFee, HypothesisFromMs);
+        var signals = HypothesisSignals.Select(h =>
+        {
+            var row = report.Rows.Single(r => r.Type == h.Type && r.Mode == h.Mode && r.Horizon == h.Horizon);
+            var has = row.Episodes > 0;
+            var verdict = row.Episodes < HypothesisEpisodes ? "collecting"
+                : row.MeanPct > 0 && row.FirstHalf > 0 && row.SecondHalf > 0 ? "confirmed" : "rejected";
+            return new HypothesisSignal(h.Type, h.Mode, h.Horizon, row.Episodes, HypothesisEpisodes, has ? row.MeanPct : null,
+                has ? row.WinRate : null, row.FirstHalf, row.SecondHalf, verdict);
+        }).ToArray();
+        var verdict = signals.Any(s => s.Verdict == "confirmed") ? "confirmed"
+            : signals.All(s => s.Verdict == "rejected") ? "rejected" : "collecting";
+        var explanation = verdict switch
+        {
+            "confirmed" => "Хотя бы один сигнал прошёл проверку на новых данных. Следующий шаг — бот в живой симуляции с размером от риска; это ещё не доказательство прибыли на реальном счёте.",
+            "rejected" => "Оба сигнала набрали нужные эпизоды и не прошли проверку: гипотеза не подтвердилась. Подгонять пороги под эти данные нельзя — нужна новая гипотеза и новые данные.",
+            _ => $"Собираем данные: каждому сигналу нужно {HypothesisEpisodes} эпизодов с начала проверки. Промежуточный результат при малом числе эпизодов почти случаен — выводов по нему не делаем.",
+        };
+        return new("После выноса цены или каскада ликвидаций сделка по движению с удержанием 5 минут даёт плюс после комиссий 0,1%.",
+            HypothesisFromMs, HypothesisFee, report.Hours, signals, verdict, explanation);
+    }
+
     // Trades of one signal for the result chart: 100 USDT each, entry and exit at the recorded best prices.
     public BotTrade[] Trades(string type, string mode, int horizon, decimal feePct, long? fromMs = null)
     {
@@ -160,5 +234,11 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
         }).OfType<BotTrade>().ToArray();
     }
 
-    public void Dispose() { shutdown.Cancel(); shutdown.Dispose(); }
+    private bool disposed;
+    public void Dispose()
+    {
+        lock (gate) { if (disposed) return; disposed = true; }
+        shutdown.Cancel();
+        shutdown.Dispose();
+    }
 }

@@ -147,5 +147,37 @@ public sealed class SignalLabTests : IDisposable
         Assert.Single(lab.Trades("Вынос цены", "follow", 5, 0, T0 + 30_000));
     }
 
+    [Theory]
+    // 49 good episodes: still collecting; 50 good: confirmed; 50 with a losing second half: rejected for that signal.
+    [InlineData(49, 50, "collecting")]
+    [InlineData(50, 50, "confirmed")]
+    [InlineData(50, 25, "collecting")]
+    public void HypothesisIsJudgedOnlyOnEventsFromItsStartWithTheRuleFixedInAdvance(int count, int good, string verdict)
+    {
+        // A spike every minute from the start moment; exits at 101 make +1% (before 0.1% fees), at 99 −1%. Older events, all
+        // losing, sit before the start and must not count.
+        var from = SignalLab.HypothesisFromMs;
+        static LabEvent Spike(long at, decimal exit) => new("AUSDT", "Вынос цены", 1, at, 100, "", 99.99m, 100,
+            [exit, exit, exit, exit], [exit + .01m, exit + .01m, exit + .01m, exit + .01m]);
+        var events = Enumerable.Range(0, count).Select(k => Spike(from + k * 60_000L, k < good ? 101 : 99))
+            .Concat(Enumerable.Range(1, 20).Select(k => Spike(from - k * 60_000L, 99))).ToArray();
+        var dir = Path.Combine(root, "20261016T000000Z-44444444444444444444444444444444"); Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "summary.json"), "{}");
+        File.WriteAllText(Path.Combine(dir, "manifest.json"), "{}");
+        File.WriteAllText(Path.Combine(dir, SignalLab.File), JsonSerializer.Serialize(
+            new LabRecording(SignalDetector.Version, "x", from - 3_600_000, from + 3_600_000, 1, events), new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        using var lab = new SignalLab(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Scanner:Path"] = root }).Build(),
+            new Microsoft.Extensions.Hosting.Internal.HostingEnvironment { ContentRootPath = root },
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<SignalLab>.Instance);
+        var check = lab.Hypothesis();
+        var spike = check.Signals.Single(x => x.Type == "Вынос цены");
+        Assert.Equal((count, 50), (spike.Episodes, spike.Needed));
+        Assert.Equal(count == 50 && good == 25 ? "rejected" : verdict == "confirmed" ? "confirmed" : "collecting", spike.Verdict);
+        // No cascades were recorded: that signal is still collecting, so one rejected signal alone does not reject the hypothesis.
+        Assert.Equal(("collecting", 0), (check.Signals.Single(x => x.Type == "Каскад ликвидаций").Verdict, check.Signals.Single(x => x.Type == "Каскад ликвидаций").Episodes));
+        Assert.Equal(verdict, check.Verdict);
+        Assert.Equal(.1m, check.FeePct);
+    }
+
     public void Dispose() { if (Directory.Exists(root)) Directory.Delete(root, true); }
 }

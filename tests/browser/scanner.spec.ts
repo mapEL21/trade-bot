@@ -126,6 +126,32 @@ test('signal lab runs the recordings, ranks signals after fees and charts the ch
     route.fulfill({ json: { schemaVersion: 1, bots: [], events: [] } }),
   );
   await page.route('**/api/v1/strategies', (route) => route.fulfill({ json: [] }));
+  const signal = (type: string, episodes: number, meanPct: number | null) => ({
+    type,
+    mode: 'follow',
+    horizon: 300,
+    episodes,
+    needed: 50,
+    meanPct,
+    winRate: meanPct === null ? null : 60,
+    firstHalf: null,
+    secondHalf: null,
+    verdict: 'collecting',
+  });
+  await page.route('**/api/v1/lab/hypothesis', (route) =>
+    route.fulfill({
+      json: {
+        statement:
+          'После выноса цены или каскада ликвидаций сделка по движению с удержанием 5 минут даёт плюс после комиссий 0,1%.',
+        fromMs: Date.UTC(2026, 9, 15, 21),
+        feePct: 0.1,
+        hours: 12.5,
+        signals: [signal('Вынос цены', 12, 0.4), signal('Каскад ликвидаций', 0, null)],
+        verdict: 'collecting',
+        explanation: 'Собираем данные: каждому сигналу нужно 50 эпизодов с начала проверки.',
+      },
+    }),
+  );
   await page.route('**/api/v1/lab/status', (route) =>
     route.fulfill({
       json: {
@@ -208,6 +234,13 @@ test('signal lab runs the recordings, ranks signals after fees and charts the ch
   await page.goto('/');
   await page.getByRole('button', { name: 'Лаборатория', exact: true }).first().click();
   await expect(page.getByRole('heading', { name: /Лаборатория сигналов/ })).toBeVisible();
+  // The pre-registered check: progress per signal, no verdict before 50 episodes.
+  const hypothesis = page.locator('.hypothesis');
+  await expect(hypothesis).toContainText('Собираем данные');
+  await expect(hypothesis).toContainText('Только события с 16.10.2026, 00:00 (МСК)');
+  await expect(hypothesis).toContainText('12 из 50');
+  await expect(hypothesis).toContainText('пока +0,4% в среднем');
+  await expect(hypothesis).toContainText('эпизодов пока нет');
   await page.getByRole('button', { name: 'Обработать новые записи' }).click();
   await expect(page.getByText('Устойчиво в плюсе после комиссий: 1')).toBeVisible();
   await expect(page.locator('.signal-lab [role="alert"]')).toHaveCount(0);

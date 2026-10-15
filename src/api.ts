@@ -140,6 +140,29 @@ export interface LabRow {
   // Independent market moments: events of one type and direction within 10 s on any coins count once.
   episodes: number;
 }
+// The pre-registered hypothesis and where its check on new data stands.
+export type Verdict = 'collecting' | 'confirmed' | 'rejected';
+export interface HypothesisSignal {
+  type: string;
+  mode: 'follow' | 'fade';
+  horizon: number;
+  episodes: number;
+  needed: number;
+  meanPct: number | null;
+  winRate: number | null;
+  firstHalf: number | null;
+  secondHalf: number | null;
+  verdict: Verdict;
+}
+export interface HypothesisCheck {
+  statement: string;
+  fromMs: number;
+  feePct: number;
+  hours: number;
+  signals: HypothesisSignal[];
+  verdict: Verdict;
+  explanation: string;
+}
 export interface LabReport {
   recordings: number;
   hours: number;
@@ -167,6 +190,7 @@ export const api = {
   scanner: (signal?: AbortSignal) => request<ScanSnapshot>('/scanner', { signal }),
   labStatus: (signal?: AbortSignal) => request<LabStatus>('/lab/status', { signal }),
   runLab: () => request<void>('/lab/run', { method: 'POST' }),
+  labHypothesis: () => request<HypothesisCheck>('/lab/hypothesis'),
   labReport: (feePct: number, fromMs: number | null) =>
     request<LabReport>(
       `/lab/report?feePct=${encodeURIComponent(feePct)}${fromMs !== null ? `&fromMs=${fromMs}` : ''}`,

@@ -1,6 +1,13 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { FlaskConical, Play } from 'lucide-react';
-import { api, type LabReport, type LabRow, type LabStatus } from './api';
+import {
+  api,
+  type HypothesisCheck,
+  type LabReport,
+  type LabRow,
+  type LabStatus,
+  type Verdict,
+} from './api';
 import { metrics, type Trade } from './model';
 import { Performance, TradesTable } from './TradeAnalysis';
 
@@ -12,6 +19,16 @@ const pct = (n: number | null) =>
     : `${n > 0 ? '+' : ''}${n.toLocaleString('ru-RU', { maximumFractionDigits: 3 })}%`;
 const tone = (n: number | null) => (n === null ? '' : n > 0 ? 'positive' : n < 0 ? 'negative' : '');
 const key = (r: LabRow) => `${r.type}|${r.mode}|${r.horizon}`;
+const verdicts: Record<Verdict, string> = {
+  collecting: 'Собираем данные',
+  confirmed: 'Подтверждена',
+  rejected: 'Не подтвердилась',
+};
+const verdictTone: Record<Verdict, string> = {
+  collecting: '',
+  confirmed: 'positive',
+  rejected: 'negative',
+};
 // The "from" moment of the check is a per-viewer setting, kept in this browser only.
 const fromKey = 'trade-bot.lab-from';
 function savedFrom() {
@@ -29,6 +46,7 @@ const fromMsOf = (value: string) => (value ? new Date(value).getTime() : null);
 export function SignalLabPanel() {
   const [status, setStatus] = useState<LabStatus | null>(null);
   const [report, setReport] = useState<LabReport | null>(null);
+  const [hypothesis, setHypothesis] = useState<HypothesisCheck | null>(null);
   const [fee, setFee] = useState(0.1);
   const [all, setAll] = useState(false);
   const [from, setFrom] = useState(savedFrom);
@@ -39,7 +57,12 @@ export function SignalLabPanel() {
   async function load(feePct = fee, since = from) {
     if (!Number.isFinite(feePct)) return;
     try {
-      setReport(await api.labReport(feePct, fromMsOf(since)));
+      const [next, check] = await Promise.all([
+        api.labReport(feePct, fromMsOf(since)),
+        api.labHypothesis(),
+      ]);
+      setReport(next);
+      setHypothesis(check);
       setError('');
     } catch (e) {
       setError((e as Error).message);
@@ -103,6 +126,7 @@ export function SignalLabPanel() {
   const stable = rows.filter((r) => r.stable).length;
   return (
     <div className="signal-lab">
+      {hypothesis && <HypothesisPanel check={hypothesis} />}
       <section className="panel" aria-labelledby="lab-title">
         <div className="section-line">
           <h2 id="lab-title" className="lab-title">
@@ -182,8 +206,8 @@ export function SignalLabPanel() {
         {error && <p role="alert">{error}</p>}
         {report && report.events === 0 && (
           <p className="muted">
-            Событий пока нет. Нужны завершённые записи: запустите запись данных и нажмите
-            «Обработать новые записи».
+            Событий пока нет. Нужны завершённые записи: запустите запись данных — новые записи
+            обрабатываются сами раз в несколько минут, или нажмите «Обработать новые записи».
           </p>
         )}
         {report && report.events > 0 && (
@@ -283,7 +307,61 @@ export function SignalLabPanel() {
   );
 }
 
-// The Laboratory page: the breakout scanner that collects the data and the signal lab that studies it.
+// The hypothesis fixed before the data it is checked on: progress towards the number of episodes each signal needs and the
+// verdict by the rule fixed at the same time. The intermediate mean is shown, but no verdict is drawn from it.
+function HypothesisPanel({ check }: { check: HypothesisCheck }) {
+  const since = new Date(check.fromMs).toLocaleString('ru-RU', {
+    timeZone: 'Europe/Moscow',
+    dateStyle: 'short',
+    timeStyle: 'short',
+  });
+  return (
+    <section className="panel hypothesis" aria-labelledby="hypothesis-title">
+      <div className="section-line">
+        <h2 id="hypothesis-title">Проверка гипотезы</h2>
+        <span className={`research-status ${verdictTone[check.verdict]}`}>
+          {verdicts[check.verdict]}
+        </span>
+      </div>
+      <p className="hypothesis-statement">{check.statement}</p>
+      <p className="field-hint">
+        Только события с {since} (МСК) — данные, которых не было, когда гипотезу выбрали · записано{' '}
+        {check.hours.toLocaleString('ru-RU')} ч · комиссии круга{' '}
+        {check.feePct.toLocaleString('ru-RU')}%. Правило вывода зафиксировано заранее: каждому
+        сигналу нужно {check.signals[0]?.needed ?? 50} эпизодов; подтверждена, если средний
+        результат после комиссий выше нуля и в целом, и на обеих половинах.
+      </p>
+      <div className="hypothesis-grid">
+        {check.signals.map((s) => (
+          <div className="quality-item" key={`${s.type}|${s.mode}|${s.horizon}`}>
+            <span>
+              {s.type} · {modes[s.mode].toLowerCase()} · {horizons[s.horizon] ?? `${s.horizon} с`}
+            </span>
+            <strong>
+              {s.episodes} из {s.needed}
+            </strong>
+            <progress
+              max={s.needed}
+              value={Math.min(s.episodes, s.needed)}
+              aria-label={`${s.type}: эпизодов ${s.episodes} из ${s.needed}`}
+            />
+            <small>
+              {s.meanPct === null
+                ? 'эпизодов пока нет'
+                : `${s.verdict === 'collecting' ? 'пока ' : ''}${pct(s.meanPct)} в среднем · в плюсе ${s.winRate?.toLocaleString('ru-RU')}%`}
+              {s.verdict !== 'collecting' &&
+                ` · половины ${pct(s.firstHalf)} / ${pct(s.secondHalf)}`}
+            </small>
+            <small className={verdictTone[s.verdict]}>{verdicts[s.verdict]}</small>
+          </div>
+        ))}
+      </div>
+      <p className="field-hint">{check.explanation}</p>
+    </section>
+  );
+}
+
+// The Laboratory page: the data recording and the signal lab that studies it.
 export function Laboratory({ scanner }: { scanner: ReactNode }) {
   const [tab, setTab] = useState<'lab' | 'scanner'>('lab');
   return (
