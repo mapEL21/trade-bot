@@ -80,13 +80,25 @@ public static class ScanRecorder
         throw new InvalidDataException("Неизвестное сообщение или чужой инструмент в потоке сканера.");
     }
 
+    // Binance answers 451 when it does not serve the location the request comes from; that is said plainly, not as a network error.
+    public static string Explain(System.Net.HttpStatusCode? status) => status == System.Net.HttpStatusCode.UnavailableForLegalReasons
+        ? "Binance не обслуживает подключение из текущего местоположения (ответ 451 «restricted location»). Если включён VPN или прокси, выключите его; данные других бирж доступны в исследовании рынка."
+        : $"Binance ответил ошибкой{(status is { } code ? $" {(int)code}" : "")}. Повторите позже.";
+
+    private static async Task<string> Get(HttpClient http, string url, CancellationToken ct)
+    {
+        using var response = await http.GetAsync(url, ct);
+        if (!response.IsSuccessStatusCode) throw new ArgumentException(Explain(response.StatusCode));
+        return await response.Content.ReadAsStringAsync(ct);
+    }
+
     public static async Task<int> RunAsync(ScanOptions options, IRecordingObserver observer, CancellationToken ct)
     {
         options.Validate();
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-        var exchangeInfo = await http.GetStringAsync("https://fapi.binance.com/fapi/v1/exchangeInfo", stop.Token);
-        var tickers = await http.GetStringAsync("https://fapi.binance.com/fapi/v1/ticker/24hr", stop.Token);
+        var exchangeInfo = await Get(http, "https://fapi.binance.com/fapi/v1/exchangeInfo", stop.Token);
+        var tickers = await Get(http, "https://fapi.binance.com/fapi/v1/ticker/24hr", stop.Token);
         var selected = SelectSymbols(exchangeInfo, tickers, options);
         if (selected.Length == 0) throw new ArgumentException("Нет монет с таким объёмом за 24 часа. Снизьте порог объёма.");
         var symbols = selected.Select(x => x.Symbol).ToHashSet(StringComparer.Ordinal);

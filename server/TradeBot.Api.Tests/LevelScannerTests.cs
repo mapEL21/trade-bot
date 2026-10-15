@@ -152,6 +152,10 @@ public class LevelScannerTests
         Assert.Equal("control", ScanRecorder.Classify("""{"result":null,"id":1}""", symbols));
         Assert.Throws<InvalidDataException>(() => ScanRecorder.Classify("""{"stream":"busdt@aggTrade","data":{"e":"aggTrade","s":"BUSDT"}}""", symbols));
         Assert.Throws<ArgumentException>(() => new ScanOptions("x", 30, 1048576).Validate());
+        // A refusal by location is named as such, not reported as a vague network problem.
+        Assert.Contains("451", ScanRecorder.Explain(HttpStatusCode.UnavailableForLegalReasons));
+        Assert.Contains("VPN", ScanRecorder.Explain(HttpStatusCode.UnavailableForLegalReasons));
+        Assert.Contains("503", ScanRecorder.Explain(HttpStatusCode.ServiceUnavailable));
     }
 
     [Fact]
