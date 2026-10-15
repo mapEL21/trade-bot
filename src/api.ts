@@ -97,43 +97,12 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
-// Level scanner: public Binance data, levels and scored breakouts; it never trades.
-export interface ScanLevel {
-  side: 'resistance' | 'support';
-  price: number;
-  zoneLow: number;
-  zoneHigh: number;
-  touches: number;
-  distancePct: number;
-}
-export interface ScanScoreItem {
-  name: string;
-  points: number;
-  detail: string;
-}
-export interface ScanCandidate {
-  id: string;
-  symbol: string;
-  side: 'long' | 'short';
-  atMs: number;
-  level: number;
-  price: number;
-  touches: number;
-  score: number;
-  items: ScanScoreItem[];
-  result: 'open' | 'target' | 'stop' | 'timeout';
-  maxFavorablePct: number;
-  maxAdversePct: number;
-  lastPct: number;
-  resolvedMs: number | null;
-}
-export interface ScanSymbol {
+// Data recorder for the signal lab: public Binance data of many coins; it never trades.
+export interface RecordingSymbol {
   symbol: string;
   quoteVolume: number;
-  price: number | null;
-  resistance: ScanLevel | null;
-  support: ScanLevel | null;
-  candidates: number;
+  trades: number;
+  liquidations: number;
 }
 export interface ScanSnapshot {
   id: string | null;
@@ -143,41 +112,9 @@ export interface ScanSnapshot {
   seconds: number;
   events: number;
   bytes: number;
-  ignored: number;
-  symbols: ScanSymbol[];
-  candidates: ScanCandidate[];
-  settings: {
-    targetPct: number;
-    stopBufferPct: number;
-    outcomeMinutes: number;
-    breakoutBufferPct: number;
-  };
+  symbols: RecordingSymbol[];
   continuous?: boolean;
   segment?: number;
-}
-// Would the breakouts have paid if every one was entered at the breakout price (upper bound, no slippage)?
-export interface ScanGroup {
-  name: string;
-  count: number;
-  targets: number;
-  stops: number;
-  timeouts: number;
-  targetShare: number;
-  meanPct: number;
-  meanR: number;
-  sumR: number;
-}
-export interface ScanStats {
-  journals: number;
-  unreadable: number;
-  total: number;
-  open: number;
-  feePct: number;
-  all: ScanGroup;
-  byScore: ScanGroup[];
-  bySide: ScanGroup[];
-  features: { name: string; with: ScanGroup; without: ScanGroup }[];
-  notes: string[];
 }
 // Signal lab: events found in the scanner recordings and what trading on them would have made after fees.
 export interface LabStatus {
@@ -223,25 +160,9 @@ export interface StorageStatus {
   lastBackup: string | null;
   error: string | null;
 }
-export interface ScanCandle {
-  openMs: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  quoteVolume: number;
-}
-export interface ScanSymbolDetail {
-  symbol: string;
-  candles: ScanCandle[];
-  levels: ScanLevel[];
-  candidates: ScanCandidate[];
-}
 
 export const api = {
   scanner: (signal?: AbortSignal) => request<ScanSnapshot>('/scanner', { signal }),
-  scannerStats: (feePct: number, signal?: AbortSignal) =>
-    request<ScanStats>(`/scanner/stats?feePct=${encodeURIComponent(feePct)}`, { signal }),
   labStatus: (signal?: AbortSignal) => request<LabStatus>('/lab/status', { signal }),
   runLab: () => request<void>('/lab/run', { method: 'POST' }),
   labReport: (feePct: number, fromMs: number | null) =>
@@ -261,8 +182,6 @@ export const api = {
     continuous: boolean;
   }) => request<{ id: string }>('/scanner', { method: 'POST', body: JSON.stringify(options) }),
   stopScanner: (id: string) => request<void>(`/scanner/${id}/stop`, { method: 'POST' }),
-  scannerSymbol: (symbol: string, signal?: AbortSignal) =>
-    request<ScanSymbolDetail>(`/scanner/symbols/${encodeURIComponent(symbol)}`, { signal }),
   researchMarkets: (exchange: string, sourceExchange: string, signal: AbortSignal) =>
     request<ResearchMarketList>(
       `/research/markets?exchange=${encodeURIComponent(exchange)}&sourceExchange=${encodeURIComponent(sourceExchange)}`,

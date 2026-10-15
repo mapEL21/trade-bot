@@ -7,23 +7,22 @@ namespace TradeBot.Api;
 // Continuous: when a recording ends on time, the next one starts at once with a fresh choice of coins, until stopped.
 public sealed record ScanStart(int Seconds = 3600, decimal MinQuoteVolume = 150_000_000, int MaxSymbols = 20, string[]? Exclude = null,
     int MaxMb = 4096, bool Continuous = false);
+// What the recording shows while it runs: per coin, how many trades and liquidations have arrived.
+public sealed record RecordingSymbol(string Symbol, decimal QuoteVolume, long Trades, long Liquidations);
 public sealed record ScanSnapshot(string? Id, string State, string Explanation, DateTimeOffset? StartedUtc, int Seconds, string? Directory,
-    long Events, long Bytes, int Ignored, ScanSymbolView[] Symbols, ScanCandidate[] Candidates, ScanSettings Settings, bool ExecutionEnabled = false,
-    bool Continuous = false, int Segment = 1);
-public sealed record ScanReport(int Version, string Id, DateTimeOffset StartedUtc, DateTimeOffset EndedUtc, string State, ScanSettings Settings,
-    ScanSymbolView[] Symbols, ScanCandidate[] Candidates);
+    long Events, long Bytes, RecordingSymbol[] Symbols, bool ExecutionEnabled = false, bool Continuous = false, int Segment = 1);
 
-// One scan session: the recorder hands it every written event in file order and the level scanner turns them into candidates.
-public sealed class ScanSession(string id, ScanStart request, ScanSettings settings, int segment = 1) : IRecordingObserver, IDisposable
+// One recording session of the data recorder: it writes the market of the chosen coins for the signal lab and counts what
+// arrives per coin. It no longer searches for breakouts live; the lab studies breakouts with the other events on the files.
+public sealed class ScanSession(string id, ScanStart request, int segment = 1) : IRecordingObserver, IDisposable
 {
     private readonly object gate = new();
     private readonly CancellationTokenSource stop = new();
     private readonly DateTimeOffset startedUtc = DateTimeOffset.UtcNow;
-    private LevelScanner? scanner;
+    private readonly Dictionary<string, (decimal Volume, long Trades, long Liquidations)> symbols = new(StringComparer.Ordinal);
     private string state = "starting", explanation = "Загружаем список монет и историю свечей Binance.";
     private string? directory;
     private long events, bytes;
-    private int ignored;
     public string Id => id;
     public CancellationToken Token => stop.Token;
     public bool StopRequested => stop.IsCancellationRequested;
@@ -36,24 +35,30 @@ public sealed class ScanSession(string id, ScanStart request, ScanSettings setti
         {
             directory = path;
             using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(path, "manifest.json")));
-            var volumes = manifest.RootElement.GetProperty("symbols").EnumerateArray()
-                .ToDictionary(x => x.GetProperty("Symbol").GetString()!, x => x.GetProperty("QuoteVolume").GetDecimal(), StringComparer.Ordinal);
-            var liquidations = manifest.RootElement.TryGetProperty("liquidations", out var flag) && flag.GetBoolean();
-            scanner = new LevelScanner(settings, volumes, liquidations);
+            foreach (var x in manifest.RootElement.GetProperty("symbols").EnumerateArray())
+                symbols[x.GetProperty("Symbol").GetString()!] = (x.GetProperty("QuoteVolume").GetDecimal(), 0, 0);
             state = "scanning";
-            explanation = $"Сканер следит за {volumes.Count} монетами. Уровни строятся по минутным свечам, каждый пробой оценивается и отслеживается {settings.OutcomeMinutes} минут. Сделок нет.";
+            explanation = $"Пишем рынок {symbols.Count} монет: сделки, стакан, ликвидации. Сделок нет — это данные для лаборатории сигналов.";
         }
     }
 
+    // Counting only reads the stream name at the start of the message ("xxxusdt@aggTrade"); the payload is not parsed.
     public void Recorded(CaptureEvent item, long written, long totalBytes)
     {
         lock (gate)
         {
             events = written; bytes = totalBytes;
-            // A message the scanner cannot read is counted, not hidden; it never stops the recording.
-            try { scanner?.Process(item); }
-            catch (Exception e) when (e is JsonException or KeyNotFoundException or InvalidOperationException or FormatException or IndexOutOfRangeException)
-            { ignored++; }
+            if (item.Kind != "market") return;
+            const string prefix = "{\"stream\":\"";
+            if (!item.Payload.StartsWith(prefix, StringComparison.Ordinal)) return;
+            var end = item.Payload.IndexOf('"', prefix.Length);
+            var at = item.Payload.IndexOf('@', prefix.Length);
+            if (end < 0 || at < 0 || at > end) return;
+            var symbol = item.Payload[prefix.Length..at].ToUpperInvariant();
+            var stream = item.Payload[(at + 1)..end];
+            if (!symbols.TryGetValue(symbol, out var counts)) return;
+            symbols[symbol] = stream == "aggTrade" ? counts with { Trades = counts.Trades + 1 }
+                : stream == "forceOrder" ? counts with { Liquidations = counts.Liquidations + 1 } : counts;
         }
     }
 
@@ -64,16 +69,7 @@ public sealed class ScanSession(string id, ScanStart request, ScanSettings setti
             var stopped = stop.IsCancellationRequested;
             state = report.Status == "failed" ? "failed" : report.Status == "no-data" ? "no-data" : stopped ? "stopped" : "finished";
             explanation = report.Failure is { } failure ? $"Запись завершилась с ошибкой: {failure}" : report.Status == "no-data"
-                ? "Биржа не прислала данных по одному из потоков." : $"Сканирование завершено. Кандидатов: {scanner?.Candidates.Count ?? 0}.";
-            if (directory is not null && scanner is not null)
-            {
-                try
-                {
-                    File.WriteAllText(Path.Combine(directory, "scan-candidates-v1.json"), JsonSerializer.Serialize(new ScanReport(1, id, startedUtc,
-                        DateTimeOffset.UtcNow, state, settings, scanner.Symbols(), scanner.Candidates.ToArray()), new JsonSerializerOptions(JsonSerializerDefaults.Web)));
-                }
-                catch (IOException) { explanation += " Журнал кандидатов не сохранён на диск."; }
-            }
+                ? "Биржа не прислала данных по одному из потоков." : "Запись завершена; её можно обработать в лаборатории сигналов.";
         }
     }
 
@@ -83,17 +79,15 @@ public sealed class ScanSession(string id, ScanStart request, ScanSettings setti
     public ScanSnapshot Snapshot()
     {
         lock (gate)
-            return new(id, state, explanation, startedUtc, request.Seconds, directory, events, bytes, ignored, scanner?.Symbols() ?? [],
-                scanner?.Candidates.Reverse().Take(300).ToArray() ?? [], settings, false, request.Continuous, segment);
+            return new(id, state, explanation, startedUtc, request.Seconds, directory, events, bytes,
+                symbols.Select(x => new RecordingSymbol(x.Key, x.Value.Volume, x.Value.Trades, x.Value.Liquidations))
+                    .OrderByDescending(x => x.QuoteVolume).ToArray(), false, request.Continuous, segment);
     }
 
-    public ScanSymbolDetail? Detail(string symbol) { lock (gate) return scanner?.Detail(symbol); }
-    // Everything this recording has found so far, for statistics before its journal is written at the end.
-    public (ScanCandidate[] Candidates, ScanSettings Settings) Journal() { lock (gate) return (scanner?.Candidates.ToArray() ?? [], settings); }
     public void Dispose() => stop.Dispose();
 }
 
-// The level scanner on the research side: one scan at a time, public data only, no orders. A continuous scan chains
+// The data recorder for the signal lab: one recording at a time, public data only, no orders. A continuous run chains
 // one-hour recordings; Scanner:AutoStart starts one with the server, for a machine that runs around the clock.
 public sealed class MarketScanner(IScanRunner runner, IConfiguration configuration, IHostEnvironment environment, ILogger<MarketScanner> logger)
     : IHostedService, IDisposable
@@ -108,40 +102,7 @@ public sealed class MarketScanner(IScanRunner runner, IConfiguration configurati
 
     public ScanSnapshot Snapshot()
     {
-        lock (gate) return current?.Snapshot() ?? new(null, "idle", "Сканер не запущен.", null, 0, null, 0, 0, 0, [], [], new());
-    }
-
-    public ScanSymbolDetail? Detail(string symbol) { lock (gate) return current?.Detail(symbol); }
-
-    // Statistics over every saved scanner journal plus the recording in progress; a candidate is counted once.
-    public ScanStats Stats(decimal feePct)
-    {
-        if (feePct is < 0 or > 1) throw new ArgumentException("Комиссии круга — от 0 до 1%.");
-        var root = configuration["Scanner:Path"] ?? Path.Combine(environment.ContentRootPath, "data", "scans");
-        var found = new Dictionary<string, (ScanCandidate, ScanSettings)>(StringComparer.Ordinal);
-        int journals = 0, unreadable = 0;
-        if (Directory.Exists(root))
-            foreach (var file in Directory.EnumerateDirectories(root).OrderDescending().Take(5000)
-                .Select(d => Path.Combine(d, "scan-candidates-v1.json")).Where(File.Exists))
-            {
-                try
-                {
-                    if (new FileInfo(file).Length > 64 * 1048576) throw new InvalidDataException("Журнал слишком большой.");
-                    var report = JsonSerializer.Deserialize<ScanReport>(File.ReadAllText(file), new JsonSerializerOptions(JsonSerializerDefaults.Web))
-                        ?? throw new InvalidDataException();
-                    foreach (var c in report.Candidates) found[c.Id] = (c, report.Settings);
-                    journals++;
-                }
-                catch (Exception e) when (e is IOException or JsonException or InvalidDataException or UnauthorizedAccessException) { unreadable++; }
-            }
-        ScanSession? live;
-        lock (gate) live = current;
-        if (live is not null)
-        {
-            var (candidates, settings) = live.Journal();
-            foreach (var c in candidates) found[c.Id] = (c, settings);
-        }
-        return ScanStatistics.Compute(found.Values.ToList(), feePct, journals, unreadable);
+        lock (gate) return current?.Snapshot() ?? new(null, "idle", "Запись не идёт.", null, 0, null, 0, 0, []);
     }
 
     public string Start(ScanStart request)
@@ -163,7 +124,7 @@ public sealed class MarketScanner(IScanRunner runner, IConfiguration configurati
     private ScanSession Next(ScanStart request, int segment)
     {
         current?.Dispose();
-        return current = new ScanSession(Guid.NewGuid().ToString(), request, new ScanSettings(), segment);
+        return current = new ScanSession(Guid.NewGuid().ToString(), request, segment);
     }
 
     private async Task Loop(ScanStart request, ScanOptions options, ScanSession session)

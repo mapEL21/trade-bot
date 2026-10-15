@@ -118,7 +118,7 @@ api.MapGet("/research/instrument", async (string exchange, string coin, Research
         return Results.Problem(statusCode: 503, title: "Не удалось загрузить правила инструмента с биржи. Повторите позже.");
     }
 });
-// Level scanner: public Binance data only; it finds levels and scores breakouts, it never trades.
+// Data recorder for the signal lab: public Binance data of many coins; it never trades.
 api.MapGet("/scanner", (MarketScanner scanner) => Results.Ok(scanner.Snapshot()));
 api.MapPost("/scanner", (ScanStart request, MarketScanner scanner) =>
 {
@@ -129,11 +129,6 @@ api.MapPost("/scanner", (ScanStart request, MarketScanner scanner) =>
 api.MapPost("/scanner/{id:guid}/stop", (Guid id, MarketScanner scanner) => scanner.Stop(id.ToString())
     ? Results.Accepted("/api/v1/scanner", new { id = id.ToString() })
     : Results.Problem(statusCode: 409, title: "Сканер уже сменился. Обновите состояние перед остановкой."));
-api.MapGet("/scanner/stats", (decimal? feePct, MarketScanner scanner) =>
-{
-    try { return Results.Ok(scanner.Stats(feePct ?? 0.1m)); }
-    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
-});
 // Signal lab: events found in the scanner recordings and what price did after them; research only, no orders.
 api.MapGet("/lab/status", (SignalLab lab) => Results.Ok(lab.Status));
 api.MapPost("/lab/run", (SignalLab lab) => lab.Start()
@@ -148,8 +143,6 @@ api.MapGet("/lab/trades", (string type, string mode, int horizon, decimal? feePc
     try { return Results.Ok(lab.Trades(type, mode, horizon, feePct ?? 0.1m, fromMs)); }
     catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
 });
-api.MapGet("/scanner/symbols/{symbol}", (string symbol, MarketScanner scanner) => scanner.Detail(symbol) is { } detail
-    ? Results.Ok(detail) : Results.Problem(statusCode: 404, title: "Монета не найдена в текущем сканере."));
 api.MapGet("/strategies", (StrategyCatalog catalog) => Results.Ok(catalog.Items));
 api.MapGet("/paper", (PaperTrading paper) => Results.Ok(paper.Snapshot()));
 api.MapGet("/paper/sessions", (PaperTrading paper) => Results.Ok(paper.Active()));

@@ -159,7 +159,7 @@ public class LevelScannerTests
     }
 
     [Fact]
-    public async Task ScannerApiRunsOneScanShowsCandidatesAndSavesThemOnStop()
+    public async Task ScannerApiRunsOneRecordingAndCountsWhatArrivesPerCoin()
     {
         var directory = Path.Combine(Path.GetTempPath(), "trade-bot-scan-tests-" + Guid.NewGuid());
         var runner = new FakeScanRunner(directory, Breakout("XUSDT", 100.5m, 101.6m));
@@ -189,23 +189,18 @@ public class LevelScannerTests
             await runner.Fed.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/v1/scanner", new ScanStart(Seconds: 600))).StatusCode);
             var snapshot = (await client.GetFromJsonAsync<ScanSnapshot>("/api/v1/scanner"))!;
-            Assert.Equal(("scanning", 0, false), (snapshot.State, snapshot.Ignored, snapshot.ExecutionEnabled));
-            Assert.Equal("target", Assert.Single(snapshot.Candidates).Result);
-            Assert.Equal("XUSDT", Assert.Single(snapshot.Symbols).Symbol);
-            var detail = (await client.GetFromJsonAsync<ScanSymbolDetail>("/api/v1/scanner/symbols/XUSDT"))!;
-            Assert.True(detail.Candles.Length > 60);
-            Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/v1/scanner/symbols/ZZZUSDT")).StatusCode);
+            Assert.Equal(("scanning", false), (snapshot.State, snapshot.ExecutionEnabled));
+            var coin = Assert.Single(snapshot.Symbols);
+            Assert.Equal("XUSDT", coin.Symbol);
+            Assert.Equal(runner.Trades, coin.Trades);
+            Assert.True(coin.Trades > 0);
+            // The live breakout search is gone: the lab finds breakouts on the files.
+            Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/v1/scanner/symbols/XUSDT")).StatusCode);
             Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/scanner/{id}/stop", null)).StatusCode);
             using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             do snapshot = (await client.GetFromJsonAsync<ScanSnapshot>("/api/v1/scanner", wait.Token))!; while (snapshot.State == "scanning");
             Assert.Equal("stopped", snapshot.State);
-            var report = JsonSerializer.Deserialize<ScanReport>(File.ReadAllText(Path.Combine(runner.Recording, "scan-candidates-v1.json")),
-                new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
-            Assert.Equal("target", Assert.Single(report.Candidates).Result);
-            // Statistics read the saved journal; an out-of-range fee is refused.
-            var stats = (await client.GetFromJsonAsync<ScanStats>("/api/v1/scanner/stats"))!;
-            Assert.Equal((1, 1, 1), (stats.Journals, stats.All.Count, stats.All.Targets));
-            Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/v1/scanner/stats?feePct=5")).StatusCode);
+            Assert.False(File.Exists(Path.Combine(runner.Recording, "scan-candidates-v1.json")));
         }
         finally
         {
@@ -220,6 +215,7 @@ public class LevelScannerTests
     {
         public TaskCompletionSource Fed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public string Recording { get; } = Path.Combine(root, "scan-1");
+        public long Trades => events.Count(e => e.Kind == "market" && e.Payload.Contains("@aggTrade"));
 
         public async Task<int> RunAsync(ScanOptions options, IRecordingObserver observer, CancellationToken ct)
         {
