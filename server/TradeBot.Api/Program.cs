@@ -126,6 +126,9 @@ api.MapPost("/scanner", (ScanStart request, MarketScanner scanner) =>
     catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
     catch (InvalidOperationException e) { return Results.Problem(statusCode: 409, title: e.Message); }
 });
+api.MapPost("/scanner/{id:guid}/continuous", (Guid id, ScanContinuous request, MarketScanner scanner) =>
+    scanner.SetContinuous(id.ToString(), request.Continuous) ? Results.Ok(scanner.Snapshot())
+        : Results.Conflict(new { error = "Эта запись уже не идёт." }));
 api.MapPost("/scanner/{id:guid}/stop", (Guid id, MarketScanner scanner) => scanner.Stop(id.ToString())
     ? Results.Accepted("/api/v1/scanner", new { id = id.ToString() })
     : Results.Problem(statusCode: 409, title: "Сканер уже сменился. Обновите состояние перед остановкой."));

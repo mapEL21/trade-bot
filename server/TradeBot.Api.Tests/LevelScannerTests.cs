@@ -138,15 +138,19 @@ public class LevelScannerTests
         });
         var tickers = JsonSerializer.Serialize(new[]
         {
-            new { symbol = "AUSDT", quoteVolume = "500000000", lastPrice = "1" },
-            new { symbol = "BUSDT", quoteVolume = "200000000", lastPrice = "2" },
-            new { symbol = "CUSDT", quoteVolume = "100000000", lastPrice = "3" },
-            new { symbol = "DUSDT", quoteVolume = "900000000", lastPrice = "4" },
-            new { symbol = "EUSDT", quoteVolume = "300000000", lastPrice = "5" }
+            new { symbol = "AUSDT", quoteVolume = "500000000", lastPrice = "1", highPrice = "1.06", lowPrice = "0.96" },
+            new { symbol = "BUSDT", quoteVolume = "200000000", lastPrice = "2", highPrice = "2.03", lowPrice = "2.01" },
+            new { symbol = "CUSDT", quoteVolume = "100000000", lastPrice = "3", highPrice = "3", lowPrice = "3" },
+            new { symbol = "DUSDT", quoteVolume = "900000000", lastPrice = "4", highPrice = "4", lowPrice = "4" },
+            new { symbol = "EUSDT", quoteVolume = "300000000", lastPrice = "5", highPrice = "5", lowPrice = "5" }
         });
         var options = new ScanOptions("x", 600, 1048576, MaxSymbols: 2, Exclude: ["EUSDT"]);
         // D is not listed as a trading perpetual, E is excluded, C is below 150 million.
         Assert.Equal(["AUSDT", "BUSDT"], ScanRecorder.SelectSymbols(Info("AUSDT", "BUSDT", "CUSDT", "EUSDT"), tickers, options).Select(x => x.Symbol));
+        // A coin that moved 1% in a day (B) is left out when 4% is required; A moved 10%.
+        var moving = Assert.Single(ScanRecorder.SelectSymbols(Info("AUSDT", "BUSDT", "CUSDT", "EUSDT"), tickers, options with { MinRangePct = 4 }));
+        Assert.Equal(("AUSDT", 10m), (moving.Symbol, moving.RangePct));
+        Assert.Throws<ArgumentException>(() => (options with { MinRangePct = -1 }).Validate());
         var symbols = new HashSet<string> { "AUSDT" };
         Assert.Equal("market", ScanRecorder.Classify("""{"stream":"ausdt@aggTrade","data":{"e":"aggTrade","s":"AUSDT"}}""", symbols));
         Assert.Equal("control", ScanRecorder.Classify("""{"result":null,"id":1}""", symbols));
@@ -193,6 +197,16 @@ public class LevelScannerTests
             var coin = Assert.Single(snapshot.Symbols);
             Assert.Equal("XUSDT", coin.Symbol);
             Assert.Equal(runner.Trades, coin.Trades);
+            Assert.Equal(7.5m, coin.RangePct);
+            // Continuous mode is switched on and off while the recording runs.
+            Assert.False(snapshot.Continuous);
+            var on = await client.PostAsJsonAsync($"/api/v1/scanner/{id}/continuous", new ScanContinuous(true));
+            Assert.True((await on.Content.ReadFromJsonAsync<ScanSnapshot>())!.Continuous);
+            Assert.True((await client.GetFromJsonAsync<ScanSnapshot>("/api/v1/scanner"))!.Continuous);
+            await client.PostAsJsonAsync($"/api/v1/scanner/{id}/continuous", new ScanContinuous(false));
+            Assert.False((await client.GetFromJsonAsync<ScanSnapshot>("/api/v1/scanner"))!.Continuous);
+            Assert.Equal(HttpStatusCode.Conflict,
+                (await client.PostAsJsonAsync($"/api/v1/scanner/{Guid.NewGuid()}/continuous", new ScanContinuous(true))).StatusCode);
             Assert.True(coin.Trades > 0);
             // The live breakout search is gone: the lab finds breakouts on the files.
             Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/v1/scanner/symbols/XUSDT")).StatusCode);
@@ -222,7 +236,7 @@ public class LevelScannerTests
             Directory.CreateDirectory(Recording);
             File.WriteAllText(Path.Combine(Recording, "manifest.json"), JsonSerializer.Serialize(new
             {
-                symbols = new[] { new ScanSymbol("XUSDT", 300_000_000, 99.5m) }
+                symbols = new[] { new ScanSymbol("XUSDT", 300_000_000, 99.5m, 7.5m) }
             }));
             observer.Started(Recording);
             for (var i = 0; i < events.Count; i++) observer.Recorded(events[i], i + 1, 0);

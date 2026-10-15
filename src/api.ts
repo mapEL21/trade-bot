@@ -103,6 +103,8 @@ export interface RecordingSymbol {
   quoteVolume: number;
   trades: number;
   liquidations: number;
+  // 24-hour range (high - low) / price, % at the start of the recording.
+  rangePct: number;
 }
 export interface ScanSnapshot {
   id: string | null;
@@ -180,8 +182,14 @@ export const api = {
     maxSymbols: number;
     exclude: string[];
     continuous: boolean;
+    minRangePct: number;
   }) => request<{ id: string }>('/scanner', { method: 'POST', body: JSON.stringify(options) }),
   stopScanner: (id: string) => request<void>(`/scanner/${id}/stop`, { method: 'POST' }),
+  setScannerContinuous: (id: string, continuous: boolean) =>
+    request<ScanSnapshot>(`/scanner/${id}/continuous`, {
+      method: 'POST',
+      body: JSON.stringify({ continuous }),
+    }),
   researchMarkets: (exchange: string, sourceExchange: string, signal: AbortSignal) =>
     request<ResearchMarketList>(
       `/research/markets?exchange=${encodeURIComponent(exchange)}&sourceExchange=${encodeURIComponent(sourceExchange)}`,

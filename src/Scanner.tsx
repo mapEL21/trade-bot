@@ -30,6 +30,7 @@ export function Scanner() {
   const [maxSymbols, setMaxSymbols] = useState(20);
   const [exclude, setExclude] = useState('');
   const [continuous, setContinuous] = useState(false);
+  const [minRange, setMinRange] = useState(4);
   const [storage, setStorage] = useState<StorageStatus | null>(null);
   const running = snapshot ? live(snapshot.state) : false;
 
@@ -92,6 +93,7 @@ export function Scanner() {
         maxSymbols,
         exclude: symbols,
         continuous,
+        minRangePct: minRange,
       }),
     );
   }
@@ -148,6 +150,18 @@ export function Scanner() {
               />
             </label>
             <label className="field">
+              <span>Размах за 24 ч от, %</span>
+              <input
+                type="number"
+                min="0"
+                max="100"
+                step="0.5"
+                value={Number.isNaN(minRange) ? '' : minRange}
+                onChange={(e) => setMinRange(e.target.valueAsNumber)}
+                required
+              />
+            </label>
+            <label className="field">
               <span>Исключить</span>
               <input
                 value={exclude}
@@ -163,12 +177,30 @@ export function Scanner() {
               />
               <span>Непрерывно: после окончания сразу новая запись, пока не остановлю</span>
             </label>
+            <p className="field-hint scanner-range-hint">
+              Монеты, которые за сутки прошли меньше заданного размаха (обычно BTC и ETH), не
+              записываются. На них ход цены мал по сравнению с комиссией: чтобы движение её покрыло,
+              нужна большая позиция, а при размере от риска комиссия съедает большую часть этого
+              риска.
+            </p>
             <button className="button primary" disabled={busy}>
               <Play size={16} /> Начать запись
             </button>
           </form>
         ) : (
           <div className="scanner-form">
+            <label className="checkbox-field">
+              <input
+                type="checkbox"
+                checked={snapshot!.continuous ?? false}
+                disabled={busy}
+                onChange={(e) => {
+                  const value = e.target.checked;
+                  void act(() => api.setScannerContinuous(snapshot!.id!, value));
+                }}
+              />
+              <span>Авто-продление: после этой записи сразу начать следующую</span>
+            </label>
             <span className="muted">
               Событий: {snapshot!.events.toLocaleString('ru-RU')} · запись{' '}
               {(snapshot!.bytes / 1048576).toLocaleString('ru-RU', { maximumFractionDigits: 0 })} МБ
@@ -220,6 +252,7 @@ export function Scanner() {
                 <tr>
                   <th>Монета</th>
                   <th>Объём 24 ч</th>
+                  <th>Размах 24 ч</th>
                   <th>Сделок записано</th>
                   <th>Ликвидаций</th>
                 </tr>
@@ -229,6 +262,11 @@ export function Scanner() {
                   <tr key={s.symbol}>
                     <td>{s.symbol}</td>
                     <td>{Math.round(s.quoteVolume / 1_000_000).toLocaleString('ru-RU')} млн $</td>
+                    <td className="mono">
+                      {s.rangePct > 0
+                        ? `${s.rangePct.toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`
+                        : '—'}
+                    </td>
                     <td className="mono">{s.trades.toLocaleString('ru-RU')}</td>
                     <td className="mono">{s.liquidations.toLocaleString('ru-RU')}</td>
                   </tr>

@@ -5,8 +5,10 @@ using System.Text.Json;
 namespace TradeBot.Recorder;
 
 // A scan watches many Binance USDT perpetuals at once: the most traded ones above a 24-hour quote volume, minus exclusions.
+// MinRangePct: the 24-hour range (high - low) / last price a coin needs. A coin that barely moves (BTC, ETH on a calm day)
+// needs a large position for a move to cover the fees, and with the size set by risk its fees eat most of that risk.
 public sealed record ScanOptions(string Output, int Seconds, long MaxBytes, decimal MinQuoteVolume = 150_000_000, int MaxSymbols = 30,
-    string[]? Exclude = null, int HistoryMinutes = 240)
+    string[]? Exclude = null, int HistoryMinutes = 240, decimal MinRangePct = 0)
 {
     public const int MaxMb = 4096;
     public void Validate()
@@ -15,13 +17,14 @@ public sealed record ScanOptions(string Output, int Seconds, long MaxBytes, deci
         if (MaxBytes is < 1048576 or > MaxMb * 1048576L) throw new ArgumentException($"Предел записи — от 1 до {MaxMb} МБ.");
         if (MinQuoteVolume is < 0 or > 1_000_000_000_000) throw new ArgumentException("Минимальный объём за 24 ч — от 0 до 10¹² USDT.");
         if (MaxSymbols is < 1 or > 60) throw new ArgumentException("Монет в сканере — от 1 до 60.");
+        if (MinRangePct is < 0 or > 100) throw new ArgumentException("Минимальный размах за 24 ч — от 0 до 100%.");
         if (HistoryMinutes is < 30 or > 1440) throw new ArgumentException("История свечей — от 30 до 1440 минут.");
         if ((Exclude ?? []).Any(x => !System.Text.RegularExpressions.Regex.IsMatch(x, "\\A[A-Z0-9]{1,20}USDT\\z")))
             throw new ArgumentException("Исключения — символы вида BTCUSDT.");
     }
 }
 
-public sealed record ScanSymbol(string Symbol, decimal QuoteVolume, decimal LastPrice);
+public sealed record ScanSymbol(string Symbol, decimal QuoteVolume, decimal LastPrice, decimal RangePct = 0);
 
 public interface IScanRunner
 {
@@ -37,15 +40,22 @@ public static class ScanRecorder
 {
     public const string Rest = "binance-rest", Public = "binance-public", Market = "binance-market";
 
-    // Trading USDT perpetuals with at least the minimum 24-hour quote volume, most traded first.
+    // Trading USDT perpetuals with at least the minimum 24-hour quote volume and range, most traded first.
     public static ScanSymbol[] SelectSymbols(string exchangeInfo, string tickers, ScanOptions options)
     {
         var active = MarketCatalog.ActiveMarkets("binance", exchangeInfo).Select(x => x.Symbol).ToHashSet(StringComparer.Ordinal);
         var excluded = (options.Exclude ?? []).ToHashSet(StringComparer.Ordinal);
         using var doc = JsonDocument.Parse(tickers);
         return doc.RootElement.EnumerateArray()
-            .Select(t => new ScanSymbol(t.GetProperty("symbol").GetString()!, Number(t, "quoteVolume"), Number(t, "lastPrice")))
-            .Where(t => active.Contains(t.Symbol) && !excluded.Contains(t.Symbol) && t.QuoteVolume >= options.MinQuoteVolume && t.LastPrice > 0)
+            .Select(t =>
+            {
+                var last = Number(t, "lastPrice");
+                var range = last > 0 && t.TryGetProperty("highPrice", out _) && t.TryGetProperty("lowPrice", out _)
+                    ? Math.Round((Number(t, "highPrice") - Number(t, "lowPrice")) / last * 100, 2) : 0;
+                return new ScanSymbol(t.GetProperty("symbol").GetString()!, Number(t, "quoteVolume"), last, range);
+            })
+            .Where(t => active.Contains(t.Symbol) && !excluded.Contains(t.Symbol) && t.QuoteVolume >= options.MinQuoteVolume && t.LastPrice > 0
+                && t.RangePct >= options.MinRangePct)
             .OrderByDescending(t => t.QuoteVolume).ThenBy(t => t.Symbol, StringComparer.Ordinal)
             .Take(options.MaxSymbols).ToArray();
     }

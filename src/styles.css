@@ -2109,6 +2109,10 @@ tbody tr:hover {
   flex: 1 1 150px;
   min-width: 0;
 }
+.scanner-form .scanner-range-hint {
+  flex: 1 1 100%;
+  margin: 0;
+}
 .sr-only {
   position: absolute;
   width: 1px;

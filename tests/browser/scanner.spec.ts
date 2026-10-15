@@ -9,9 +9,10 @@ const scanning = {
   seconds: 3600,
   events: 12345,
   bytes: 52428800,
+  segment: 1,
   symbols: [
-    { symbol: 'XUSDT', quoteVolume: 300_000_000, trades: 4321, liquidations: 7 },
-    { symbol: 'YUSDT', quoteVolume: 180_000_000, trades: 950, liquidations: 0 },
+    { symbol: 'XUSDT', quoteVolume: 300_000_000, trades: 4321, liquidations: 7, rangePct: 9.4 },
+    { symbol: 'YUSDT', quoteVolume: 180_000_000, trades: 950, liquidations: 0, rangePct: 5 },
   ],
 };
 
@@ -47,6 +48,11 @@ async function server(page: Page) {
     }
     return route.fulfill({ json: state.snapshot });
   });
+  await page.route('**/api/v1/scanner/*/continuous', (route) => {
+    const { continuous } = route.request().postDataJSON() as { continuous: boolean };
+    state.snapshot = { ...(state.snapshot as typeof scanning), continuous };
+    return route.fulfill({ json: state.snapshot });
+  });
   await page.route('**/api/v1/scanner/*/stop', (route) => {
     state.snapshot = { ...scanning, state: 'stopped' };
     return route.fulfill({ status: 202, json: { id: scanning.id } });
@@ -66,6 +72,7 @@ test('data recording starts with chosen limits and shows what arrives per coin',
   await expect(page.getByRole('heading', { name: /Запись данных · Binance/ })).toBeVisible();
   await page.getByLabel('Объём за 24 ч от, млн $').fill('200');
   await page.getByLabel('Монет не больше').fill('15');
+  await page.getByLabel('Размах за 24 ч от, %').fill('5');
   await page.getByLabel('Исключить').fill('btc, ethusdt');
   await page.getByLabel(/^Непрерывно/).check();
   await page.getByRole('button', { name: 'Начать запись' }).click();
@@ -77,6 +84,7 @@ test('data recording starts with chosen limits and shows what arrives per coin',
       maxSymbols: 15,
       exclude: ['BTCUSDT', 'ETHUSDT'],
       continuous: true,
+      minRangePct: 5,
     });
   await expect(
     page.getByText(/Диск: свободно 70 ГБ из 100 ГБ · записи 8 ГБ \(12\) · хранятся 14 дн\./),
@@ -85,6 +93,15 @@ test('data recording starts with chosen limits and shows what arrives per coin',
   const coins = page.getByRole('table', { name: /Монеты записи/ });
   await expect(coins).toContainText('300 млн $');
   await expect(coins).toContainText('4 321');
+  await expect(coins).toContainText('9,4%');
+  // Auto-renewal is switched on and off while the recording runs.
+  const renew = page.getByLabel(/^Авто-продление/);
+  await expect(renew).not.toBeChecked();
+  await renew.click();
+  await expect(renew).toBeChecked();
+  await expect(page.getByText(/Непрерывный режим · запись/)).toBeVisible();
+  await renew.click();
+  await expect(renew).not.toBeChecked();
   // The live breakout search is gone from this page.
   await expect(page.getByText(/Пробои|Статистика пробоев/)).toHaveCount(0);
   await page.screenshot({ path: 'artifacts/scanner-desktop.png', fullPage: true });

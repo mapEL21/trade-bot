@@ -4,11 +4,13 @@ using TradeBot.Recorder;
 namespace TradeBot.Api;
 
 // About 1 MB a minute per coin: 20 coins for an hour fit well within 4 GB.
-// Continuous: when a recording ends on time, the next one starts at once with a fresh choice of coins, until stopped.
+// Continuous: when a recording ends on time, the next one starts at once with a fresh choice of coins, until stopped; it can be
+// switched on and off while a recording runs. MinRangePct: see ScanOptions; by default coins moving less than 4% a day are left out.
 public sealed record ScanStart(int Seconds = 3600, decimal MinQuoteVolume = 150_000_000, int MaxSymbols = 20, string[]? Exclude = null,
-    int MaxMb = 4096, bool Continuous = false);
+    int MaxMb = 4096, bool Continuous = false, decimal MinRangePct = 4);
+public sealed record ScanContinuous(bool Continuous);
 // What the recording shows while it runs: per coin, how many trades and liquidations have arrived.
-public sealed record RecordingSymbol(string Symbol, decimal QuoteVolume, long Trades, long Liquidations);
+public sealed record RecordingSymbol(string Symbol, decimal QuoteVolume, long Trades, long Liquidations, decimal RangePct = 0);
 public sealed record ScanSnapshot(string? Id, string State, string Explanation, DateTimeOffset? StartedUtc, int Seconds, string? Directory,
     long Events, long Bytes, RecordingSymbol[] Symbols, bool ExecutionEnabled = false, bool Continuous = false, int Segment = 1);
 
@@ -19,11 +21,13 @@ public sealed class ScanSession(string id, ScanStart request, int segment = 1) :
     private readonly object gate = new();
     private readonly CancellationTokenSource stop = new();
     private readonly DateTimeOffset startedUtc = DateTimeOffset.UtcNow;
-    private readonly Dictionary<string, (decimal Volume, long Trades, long Liquidations)> symbols = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (decimal Volume, decimal Range, long Trades, long Liquidations)> symbols = new(StringComparer.Ordinal);
     private string state = "starting", explanation = "Загружаем список монет и историю свечей Binance.";
     private string? directory;
     private long events, bytes;
+    private bool continuous = request.Continuous;
     public string Id => id;
+    public bool Continuous { get { lock (gate) return continuous; } set { lock (gate) continuous = value; } }
     public CancellationToken Token => stop.Token;
     public bool StopRequested => stop.IsCancellationRequested;
     public bool Failed { get { lock (gate) return state is "failed" or "no-data"; } }
@@ -36,7 +40,8 @@ public sealed class ScanSession(string id, ScanStart request, int segment = 1) :
             directory = path;
             using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(path, "manifest.json")));
             foreach (var x in manifest.RootElement.GetProperty("symbols").EnumerateArray())
-                symbols[x.GetProperty("Symbol").GetString()!] = (x.GetProperty("QuoteVolume").GetDecimal(), 0, 0);
+                symbols[x.GetProperty("Symbol").GetString()!] = (x.GetProperty("QuoteVolume").GetDecimal(),
+                    x.TryGetProperty("RangePct", out var range) ? range.GetDecimal() : 0, 0, 0);
             state = "scanning";
             explanation = $"Пишем рынок {symbols.Count} монет: сделки, стакан, ликвидации. Сделок нет — это данные для лаборатории сигналов.";
         }
@@ -80,8 +85,8 @@ public sealed class ScanSession(string id, ScanStart request, int segment = 1) :
     {
         lock (gate)
             return new(id, state, explanation, startedUtc, request.Seconds, directory, events, bytes,
-                symbols.Select(x => new RecordingSymbol(x.Key, x.Value.Volume, x.Value.Trades, x.Value.Liquidations))
-                    .OrderByDescending(x => x.QuoteVolume).ToArray(), false, request.Continuous, segment);
+                symbols.Select(x => new RecordingSymbol(x.Key, x.Value.Volume, x.Value.Trades, x.Value.Liquidations, x.Value.Range))
+                    .OrderByDescending(x => x.QuoteVolume).ToArray(), false, continuous, segment);
     }
 
     public void Dispose() => stop.Dispose();
@@ -96,7 +101,7 @@ public sealed class MarketScanner(IScanRunner runner, IConfiguration configurati
     private readonly CancellationTokenSource shutdown = new();
     private ScanSession? current;
     private Task? task;
-    private bool shuttingDown, stopLoop;
+    private bool shuttingDown, stopLoop, continuous;
     // Cancelled by a stop request, so a pause before retrying a failed segment ends at once.
     private CancellationTokenSource loopStop = new();
 
@@ -108,12 +113,14 @@ public sealed class MarketScanner(IScanRunner runner, IConfiguration configurati
     public string Start(ScanStart request)
     {
         var root = configuration["Scanner:Path"] ?? Path.Combine(environment.ContentRootPath, "data", "scans");
-        var options = new ScanOptions(root, request.Seconds, request.MaxMb * 1048576L, request.MinQuoteVolume, request.MaxSymbols, request.Exclude);
+        var options = new ScanOptions(root, request.Seconds, request.MaxMb * 1048576L, request.MinQuoteVolume, request.MaxSymbols, request.Exclude,
+            MinRangePct: request.MinRangePct);
         options.Validate();
         lock (gate)
         {
             if (shuttingDown || task is { IsCompleted: false }) throw new InvalidOperationException("Сканер уже работает. Остановите его перед новым запуском.");
             stopLoop = false;
+            continuous = request.Continuous;
             loopStop.Dispose(); loopStop = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
             var first = Next(request, 1);
             task = Task.Run(() => Loop(request, options, first));
@@ -124,7 +131,7 @@ public sealed class MarketScanner(IScanRunner runner, IConfiguration configurati
     private ScanSession Next(ScanStart request, int segment)
     {
         current?.Dispose();
-        return current = new ScanSession(Guid.NewGuid().ToString(), request, segment);
+        return current = new ScanSession(Guid.NewGuid().ToString(), request with { Continuous = continuous }, segment);
     }
 
     private async Task Loop(ScanStart request, ScanOptions options, ScanSession session)
@@ -138,7 +145,7 @@ public sealed class MarketScanner(IScanRunner runner, IConfiguration configurati
                 logger.LogWarning(e, "Scan failed");
                 session.Fail(e is ArgumentException ? e.Message : "Не удалось запустить сканер. Проверьте доступ к Binance. Подробности — в журнале сервера.");
             }
-            if (!request.Continuous || session.StopRequested) return;
+            lock (gate) if (!continuous || session.StopRequested) return;
             // A failure in continuous mode (network, exchange) is retried after a minute instead of ending the scan.
             if (session.Failed)
             {
@@ -147,9 +154,21 @@ public sealed class MarketScanner(IScanRunner runner, IConfiguration configurati
             }
             lock (gate)
             {
-                if (shuttingDown || stopLoop) return;
+                if (shuttingDown || stopLoop || !continuous) return;
                 session = Next(request, segment + 1);
             }
+        }
+    }
+
+    // Switching it off lets the current recording finish on time and starts no next one; switching it on continues after it.
+    public bool SetContinuous(string id, bool value)
+    {
+        lock (gate)
+        {
+            if (current?.Id != id || current.Done) return false;
+            continuous = value;
+            current.Continuous = value;
+            return true;
         }
     }
 
@@ -174,7 +193,7 @@ public sealed class MarketScanner(IScanRunner runner, IConfiguration configurati
                 Start(new ScanStart(3600, configuration.GetValue<decimal?>("Scanner:MinQuoteVolume") ?? 150_000_000,
                     configuration.GetValue<int?>("Scanner:MaxSymbols") ?? 20,
                     (configuration["Scanner:Exclude"] ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
-                    Continuous: true));
+                    Continuous: true, MinRangePct: configuration.GetValue<decimal?>("Scanner:MinRangePct") ?? 4));
                 logger.LogInformation("Continuous scan started with the server");
             }
             catch (Exception e) when (e is ArgumentException or InvalidOperationException) { logger.LogWarning(e, "Continuous scan was not started"); }
