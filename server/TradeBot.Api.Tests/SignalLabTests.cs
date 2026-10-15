@@ -20,13 +20,13 @@ public sealed class SignalLabTests : IDisposable
 
     // 400 s of one small trade a second at 100 with a 99.99/100.01 book, then 20 large buys in 2 s lifting the price, after
     // which the book sits at 100.19/100.21. bookUntil: the last moment the book is updated (the stream "freezes" after it).
-    private static List<CaptureEvent> Recording(long bookUntil = long.MaxValue)
+    private static List<CaptureEvent> Recording(long bookUntil = long.MaxValue, long bookFrom = long.MinValue)
     {
         var events = new List<CaptureEvent>();
         for (var ms = T0; ms < Burst + 400_000; ms += 500)
         {
             var after = ms >= Burst + 500;
-            if (ms <= bookUntil) events.Add(Book(ms, after ? 100.19m : 99.99m, after ? 100.21m : 100.01m));
+            if (ms <= bookUntil && ms >= bookFrom) events.Add(Book(ms, after ? 100.19m : 99.99m, after ? 100.21m : 100.01m));
             if (ms % 1000 == 0 && (ms < Burst || ms >= Burst + 2000)) events.Add(Trade(ms, ms < Burst ? 100 : 100.2m, 1, ms % 2000 == 0));
         }
         for (var k = 0; k < 20; k++) events.Add(Trade(Burst + k * 100, 100.1m + .005m * k, 50, true));
@@ -61,6 +61,18 @@ public sealed class SignalLabTests : IDisposable
         var burst = Assert.Single(Detect(Recording(bookUntil: Burst + 10_000)).Events, e => e.Type == "Всплеск объёма");
         Assert.NotNull(burst.Move(0, true));
         Assert.All(new[] { 1, 2, 3 }, i => Assert.Null(burst.Move(i, true)));
+    }
+
+    [Fact]
+    public void EventBeforeTheFirstBookHasNoEntryInsteadOfAZeroPrice()
+    {
+        // No book until a second after the burst: the entry 250 ms after it is unknown, not 0.
+        var burst = Assert.Single(Detect(Recording(bookFrom: Burst + 1000)).Events, e => e.Type == "Всплеск объёма");
+        Assert.Null(burst.EntryAsk);
+        Assert.All(Enumerable.Range(0, SignalDetector.Horizons.Length), i => Assert.Null(burst.Move(i, true)));
+        // A zero price saved by an older version is never used in a calculation.
+        var broken = burst with { EntryBid = 0, EntryAsk = 0, ExitBid = [100, 100, 100, 100], ExitAsk = [100, 100, 100, 100] };
+        Assert.Null(broken.Move(0, true));
     }
 
     [Fact]

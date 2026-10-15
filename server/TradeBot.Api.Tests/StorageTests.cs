@@ -30,6 +30,19 @@ public sealed class StorageTests : IDisposable
         Microsoft.Extensions.Logging.Abstractions.NullLogger<StorageHousekeeper>.Instance);
 
     [Fact]
+    public async Task OriginalLeftBesideACompleteCompressedCopyIsRemovedLater()
+    {
+        // An earlier pass compressed the file but could not delete the original because it was being read.
+        await Seed();
+        var dir = Path.Combine(root, Id);
+        Housekeeper().RunOnce(DateTimeOffset.UtcNow);
+        await File.WriteAllTextAsync(Path.Combine(dir, StorageHousekeeper.Events), "left over");
+        Assert.Equal(1, Housekeeper().RunOnce(DateTimeOffset.UtcNow).CompressedNow);
+        Assert.False(File.Exists(Path.Combine(dir, StorageHousekeeper.Events)));
+        Assert.True(File.Exists(Path.Combine(dir, StorageHousekeeper.Compressed)));
+    }
+
+    [Fact]
     public async Task FinishedRecordingIsCompressedWithoutLosingALine()
     {
         await Seed();

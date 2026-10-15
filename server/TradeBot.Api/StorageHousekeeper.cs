@@ -64,9 +64,13 @@ public sealed class StorageHousekeeper(IConfiguration configuration, IHostEnviro
                         Directory.Delete(directory, true); deleted++;
                         continue;
                     }
-                    if (finished && compress && File.Exists(Path.Combine(directory, Events)) && !File.Exists(Path.Combine(directory, Compressed)))
+                    if (finished && compress && File.Exists(Path.Combine(directory, Events)))
                     {
-                        Compress(directory); compressed++;
+                        // A complete compressed copy already exists when an earlier pass could not delete the original
+                        // (it was being read); the original only needs removing then.
+                        if (File.Exists(Path.Combine(directory, Compressed))) File.Delete(Path.Combine(directory, Events));
+                        else Compress(directory);
+                        compressed++;
                     }
                 }
                 // A file in use (an analysis reading it) is left for the next pass.

@@ -15,6 +15,8 @@ public sealed record LabEvent(string Symbol, string Type, int Direction, long At
     public decimal? Move(int i, bool withEvent)
     {
         if (EntryBid is not { } bid || EntryAsk is not { } ask || ExitBid?[i] is not { } exitBid || ExitAsk?[i] is not { } exitAsk) return null;
+        // A price of zero means no book was known; it is never a real price.
+        if (bid <= 0 || ask <= 0 || exitBid <= 0 || exitAsk <= 0) return null;
         var longSide = (Direction > 0) == withEvent;
         return longSide ? (exitBid / ask - 1) * 100 : (bid / exitAsk - 1) * 100;
     }
@@ -25,7 +27,8 @@ public sealed record LabRecording(int Version, string Id, long FirstMs, long Las
 // fixed (version 1): tuning them on the same data would find patterns that are not there.
 public sealed class SignalDetector
 {
-    public const int Version = 1;
+    // 2: an event before the coin's first book snapshot no longer gets a zero entry price.
+    public const int Version = 2;
     public static readonly int[] Horizons = [5, 15, 60, 300];
     public static readonly string[] Types = ["Всплеск объёма", "Перекос агрессора", "Каскад ликвидаций", "Вынос цены", "Перекос стакана", "Пробой уровня"];
     private const long Window = 10_000, Baseline = 15 * 60_000, Cooldown = 60_000, Latency = 250, BookAge = 2_000;
@@ -188,7 +191,8 @@ public sealed class SignalDetector
         foreach (var p in state.Pending.ToArray())
         {
             var at = p.Event.AtMs;
-            var fresh = ms - state.BookMs <= BookAge;
+            // Before the first snapshot there is no book at all (BookMs is the minimum and ms - BookMs would overflow).
+            var fresh = state.BookMs != long.MinValue && ms - state.BookMs <= BookAge && state.Bid > 0 && state.Ask > 0;
             if (p.Ask is null && ms >= at + Latency)
             {
                 if (!fresh) { state.Pending.Remove(p); continue; }
