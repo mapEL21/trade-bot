@@ -35,6 +35,7 @@ var storagePath = builder.Configuration["Storage:Path"] ?? Path.Combine(builder.
 builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(storagePath));
 builder.Services.AddSingleton(_ => new PaperRunStore(storagePath));
 builder.Services.AddSingleton(_ => new BotTemplateStore(storagePath));
+builder.Services.AddSingleton<SignalBots>();
 builder.Services.AddRateLimiter(options =>
 {
     options.AddFixedWindowLimiter("local", settings =>
@@ -172,14 +173,24 @@ api.MapPost("/paper/{id:guid}/pause", (Guid id, PaperTrading paper) => paper.Pau
     ? Results.Accepted("/api/v1/paper") : Results.Problem(statusCode: 409, title: "Симуляция уже завершена или сменилась."));
 api.MapPost("/paper/{id:guid}/resume", (Guid id, PaperTrading paper) => paper.Pause(id.ToString(), false)
     ? Results.Accepted("/api/v1/paper") : Results.Problem(statusCode: 409, title: "Симуляция уже завершена или сменилась."));
-api.MapGet("/workspace", async (IWorkspaceStore store, PaperRunStore runs, PaperTrading paper, CancellationToken ct) =>
+api.MapGet("/workspace", async (IWorkspaceStore store, PaperRunStore runs, PaperTrading paper, SignalBots signals, CancellationToken ct) =>
 {
     var workspace = await store.ReadAsync(ct);
     var byBot = await runs.AllByBotAsync(ct);
+    var signalRuns = (await runs.SignalRunsAsync(null, ct)).GroupBy(r => r.BotId).ToDictionary(g => g.Key, g => g.ToArray());
     return Results.Ok(workspace with
     {
         Bots = workspace.Bots.Select(b =>
         {
+            if (b.Strategy == StrategyCatalog.SignalId)
+            {
+                var own = signalRuns.GetValueOrDefault(b.Id) ?? [];
+                return b with
+                {
+                    Status = own.Any(r => r.ToMs is null) ? "running" : own.Length > 0 ? "stopped" : "draft",
+                    Trades = own.SelectMany(r => signals.Result(r).Trades).OrderBy(t => t.At, StringComparer.Ordinal).TakeLast(10000).ToArray()
+                };
+            }
             var botRuns = byBot.GetValueOrDefault(b.Id) ?? [];
             return b with
             {
@@ -233,6 +244,21 @@ api.MapDelete("/bots/{id:guid}", async (Guid id, HttpContext context, IWorkspace
     var result = await store.DeleteAsync(id.ToString(), revision, ct);
     return result.Status == StoreStatus.Saved ? Results.NoContent() : Failure(result.Status);
 });
+// Signal bots: a run follows the processed recordings from its start moment; simulation only.
+api.MapGet("/bots/{id:guid}/signal", async (Guid id, SignalBots signals, CancellationToken ct) => Results.Ok(await signals.RunsAsync(id.ToString(), ct)));
+api.MapPost("/bots/{id:guid}/signal/start", async (Guid id, SignalStart? request, IWorkspaceStore store, StrategyCatalog catalog, SignalBots signals, CancellationToken ct) =>
+{
+    var bot = (await store.ReadAsync(ct)).Bots.FirstOrDefault(x => x.Id == id.ToString());
+    if (bot is null) return Failure(StoreStatus.Missing);
+    if (bot.Strategy != StrategyCatalog.SignalId) return Results.Problem(statusCode: 409, title: "Это не бот сигнала.");
+    var errors = catalog.Validate(bot);
+    if (errors.Count > 0) return Results.ValidationProblem(errors);
+    try { return Results.Accepted($"/api/v1/bots/{id}/signal", await signals.StartAsync(bot, request ?? new(), ct)); }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+    catch (InvalidOperationException e) { return Results.Problem(statusCode: 409, title: e.Message); }
+});
+api.MapPost("/bots/{id:guid}/signal/stop", async (Guid id, SignalBots signals, CancellationToken ct) =>
+    await signals.StopAsync(id.ToString(), ct) ? Results.Accepted($"/api/v1/bots/{id}/signal") : Results.Problem(statusCode: 409, title: "Бот сейчас не работает."));
 // Starts a live paper run only: no exchange account or order adapter exists.
 api.MapPost("/bots/{id:guid}/start", async (Guid id, PaperStart? options, IWorkspaceStore store, StrategyCatalog catalog, PaperTrading paper, CancellationToken ct) =>
 {

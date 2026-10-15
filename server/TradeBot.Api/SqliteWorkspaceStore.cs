@@ -91,7 +91,7 @@ public sealed class SqliteWorkspaceStore : IWorkspaceStore, IDisposable
             Bot? bot = config is null ? null : new(
                 id ?? Guid.NewGuid().ToString(), config.Name.Trim(), config.Exchange, config.Symbol,
                 config.Budget, config.LossLimit, config.Strategy, config.StrategyVersion,
-                existing?.CreatedAt ?? now, (existing?.Revision ?? 0) + 1, config.Parameters);
+                existing?.CreatedAt ?? now, (existing?.Revision ?? 0) + 1, config.Parameters, config.Signal);
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.Parameters.AddWithValue("$id", bot?.Id ?? id!);
@@ -105,6 +105,7 @@ public sealed class SqliteWorkspaceStore : IWorkspaceStore, IDisposable
             var entry = new WorkspaceEvent(Guid.NewGuid().ToString(), now, bot?.Id ?? id!, bot?.Name ?? existing!.Name,
                 bot is null ? "Экземпляр бота удалён." : existing is not null ? "Настройки экземпляра обновлены."
                     : bot.Strategy == "leader-lag" ? "Создан экземпляр стратегии. Доступна живая симуляция без реальных заявок."
+                    : bot.Strategy == StrategyCatalog.SignalId ? "Создан бот сигнала. Симуляция по записям данных, без реальных заявок."
                     : "Создан экземпляр стратегии. Запуск недоступен: алгоритм ещё не реализован.");
             using var journal = connection.CreateCommand();
             journal.Transaction = transaction;

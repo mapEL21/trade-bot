@@ -133,6 +133,7 @@ export function SignalLabPanel() {
             <FlaskConical size={18} aria-hidden="true" /> Лаборатория сигналов
           </h2>
           <span className={`research-status ${running ? 'is-live' : ''}`} role="status">
+            <span className={`live-dot ${running ? 'on' : ''}`} aria-hidden="true" />
             {running
               ? `Обработка ${status!.done + 1} из ${status!.total} · строк ${status!.lines.toLocaleString('ru-RU')}`
               : report

@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { PaperRun } from './PaperRun';
+import { SignalRunPanel } from './SignalBot';
 import { formatMoney, type Bot } from './model';
 
 // What each strategy adds to the common bot page. Everything else — statistics, balance, the result curve, trade
@@ -68,9 +69,40 @@ const impulse: StrategyView = {
   note: 'Настройки риска пока не исполняются: торгового движка нет.',
 };
 
+const signal: StrategyView = {
+  name: 'Сигнал лаборатории',
+  live: (bot, onChanged) => <SignalRunPanel bot={bot} onChanged={onChanged} />,
+  facts: (bot) => {
+    const p = bot.signal!;
+    const pct = (n: number) => `${n.toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%`;
+    return [
+      { label: 'Стратегия', value: `Сигнал лаборатории · v${bot.strategyVersion}` },
+      {
+        label: 'Сигнал',
+        value: `${p.signal} · ${p.mode === 'follow' ? 'по движению' : 'против движения'}`,
+      },
+      {
+        label: 'Удержание',
+        value: p.holdSeconds >= 60 ? `${p.holdSeconds / 60} мин` : `${p.holdSeconds} с`,
+      },
+      { label: 'Депозит', value: `${formatMoney(bot.budget)} USDT` },
+      { label: 'Риск на сделку', value: `${pct(p.riskPct)} депозита с комиссиями` },
+      { label: 'Стоп', value: `${p.stopRanges} обычных минутных свечи` },
+      {
+        label: 'Комиссии круга',
+        value: `${pct(p.feePct)} · не больше ${pct(p.maxFeeShare * 100)} риска`,
+      },
+      { label: 'Плечо · сделок одновременно', value: `до ${p.maxLeverage}x · ${p.maxPositions}` },
+      { label: 'Лимит убытка', value: `${formatMoney(bot.lossLimit)} USDT` },
+    ];
+  },
+  note: 'Сделки виртуальные: вход и выход по лучшим ценам стакана из записи, проскальзывание глубже и funding не учтены.',
+};
+
 export const strategyViews: Record<Bot['strategy'], StrategyView> = {
   'leader-lag': leaderLag,
   impulse,
+  signal,
 };
 // A leader-lag bot without parameters cannot run; it falls back to the plain view.
 export const strategyView = (bot: Bot) =>

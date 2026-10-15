@@ -30,6 +30,7 @@ import { Scanner } from './Scanner';
 import { Laboratory } from './SignalLab';
 import { activeStatuses } from './PaperRun';
 import { strategyView } from './strategyViews';
+import { SignalFields } from './SignalBot';
 import { LeaderLagFields, sizeProblem } from './LeaderLagFields';
 import { builtInTemplates, defaultFees } from './strategySettings';
 import { TemplatePicker } from './BotTemplates';
@@ -43,6 +44,8 @@ import {
   metrics,
   paperExchanges,
   periodTrades,
+  defaultSignalParameters,
+  signalVersion,
   statusLabels,
   validateConfig,
   type Bot,
@@ -62,7 +65,18 @@ const nav: { id: Page; label: string; icon: typeof BotIcon }[] = [
   { id: 'scanner', label: 'Лаборатория', icon: ScanSearch },
   { id: 'events', label: 'Журнал', icon: Clock3 },
 ];
+// A new bot trades a lab signal: 100 USDT deposit, 1.5% risk per trade with fees, a 30 USDT loss limit.
 const defaultConfig: BotConfig = {
+  name: '',
+  exchange: 'Binance',
+  symbol: '*',
+  budget: 100,
+  lossLimit: 30,
+  strategy: 'signal',
+  strategyVersion: signalVersion,
+  signal: defaultSignalParameters,
+};
+const impulseConfig: BotConfig = {
   name: '',
   exchange: 'Binance',
   symbol: 'ARBUSDT',
@@ -97,7 +111,11 @@ function leaderLagConfig(version: string): BotConfig {
 }
 // A running bot is always a live paper simulation, never real trading.
 const statusLabel = (status: Status) => statusLabels[status];
-const strategyName = (bot: BotConfig) => (bot.strategy === 'leader-lag' ? 'Поводырь' : 'Импульс');
+const strategyName = (bot: BotConfig) =>
+  ({ 'leader-lag': 'Поводырь', impulse: 'Импульс', signal: 'Сигнал лаборатории' })[bot.strategy];
+// The pair line of a bot: a signal bot trades every coin of the data recording.
+const marketLabel = (bot: BotConfig) =>
+  bot.symbol === '*' ? 'Все монеты записи' : bot.symbol.replace('USDT', ' / USDT');
 export default function App() {
   const [strategies, setStrategies] = useState<StrategyDefinition[]>([]);
   const [loading, setLoading] = useState(true);
@@ -166,6 +184,34 @@ export default function App() {
   }, []);
   // While a simulation runs, keep bot statuses current without the loading indicator.
   const anyActive = workspace.bots.some((b) => activeStatuses.includes(b.status));
+  // Whether the data recording runs, for the indicator next to the Laboratory in the menu.
+  const [recording, setRecording] = useState(false);
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      try {
+        const s = await api.scanner();
+        if (!stopped) setRecording(s.state === 'starting' || s.state === 'scanning');
+      } catch {
+        if (!stopped) setRecording(false);
+      }
+      if (!stopped) timer = setTimeout(poll, 15000);
+    }
+    void poll();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, []);
+  const live: Partial<Record<Page, { on: boolean; text: string }>> = {
+    bots: anyActive
+      ? { on: true, text: 'Есть работающие боты' }
+      : { on: false, text: 'Ни один бот не запущен' },
+    scanner: recording
+      ? { on: true, text: 'Запись данных идёт' }
+      : { on: false, text: 'Запись данных не идёт' },
+  };
   useEffect(() => {
     if (!anyActive) return;
     const timer = setInterval(() => {
@@ -331,6 +377,14 @@ export default function App() {
             >
               <Icon size={19} />
               <span>{label}</span>
+              {live[id] && (
+                <span
+                  className={`live-dot ${live[id]!.on ? 'on' : ''}`}
+                  role="img"
+                  aria-label={live[id]!.text}
+                  title={live[id]!.text}
+                />
+              )}
               {id === 'bots' && <span className="nav-count">{workspace.bots.length}</span>}
             </button>
           ))}
@@ -426,8 +480,7 @@ export default function App() {
                   <div>
                     <h1>{bot.name}</h1>
                     <p>
-                      {bot.symbol.replace('USDT', ' / USDT')}{' '}
-                      <span className="dot-separator">·</span> USDT Perpetual{' '}
+                      {marketLabel(bot)} <span className="dot-separator">·</span> USDT Perpetual{' '}
                       <span className="dot-separator">·</span>{' '}
                       {bot.parameters
                         ? `${bot.exchange} ↔ ${bot.parameters.signalExchange}`
@@ -437,7 +490,7 @@ export default function App() {
                 </div>
                 <div className="heading-actions">
                   <StatusBadge status={bot.status} />
-                  {bot.strategy !== 'leader-lag' && (
+                  {bot.strategy === 'impulse' && (
                     <button className="button secondary" disabled>
                       Алгоритм в разработке
                     </button>
@@ -490,9 +543,9 @@ export default function App() {
                 <>
                   <div className="section-line">
                     <p className="muted">
-                      {bot.strategy === 'leader-lag'
-                        ? 'Сделки симуляции — на вкладке «Обзор», в истории запусков. Реальных исполнений нет.'
-                        : 'Исполнений пока нет'}
+                      {bot.strategy === 'impulse'
+                        ? 'Исполнений пока нет'
+                        : 'Сделки симуляции. Реальных исполнений нет.'}
                     </p>
                     {period}
                   </div>
@@ -508,7 +561,10 @@ export default function App() {
                     <h3>Настройки бота</h3>
                     <DownloadButton
                       onClick={() =>
-                        download(`${bot.symbol.toLowerCase()}-bot.json`, exportConfig(bot))
+                        download(
+                          `${bot.symbol === '*' ? 'signal' : bot.symbol.toLowerCase()}-bot.json`,
+                          exportConfig(bot),
+                        )
                       }
                     />
                   </div>
@@ -855,7 +911,7 @@ function BotCard({
       </div>
       <div className="bot-market">
         <span className="exchange-label">{bot.exchange}</span>
-        <span>{bot.symbol}</span>
+        <span>{bot.symbol === '*' ? 'Все монеты записи' : bot.symbol}</span>
         <span className="market-type">PERP</span>
       </div>
       <div className="bot-card-stats">
@@ -879,7 +935,7 @@ function BotCard({
       <div className="bot-card-footer">
         <StatusBadge status={bot.status} />
         <div>
-          {bot.strategy === 'leader-lag' ? (
+          {bot.strategy !== 'impulse' ? (
             // Simulation controls live on the bot page, next to its live state.
             <button
               className="icon-button"
@@ -940,14 +996,25 @@ function ConfigForm({
     setError('');
   }, [config]);
   const leaderLag = form.strategy === 'leader-lag';
+  const signalBot = form.strategy === 'signal';
+  // Retired strategies are not offered for new bots; an existing bot keeps showing its own.
+  const offered = (id: string) =>
+    strategies.some((s) => s.id === id && s.canCreate && !s.retired) || form.strategy === id;
   const leaderLagDefinition = strategies.find((s) => s.id === 'leader-lag' && s.canCreate);
+  const signalDefinition = strategies.find((s) => s.id === 'signal' && s.canCreate);
   const params = form.parameters;
   const [instrument, setInstrument] = useState<InstrumentInfo | null>(null);
   function chooseStrategy(id: BotConfig['strategy']) {
     if (id === form.strategy) return;
     if (id === 'leader-lag' && leaderLagDefinition)
       setForm({ ...leaderLagConfig(leaderLagDefinition.version), name: form.name });
-    else setForm({ ...defaultConfig, name: form.name });
+    else if (id === 'signal')
+      setForm({
+        ...defaultConfig,
+        strategyVersion: signalDefinition?.version ?? signalVersion,
+        name: form.name,
+      });
+    else setForm({ ...impulseConfig, name: form.name });
   }
   function chooseExchange(exchange: Exchange) {
     setForm((f) => ({
@@ -974,8 +1041,17 @@ function ConfigForm({
     pending.current = true;
     setSubmitting(true);
     try {
-      const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion, parameters } =
-        form;
+      const {
+        name,
+        exchange,
+        symbol,
+        budget,
+        lossLimit,
+        strategy,
+        strategyVersion,
+        parameters,
+        signal,
+      } = form;
       const tooSmall =
         parameters &&
         strategy === 'leader-lag' &&
@@ -991,6 +1067,7 @@ function ConfigForm({
           strategy,
           strategyVersion,
           ...(strategy === 'leader-lag' ? { parameters } : {}),
+          ...(strategy === 'signal' ? { signal } : {}),
         }),
       );
       setError('');
@@ -1009,30 +1086,56 @@ function ConfigForm({
           data-autofocus
           value={form.name}
           maxLength={40}
-          placeholder={leaderLag ? 'Например, Поводырь · MAGIC' : 'Например, Импульс · ARB'}
+          placeholder={
+            signalBot
+              ? 'Например, Вынос цены · 5 мин'
+              : leaderLag
+                ? 'Например, Поводырь · MAGIC'
+                : 'Например, Импульс · ARB'
+          }
           onChange={(e) => setForm({ ...form, name: e.target.value })}
           required
         />
       </label>
       <fieldset className="strategy-choice" disabled={strategyLocked}>
         <legend>Стратегия</legend>
-        <label className={`strategy-option ${!leaderLag ? 'chosen' : ''}`}>
-          <input
-            type="radio"
-            name="strategy"
-            checked={!leaderLag}
-            onChange={() => chooseStrategy('impulse')}
-          />
-          <span className="bot-icon">
-            <Zap size={22} />
-          </span>
-          <div>
-            <strong>Импульс</strong>
-            <p>Шаблон стратегии · алгоритм ещё не реализован</p>
-          </div>
-          {!leaderLag && <Check size={18} />}
-        </label>
-        {(leaderLagDefinition || leaderLag) && (
+        {offered('signal') && (
+          <label className={`strategy-option ${signalBot ? 'chosen' : ''}`}>
+            <input
+              type="radio"
+              name="strategy"
+              checked={signalBot}
+              onChange={() => chooseStrategy('signal')}
+            />
+            <span className="bot-icon">
+              <FlaskConical size={22} />
+            </span>
+            <div>
+              <strong>Сигнал лаборатории</strong>
+              <p>Все монеты записи данных · размер от риска · симуляция по записям</p>
+            </div>
+            {signalBot && <Check size={18} />}
+          </label>
+        )}
+        {offered('impulse') && (
+          <label className={`strategy-option ${form.strategy === 'impulse' ? 'chosen' : ''}`}>
+            <input
+              type="radio"
+              name="strategy"
+              checked={form.strategy === 'impulse'}
+              onChange={() => chooseStrategy('impulse')}
+            />
+            <span className="bot-icon">
+              <Zap size={22} />
+            </span>
+            <div>
+              <strong>Импульс</strong>
+              <p>Шаблон стратегии · алгоритм ещё не реализован</p>
+            </div>
+            {form.strategy === 'impulse' && <Check size={18} />}
+          </label>
+        )}
+        {offered('leader-lag') && (
           <label className={`strategy-option ${leaderLag ? 'chosen' : ''}`}>
             <input
               type="radio"
@@ -1057,52 +1160,83 @@ function ConfigForm({
         )}
       </fieldset>
       {leaderLag && params && <TemplatePicker form={form} setForm={setForm} />}
-      <div className="form-grid">
-        <SelectField
-          label={leaderLag ? 'Биржа бота (исполнение)' : 'Биржа'}
-          value={form.exchange}
-          onChange={(exchange) => chooseExchange(exchange as Exchange)}
-        >
-          {(leaderLag ? paperExchanges : exchanges).map((x) => (
-            <option key={x}>{x}</option>
-          ))}
-        </SelectField>
-        {!leaderLag && (
+      {signalBot && form.signal && (
+        <div className="form-grid">
           <label className="field">
-            <span>USDT-фьючерс</span>
+            <span>Депозит бота, USDT</span>
             <input
-              value={form.symbol}
-              onChange={(e) => setForm({ ...form, symbol: e.target.value.toUpperCase() })}
-              placeholder="ARBUSDT"
+              type="number"
+              min="1"
+              max="1000000"
+              step="0.01"
+              value={Number.isNaN(form.budget) ? '' : form.budget}
+              onChange={(e) => setForm({ ...form, budget: e.target.valueAsNumber })}
               required
             />
           </label>
-        )}
-        <label className="field">
-          <span>{'Выделенный баланс, USDT'}</span>
-          <input
-            type="number"
-            min="1"
-            max="1000000"
-            step="0.01"
-            value={Number.isNaN(form.budget) ? '' : form.budget}
-            onChange={(e) => setForm({ ...form, budget: e.target.valueAsNumber })}
-            required
-          />
-        </label>
-        <label className="field">
-          <span>Лимит убытка, USDT</span>
-          <input
-            type="number"
-            min="0.01"
-            max={form.budget}
-            step="0.01"
-            value={Number.isNaN(form.lossLimit) ? '' : form.lossLimit}
-            onChange={(e) => setForm({ ...form, lossLimit: e.target.valueAsNumber })}
-            required
-          />
-        </label>
-      </div>
+          <label className="field">
+            <span>Лимит убытка, USDT</span>
+            <input
+              type="number"
+              min="0.01"
+              max={form.budget}
+              step="0.01"
+              value={Number.isNaN(form.lossLimit) ? '' : form.lossLimit}
+              onChange={(e) => setForm({ ...form, lossLimit: e.target.valueAsNumber })}
+              required
+            />
+          </label>
+        </div>
+      )}
+      {signalBot && form.signal && <SignalFields form={form} setForm={setForm} />}
+      {!signalBot && (
+        <div className="form-grid">
+          <SelectField
+            label={leaderLag ? 'Биржа бота (исполнение)' : 'Биржа'}
+            value={form.exchange}
+            onChange={(exchange) => chooseExchange(exchange as Exchange)}
+          >
+            {(leaderLag ? paperExchanges : exchanges).map((x) => (
+              <option key={x}>{x}</option>
+            ))}
+          </SelectField>
+          {!leaderLag && (
+            <label className="field">
+              <span>USDT-фьючерс</span>
+              <input
+                value={form.symbol}
+                onChange={(e) => setForm({ ...form, symbol: e.target.value.toUpperCase() })}
+                placeholder="ARBUSDT"
+                required
+              />
+            </label>
+          )}
+          <label className="field">
+            <span>{'Выделенный баланс, USDT'}</span>
+            <input
+              type="number"
+              min="1"
+              max="1000000"
+              step="0.01"
+              value={Number.isNaN(form.budget) ? '' : form.budget}
+              onChange={(e) => setForm({ ...form, budget: e.target.valueAsNumber })}
+              required
+            />
+          </label>
+          <label className="field">
+            <span>Лимит убытка, USDT</span>
+            <input
+              type="number"
+              min="0.01"
+              max={form.budget}
+              step="0.01"
+              value={Number.isNaN(form.lossLimit) ? '' : form.lossLimit}
+              onChange={(e) => setForm({ ...form, lossLimit: e.target.valueAsNumber })}
+              required
+            />
+          </label>
+        </div>
+      )}
       {leaderLag && params && (
         <LeaderLagFields form={form} setForm={setForm} onInstrument={setInstrument} />
       )}
@@ -1114,10 +1248,13 @@ function ConfigForm({
       <div className="inline-note">
         <FlaskConical size={17} />
         <span>
-          {leaderLag
-            ? 'Бот работает только в живой симуляции: реальные заявки не отправляются, ключи не нужны. Биржа сигнала — поводырь: бот входит на своей бирже, когда она отстаёт от движения биржи сигнала. Комиссии — пример, укажите свои.'
-            : 'Создаётся черновик экземпляра. Алгоритм ещё не реализован, запуск недоступен.'}{' '}
-          {!leaderLag && 'Доступность инструмента, минимальный ордер и маржа ещё не проверяются.'}
+          {signalBot
+            ? 'Бот торгует виртуально на всех монетах записи данных Binance; ключи не нужны, реальные заявки не отправляются. Комиссии — пример, укажите свои.'
+            : leaderLag
+              ? 'Бот работает только в живой симуляции: реальные заявки не отправляются, ключи не нужны. Биржа сигнала — поводырь: бот входит на своей бирже, когда она отстаёт от движения биржи сигнала. Комиссии — пример, укажите свои.'
+              : 'Создаётся черновик экземпляра. Алгоритм ещё не реализован, запуск недоступен.'}{' '}
+          {form.strategy === 'impulse' &&
+            'Доступность инструмента, минимальный ордер и маржа ещё не проверяются.'}
         </span>
       </div>
       {error && (

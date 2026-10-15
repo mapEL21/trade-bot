@@ -106,6 +106,7 @@ export function Scanner() {
             <Database size={18} aria-hidden="true" /> Запись данных · Binance
           </h2>
           <span className={`research-status ${running ? 'is-live' : ''}`} role="status">
+            <span className={`live-dot ${running ? 'on' : ''}`} aria-hidden="true" />
             {snapshot ? states[snapshot.state] : 'Загрузка'}
           </span>
         </div>

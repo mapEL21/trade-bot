@@ -37,15 +37,52 @@ export interface LeaderLagParameters {
   leverage: number;
 }
 export const maxLeverage = 125;
+// A bot that trades one signal of the lab on every coin of the data recording (SignalParameters on the server).
+// riskPct: the share of the deposit lost at the stop, fees included; the size follows from it and the stop distance.
+export interface SignalParameters {
+  signal: string;
+  mode: 'follow' | 'fade';
+  holdSeconds: number;
+  riskPct: number;
+  // The stop is this many typical 1-minute ranges of the coin away from the entry.
+  stopRanges: number;
+  // A trade is skipped when the round-trip fees would be more than this share of its risk.
+  maxFeeShare: number;
+  feePct: number;
+  maxLeverage: number;
+  maxPositions: number;
+}
+export const signalTypes = [
+  'Вынос цены',
+  'Каскад ликвидаций',
+  'Всплеск объёма',
+  'Перекос агрессора',
+  'Перекос стакана',
+  'Пробой уровня',
+];
+export const signalVersion = '0.1.0';
+// The hypothesis under check: follow a forced price jerk for 5 minutes, risking 1.5% of the deposit with fees.
+export const defaultSignalParameters: SignalParameters = {
+  signal: 'Вынос цены',
+  mode: 'follow',
+  holdSeconds: 300,
+  riskPct: 1.5,
+  stopRanges: 2,
+  maxFeeShare: 0.3,
+  feePct: 0.1,
+  maxLeverage: 20,
+  maxPositions: 3,
+};
 export interface BotConfig {
   name: string;
   exchange: Exchange;
   symbol: string;
   budget: number;
   lossLimit: number;
-  strategy: 'impulse' | 'leader-lag';
+  strategy: 'impulse' | 'leader-lag' | 'signal';
   strategyVersion: string;
   parameters?: LeaderLagParameters;
+  signal?: SignalParameters;
 }
 export interface Trade {
   id: string;
@@ -319,6 +356,7 @@ export function validateConfig(value: unknown): BotConfig {
     'strategy',
     'strategyVersion',
     'parameters',
+    'signal',
   ];
   if (Object.keys(v).some((k) => !allowed.includes(k)))
     throw new Error(
@@ -326,6 +364,7 @@ export function validateConfig(value: unknown): BotConfig {
     );
   if (typeof v.name !== 'string' || !v.name.trim() || v.name.trim().length > 40)
     throw new Error('Название должно содержать от 1 до 40 символов.');
+  if (v.strategy === 'signal') return validateSignalBot(v);
   const leaderLag = v.strategy === 'leader-lag';
   if (!(leaderLag ? paperExchanges : exchanges).includes(v.exchange as Exchange))
     throw new Error(
@@ -387,8 +426,70 @@ export function validateConfig(value: unknown): BotConfig {
     strategyVersion: '0.1.0',
   };
 }
+const inRange = (n: unknown, min: number, max: number) =>
+  typeof n === 'number' && Number.isFinite(n) && n >= min && n <= max;
+function validateSignalBot(v: Record<string, unknown>): BotConfig {
+  if (v.exchange !== 'Binance' || v.symbol !== '*')
+    throw new Error('Бот сигнала торгует все монеты записи данных Binance.');
+  if (!inRange(v.budget, 1, 1000000))
+    throw new Error('Депозит бота должен быть от 1 до 1 000 000 USDT.');
+  if (!inRange(v.lossLimit, 0.01, v.budget as number))
+    throw new Error('Лимит убытка должен быть больше нуля и не больше депозита.');
+  if (
+    typeof v.strategyVersion !== 'string' ||
+    !/^\d{1,4}\.\d{1,5}\.\d{1,6}$/.test(v.strategyVersion)
+  )
+    throw new Error('Неизвестная версия бота сигнала.');
+  const s = v.signal as Record<string, unknown> | undefined;
+  if (!s || typeof s !== 'object') throw new Error('Укажите настройки сигнала.');
+  const p = { ...defaultSignalParameters, ...s } as SignalParameters;
+  if (!signalTypes.includes(p.signal)) throw new Error('Выберите сигнал из лаборатории.');
+  if (p.mode !== 'follow' && p.mode !== 'fade')
+    throw new Error('Направление — по движению или против.');
+  if (!inRange(p.holdSeconds, 5, 300) || !Number.isInteger(p.holdSeconds))
+    throw new Error('Удержание — целое число секунд от 5 до 300.');
+  if (!inRange(p.riskPct, 0.1, 5)) throw new Error('Риск на сделку — от 0,1 до 5% депозита.');
+  if (!inRange(p.stopRanges, 0.5, 20))
+    throw new Error('Стоп — от 0,5 до 20 обычных минутных свечей.');
+  if (!inRange(p.maxFeeShare, 0.05, 0.9)) throw new Error('Доля комиссии в риске — от 5 до 90%.');
+  if (!inRange(p.feePct, 0, 1)) throw new Error('Комиссии круга — от 0 до 1%.');
+  if (!inRange(p.maxLeverage, 1, maxLeverage) || !Number.isInteger(p.maxLeverage))
+    throw new Error(`Плечо — целое число от 1 до ${maxLeverage}.`);
+  if (!inRange(p.maxPositions, 1, 20) || !Number.isInteger(p.maxPositions))
+    throw new Error('Одновременных сделок — от 1 до 20.');
+  return {
+    name: (v.name as string).trim(),
+    exchange: 'Binance',
+    symbol: '*',
+    budget: v.budget as number,
+    lossLimit: v.lossLimit as number,
+    strategy: 'signal',
+    strategyVersion: v.strategyVersion,
+    signal: {
+      signal: p.signal,
+      mode: p.mode,
+      holdSeconds: p.holdSeconds,
+      riskPct: p.riskPct,
+      stopRanges: p.stopRanges,
+      maxFeeShare: p.maxFeeShare,
+      feePct: p.feePct,
+      maxLeverage: p.maxLeverage,
+      maxPositions: p.maxPositions,
+    },
+  };
+}
 export function exportConfig(bot: Bot): string {
-  const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion, parameters } = bot;
+  const {
+    name,
+    exchange,
+    symbol,
+    budget,
+    lossLimit,
+    strategy,
+    strategyVersion,
+    parameters,
+    signal,
+  } = bot;
   return JSON.stringify(
     {
       schemaVersion: 1,
@@ -401,6 +502,7 @@ export function exportConfig(bot: Bot): string {
         strategy,
         strategyVersion,
         ...(parameters ? { parameters } : {}),
+        ...(signal ? { signal } : {}),
       },
     },
     null,
@@ -436,8 +538,17 @@ export function parseWorkspace(text: string): Workspace {
   const ids = new Set<string>();
   for (const bot of v.bots) {
     if (!bot || typeof bot !== 'object') throw new Error('Invalid bot');
-    const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion, parameters } =
-      bot;
+    const {
+      name,
+      exchange,
+      symbol,
+      budget,
+      lossLimit,
+      strategy,
+      strategyVersion,
+      parameters,
+      signal,
+    } = bot;
     const checked = validateConfig({
       name,
       exchange,
@@ -447,7 +558,9 @@ export function parseWorkspace(text: string): Workspace {
       strategy,
       strategyVersion,
       ...(parameters ? { parameters } : {}),
+      ...(signal ? { signal } : {}),
     });
+    if (checked.signal) bot.signal = checked.signal;
     // Older records lack later settings (leverage, reversal threshold): use the filled-in values.
     if (checked.parameters) bot.parameters = checked.parameters;
     if (

@@ -3,6 +3,7 @@ import {
   type Bot,
   type BotConfig,
   type LeaderLagSettings,
+  type SignalParameters,
   type Trade,
   type Workspace,
 } from './model';
@@ -33,6 +34,8 @@ export interface StrategyDefinition {
   canCreate: boolean;
   canRun: boolean;
   exchanges: string[];
+  // Kept for existing bots, no longer offered for new ones.
+  retired?: boolean;
 }
 
 export interface ResearchMarketList {
@@ -263,7 +266,42 @@ export const api = {
     request<PaperSnapshot>(`/bots/${bot.id}/paper`, { signal }),
   paperRuns: (bot: Bot, signal?: AbortSignal) =>
     request<PaperRunRecord[]>(`/bots/${bot.id}/runs`, { signal }),
+  signalRuns: (bot: Bot, signal?: AbortSignal) =>
+    request<SignalRunView[]>(`/bots/${bot.id}/signal`, { signal }),
+  // fromMs: also replay the recordings since that moment; without it the bot trades from now on.
+  startSignal: (bot: Bot, fromMs: number | null) =>
+    request<SignalRun>(`/bots/${bot.id}/signal/start`, {
+      method: 'POST',
+      body: JSON.stringify(fromMs === null ? {} : { fromMs }),
+    }),
+  stopSignal: (bot: Bot) => request<void>(`/bots/${bot.id}/signal/stop`, { method: 'POST' }),
 };
+
+// A signal bot run follows the processed recordings from fromMs; trades are computed from them.
+export interface SignalRun {
+  id: string;
+  botId: string;
+  fromMs: number;
+  toMs: number | null;
+  startedUtc: string;
+  budget: number;
+  lossLimit: number;
+  parameters: SignalParameters;
+}
+export interface SignalRunView {
+  run: SignalRun;
+  state: 'running' | 'stopped';
+  result: {
+    trades: Trade[];
+    skipped: Record<string, number>;
+    signals: number;
+    incomplete: number;
+    deposit: number;
+    recordings: number;
+    lastDataMs: number | null;
+    entriesBlocked: string | null;
+  };
+}
 
 export interface PaperDecision {
   seconds: number;

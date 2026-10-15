@@ -7,9 +7,10 @@ namespace TradeBot.Api;
 
 // One detected event and the best prices after it: at entry, 250 ms after the event, and at each horizon. A long buys at the
 // ask and sells at the bid, a short the other way round, so both trading with the event and against it pay the spread.
-// A horizon is null when the book was stale then or the recording ended first.
+// A horizon is null when the book was stale then or the recording ended first. TypicalPct: the coin's average 1-minute range
+// (high - low) / low over the hour before the event, %, null with less than 30 minutes known; the bot sets its stop from it.
 public sealed record LabEvent(string Symbol, string Type, int Direction, long AtMs, decimal Price, string Detail, decimal? EntryBid = null,
-    decimal? EntryAsk = null, decimal?[]? ExitBid = null, decimal?[]? ExitAsk = null)
+    decimal? EntryAsk = null, decimal?[]? ExitBid = null, decimal?[]? ExitAsk = null, decimal? TypicalPct = null)
 {
     // Percent result of a long or a short through horizon i, before fees; null when unknown.
     public decimal? Move(int i, bool withEvent)
@@ -23,12 +24,24 @@ public sealed record LabEvent(string Symbol, string Type, int Direction, long At
 }
 public sealed record LabRecording(int Version, string Id, long FirstMs, long LastMs, int Symbols, LabEvent[] Events);
 
+// The best prices after one event's entry, second by second for 5 minutes, so a bot can replay stops and any holding time.
+// Samples[k] covers the (k+1)-th second after the entry: last bid, last ask, lowest bid and highest ask among the fresh book
+// updates in that second, each in 0.1 bp from the entry mid; null when the coin had no fresh book in that second or the
+// recording ended. Index is the event's position in LabRecording.Events.
+public sealed record LabPath(int Index, string Type, int[]?[] Samples)
+{
+    public const int Seconds = 300;
+    public static int Rel(decimal price, decimal mid) => (int)Math.Round((price / mid - 1) * 100_000);
+    public static decimal Abs(int rel, decimal mid) => mid * (1 + rel / 100_000m);
+}
+
 // Finds events in a scan recording using only data up to each moment, then measures what price did next. The thresholds are
 // fixed (version 1): tuning them on the same data would find patterns that are not there.
 public sealed class SignalDetector
 {
     // 2: an event before the coin's first book snapshot no longer gets a zero entry price.
-    public const int Version = 2;
+    // 3: the price path after each entry (LabPath) and the coin's typical minute range are kept for the bot; results are the same.
+    public const int Version = 3;
     public static readonly int[] Horizons = [5, 15, 60, 300];
     public static readonly string[] Types = ["Всплеск объёма", "Перекос агрессора", "Каскад ликвидаций", "Вынос цены", "Перекос стакана", "Пробой уровня"];
     private const long Window = 10_000, Baseline = 15 * 60_000, Cooldown = 60_000, Latency = 250, BookAge = 2_000;
@@ -38,6 +51,7 @@ public sealed class SignalDetector
         public LabEvent Event = e; public decimal? Ask, Bid;
         public decimal?[] ExitBid = new decimal?[Horizons.Length], ExitAsk = new decimal?[Horizons.Length];
         public bool[] Done = new bool[Horizons.Length];
+        public readonly int[]?[] Samples = new int[]?[LabPath.Seconds];
     }
     private sealed class State
     {
@@ -179,6 +193,8 @@ public sealed class SignalDetector
     {
         if (cooldown && state.Last.TryGetValue(e.Type, out var last) && e.AtMs - last < Cooldown) return;
         state.Last[e.Type] = e.AtMs;
+        var ranges = state.Minutes.TakeLast(61).SkipLast(1).Where(m => m.Low > 0).Select(m => (m.High - m.Low) / m.Low).ToList();
+        if (ranges.Count >= 30) e = e with { TypicalPct = Math.Round(ranges.Average() * 100, 4) };
         var pending = new Pending(e);
         state.Pending.Add(pending); all.Add(pending);
         firstMs = Math.Min(firstMs, e.AtMs);
@@ -199,6 +215,14 @@ public sealed class SignalDetector
                 p.Ask = state.Ask; p.Bid = state.Bid;
             }
             if (p.Ask is null) continue;
+            var elapsed = ms - (at + Latency);
+            if (fresh && elapsed > 0 && elapsed <= LabPath.Seconds * 1000L)
+            {
+                var mid = (p.Ask.Value + p.Bid!.Value) / 2;
+                int bid = LabPath.Rel(state.Bid, mid), ask = LabPath.Rel(state.Ask, mid);
+                ref var sample = ref p.Samples[(int)((elapsed + 999) / 1000) - 1];
+                sample = sample is null ? [bid, ask, bid, ask] : [bid, ask, Math.Min(sample[2], bid), Math.Max(sample[3], ask)];
+            }
             for (var i = 0; i < Horizons.Length; i++)
             {
                 if (p.Done[i] || ms < at + Latency + Horizons[i] * 1000L) continue;
@@ -214,12 +238,19 @@ public sealed class SignalDetector
     public LabRecording Result(string id) => new(Version, id, firstMs == long.MaxValue ? 0 : firstMs, lastMs, states.Count,
         all.Select(p => p.Event with { EntryAsk = p.Ask, EntryBid = p.Bid, ExitBid = p.ExitBid, ExitAsk = p.ExitAsk }).ToArray());
 
+    // Paths of the events that got an entry, in the order of Result().Events.
+    public List<LabPath> Paths() => all.Select((p, i) => (p, i)).Where(x => x.p.Ask is not null)
+        .Select(x => new LabPath(x.i, x.p.Event.Type, x.p.Samples)).ToList();
+
     private static decimal Dec(JsonElement e, string name) => Dec(e.GetProperty(name));
     private static decimal Dec(JsonElement e) => e.ValueKind == JsonValueKind.Number ? e.GetDecimal()
         : decimal.Parse(e.GetString()!, NumberStyles.Float, CultureInfo.InvariantCulture);
 
     // Runs a whole finished scan recording, plain or compressed.
-    public static LabRecording Run(string directory, CancellationToken ct, Action<long>? progress = null)
+    public static LabRecording Run(string directory, CancellationToken ct, Action<long>? progress = null) =>
+        RunFull(directory, ct, progress).Recording;
+
+    public static (LabRecording Recording, List<LabPath> Paths) RunFull(string directory, CancellationToken ct, Action<long>? progress = null)
     {
         using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "manifest.json")));
         var volumes = manifest.RootElement.GetProperty("symbols").EnumerateArray()
@@ -242,6 +273,6 @@ public sealed class SignalDetector
             catch (Exception e) when (e is JsonException or KeyNotFoundException or InvalidOperationException or FormatException or IndexOutOfRangeException) { }
         }
         progress?.Invoke(lines);
-        return detector.Result(Path.GetFileName(directory));
+        return (detector.Result(Path.GetFileName(directory)), detector.Paths());
     }
 }

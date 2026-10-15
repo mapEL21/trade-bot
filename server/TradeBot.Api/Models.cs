@@ -10,12 +10,14 @@ public sealed record LeaderLagParameters(string SignalExchange, ReplaySettings S
     public const int MaxLeverage = 125;
 }
 
+// Signal: settings of a "signal" bot, which trades every coin of the data recording; its Symbol is "*".
 public record BotConfig(string Name, string Exchange, string Symbol, decimal Budget,
-    decimal LossLimit, string Strategy, string StrategyVersion, LeaderLagParameters? Parameters = null);
+    decimal LossLimit, string Strategy, string StrategyVersion, LeaderLagParameters? Parameters = null, SignalParameters? Signal = null);
 
 public sealed record Bot(string Id, string Name, string Exchange, string Symbol, decimal Budget,
-    decimal LossLimit, string Strategy, string StrategyVersion, string CreatedAt, long Revision, LeaderLagParameters? Parameters = null)
-    : BotConfig(Name, Exchange, Symbol, Budget, LossLimit, Strategy, StrategyVersion, Parameters)
+    decimal LossLimit, string Strategy, string StrategyVersion, string CreatedAt, long Revision, LeaderLagParameters? Parameters = null,
+    SignalParameters? Signal = null)
+    : BotConfig(Name, Exchange, Symbol, Budget, LossLimit, Strategy, StrategyVersion, Parameters, Signal)
 {
     // draft, calibrating, running, paused, stopping, stopped or interrupted; filled from paper runs when the workspace is read.
     public string Status { get; init; } = "draft";
@@ -67,8 +69,9 @@ public sealed record BotTrade(string Id, string At, string Side, decimal Gross, 
 
 public sealed record WorkspaceEvent(string Id, string At, string BotId, string BotName, string Text);
 public sealed record Workspace(int SchemaVersion, Bot[] Bots, WorkspaceEvent[] Events);
+// Retired: kept so existing bots and their history stay valid, but no longer offered for new bots.
 public sealed record StrategyDefinition(string Id, string Version, string Name, string Description,
-    string ImplementationStatus, bool CanCreate, bool CanRun, string[] Exchanges);
+    string ImplementationStatus, bool CanCreate, bool CanRun, string[] Exchanges, bool Retired = false);
 
 // Catalog metadata is deliberately separate from executable strategies.
 public sealed class StrategyCatalog
@@ -76,10 +79,14 @@ public sealed class StrategyCatalog
     public IReadOnlyList<StrategyDefinition> Items { get; } = [new(
         "impulse", "0.1.0", "Импульс",
         "Планируемая стратегия краткосрочных ценовых импульсов. Правила входа и выхода ещё не реализованы.",
-        "planned", true, false, ["Binance", "Bybit", "OKX"]),
+        "planned", true, false, ["Binance", "Bybit", "OKX"], Retired: true),
         new("leader-lag", StrategyReplay.Version, "Поводырь → отстающая биржа",
-        "Ищет биржу, которая раньше показывает движение цены, и входит на отстающей. Доступна живая симуляция: реальные заявки не отправляются.",
-        "paper", true, true, ["Binance", "Bybit", "OKX", "Hyperliquid"])];
+        "Ищет биржу, которая раньше показывает движение цены, и входит на отстающей. Отставание оказалось меньше комиссий; новых ботов не создаём.",
+        "paper", true, true, ["Binance", "Bybit", "OKX", "Hyperliquid"], Retired: true),
+        new(SignalId, SignalVersion, "Сигнал лаборатории",
+        "Торгует выбранный сигнал лаборатории на всех монетах записи данных. Размер позиции — от риска на сделку с учётом комиссий. Симуляция по записям, реальные заявки не отправляются.",
+        "paper", true, true, ["Binance"])];
+    public const string SignalId = "signal", SignalVersion = "0.1.0";
 
     public Dictionary<string, string[]> Validate(BotConfig config)
     {
@@ -108,8 +115,15 @@ public sealed class StrategyCatalog
             }
         }
         else if (config.Parameters is not null) errors["parameters"] = ["У этой стратегии нет дополнительных параметров."];
+        if (config.Strategy == SignalId)
+        {
+            if (config.Signal is not { } signal) errors["signal"] = ["Укажите настройки сигнала."];
+            else foreach (var (key, value) in signal.Validate()) errors[key] = value;
+            if (config.Symbol != "*") errors["symbol"] = ["Бот сигнала торгует все монеты записи данных."];
+        }
+        else if (config.Signal is not null) errors["signal"] = ["Настройки сигнала есть только у бота сигнала."];
         // The same tickers the common pair list offers (1-20 characters), so every listed pair can be saved.
-        if (config.Symbol is null || !Regex.IsMatch(config.Symbol, @"\A[A-Z0-9]{1,20}USDT\z"))
+        if (config.Strategy != SignalId && (config.Symbol is null || !Regex.IsMatch(config.Symbol, @"\A[A-Z0-9]{1,20}USDT\z")))
             errors["symbol"] = ["Укажите символ USDT-фьючерса, например ARBUSDT."];
         if (config.Budget < 1 || config.Budget > 1_000_000)
             errors["budget"] = ["Выделенный баланс должен быть от 1 до 1 000 000 USDT."];

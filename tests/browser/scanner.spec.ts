@@ -67,7 +67,10 @@ test('data recording starts with chosen limits and shows what arrives per coin',
   page.on('pageerror', (e) => errors.push(e.message));
   const state = await server(page);
   await page.goto('/');
-  await page.getByRole('button', { name: 'Лаборатория', exact: true }).first().click();
+  await page
+    .getByRole('button', { name: /^Лаборатория/ })
+    .first()
+    .click();
   await page.getByRole('button', { name: 'Запись данных', exact: true }).click();
   await expect(page.getByRole('heading', { name: /Запись данных · Binance/ })).toBeVisible();
   await page.getByLabel('Объём за 24 ч от, млн $').fill('200');
@@ -232,7 +235,10 @@ test('signal lab runs the recordings, ranks signals after fees and charts the ch
     }),
   );
   await page.goto('/');
-  await page.getByRole('button', { name: 'Лаборатория', exact: true }).first().click();
+  await page
+    .getByRole('button', { name: /^Лаборатория/ })
+    .first()
+    .click();
   await expect(page.getByRole('heading', { name: /Лаборатория сигналов/ })).toBeVisible();
   // The pre-registered check: progress per signal, no verdict before 50 episodes.
   const hypothesis = page.locator('.hypothesis');

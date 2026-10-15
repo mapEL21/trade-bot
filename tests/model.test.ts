@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   csvCell,
   defaultLeaderLagSettings,
+  defaultSignalParameters,
   exportConfig,
   importConfig,
   metrics,
@@ -259,4 +260,37 @@ test('trade quality separates entry and exit problems and groups exit reasons', 
   assert.ok(Math.abs(q.reasons[0].avgFavorableBps! - 8) < 1e-9);
   assert.ok(Math.abs(q.profitFactor! - 0.01 / 0.046) < 1e-9);
   assert.equal(tradeQuality([]).avgNet, null);
+});
+
+test('signal bot settings: every coin of the recording, risk and limits checked, round trip through export', () => {
+  const config = {
+    name: 'Вынос цены · 5 мин',
+    exchange: 'Binance' as const,
+    symbol: '*',
+    budget: 100,
+    lossLimit: 30,
+    strategy: 'signal' as const,
+    strategyVersion: '0.1.0',
+    signal: defaultSignalParameters,
+  };
+  assert.deepEqual(validateConfig(config), config);
+  assert.equal(defaultSignalParameters.riskPct, 1.5);
+  assert.throws(() => validateConfig({ ...config, symbol: 'ARBUSDT' }), /все монеты/);
+  assert.throws(
+    () => validateConfig({ ...config, signal: { ...defaultSignalParameters, riskPct: 9 } }),
+    /Риск на сделку/,
+  );
+  assert.throws(
+    () => validateConfig({ ...config, signal: { ...defaultSignalParameters, signal: 'Луна' } }),
+    /сигнал/,
+  );
+  const bot = {
+    ...config,
+    id: 'b',
+    status: 'draft',
+    trades: [],
+    createdAt: '2026-10-01T00:00:00Z',
+    revision: 1,
+  } as unknown as Bot;
+  assert.deepEqual(importConfig(exportConfig(bot)), config);
 });

@@ -30,7 +30,11 @@ test('catalog creates a server instance that survives a new browser, edits, expo
       (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze()).violations,
     ).toEqual([]);
     await page.getByRole('button', { name: 'Создать бота' }).first().click();
-    await expect(page.getByRole('dialog').getByRole('radio', { name: /Импульс/ })).toBeChecked();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('radio', { name: /Сигнал лаборатории/ })).toBeChecked();
+    // Strategies that do not work are no longer offered for new bots.
+    await expect(dialog.getByRole('radio', { name: /Импульс|Поводырь/ })).toHaveCount(0);
+    await expect(dialog.getByText(/Пример: монета с обычной минутной свечой 0,3%/)).toBeVisible();
     await page.getByLabel('Название бота').fill(name);
     const responsePromise = page.waitForResponse(
       (response) =>
@@ -44,15 +48,22 @@ test('catalog creates a server instance that survives a new browser, edits, expo
     expect(response.status()).toBe(201);
     id = (await response.json()).id;
     await expect(page.getByRole('heading', { name })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Алгоритм в разработке' })).toBeDisabled();
     await expect(page.getByText('Здесь появится кривая результата')).toBeVisible();
+    // Started and stopped on the server; the menu shows whether a bot works.
+    const botsNav = page.getByRole('button', { name: /^Боты/ }).first();
+    await expect(botsNav.getByRole('img', { name: 'Ни один бот не запущен' })).toBeVisible();
+    await page.getByRole('button', { name: 'Запустить с этого момента' }).click();
+    await expect(page.locator('.signal-run').getByRole('status')).toHaveText('Работает');
+    await expect(botsNav.getByRole('img', { name: 'Есть работающие боты' })).toBeVisible();
+    await page.getByRole('button', { name: 'Остановить' }).click();
+    await expect(page.locator('.signal-run').getByRole('status')).toHaveText('Не запущен');
 
     const secondContext = await browser.newContext();
     const second = await secondContext.newPage();
     await second.goto('http://127.0.0.1:5175/');
     await expect(second.getByText('Данные загружены с сервера')).toBeVisible();
     await second.getByRole('button', { name: /^Боты/ }).first().click();
-    await second.getByRole('button', { name: `${name} Импульс v0.1.0` }).click();
+    await second.getByRole('button', { name: `${name} Сигнал лаборатории v0.1.0` }).click();
     await expect(second.getByRole('heading', { name })).toBeVisible();
     await second.getByRole('button', { name: 'Настройки', exact: true }).click();
     await second.getByLabel('Название бота').fill(`${name} v2`);
@@ -68,10 +79,12 @@ test('catalog creates a server instance that survives a new browser, edits, expo
     await expect(page.getByRole('heading', { name: `${name} v2` })).toBeVisible();
     const downloadPromise = page.waitForEvent('download');
     await page.getByRole('button', { name: 'Экспорт', exact: true }).click();
-    expect((await downloadPromise).suggestedFilename()).toBe('arbusdt-bot.json');
+    expect((await downloadPromise).suggestedFilename()).toBe('signal-bot.json');
     await page.getByRole('button', { name: 'Удалить', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Удалить', exact: true }).click();
-    await expect(page.getByRole('button', { name: `${name} v2 Импульс v0.1.0` })).toHaveCount(0);
+    await expect(
+      page.getByRole('button', { name: `${name} v2 Сигнал лаборатории v0.1.0` }),
+    ).toHaveCount(0);
   } finally {
     if (id) {
       const stored = await request.get(`/api/v1/bots/${id}`);
