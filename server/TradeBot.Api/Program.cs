@@ -138,14 +138,14 @@ api.MapGet("/scanner/stats", (decimal? feePct, MarketScanner scanner) =>
 api.MapGet("/lab/status", (SignalLab lab) => Results.Ok(lab.Status));
 api.MapPost("/lab/run", (SignalLab lab) => lab.Start()
     ? Results.Accepted("/api/v1/lab/status") : Results.Problem(statusCode: 409, title: "Записи уже обрабатываются."));
-api.MapGet("/lab/report", (decimal? feePct, SignalLab lab) =>
+api.MapGet("/lab/report", (decimal? feePct, long? fromMs, SignalLab lab) =>
 {
-    try { return Results.Ok(lab.Report(feePct ?? 0.1m)); }
+    try { return Results.Ok(lab.Report(feePct ?? 0.1m, fromMs)); }
     catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
 });
-api.MapGet("/lab/trades", (string type, string mode, int horizon, decimal? feePct, SignalLab lab) =>
+api.MapGet("/lab/trades", (string type, string mode, int horizon, decimal? feePct, long? fromMs, SignalLab lab) =>
 {
-    try { return Results.Ok(lab.Trades(type, mode, horizon, feePct ?? 0.1m)); }
+    try { return Results.Ok(lab.Trades(type, mode, horizon, feePct ?? 0.1m, fromMs)); }
     catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
 });
 api.MapGet("/scanner/symbols/{symbol}", (string symbol, MarketScanner scanner) => scanner.Detail(symbol) is { } detail

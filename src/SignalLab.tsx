@@ -12,6 +12,17 @@ const pct = (n: number | null) =>
     : `${n > 0 ? '+' : ''}${n.toLocaleString('ru-RU', { maximumFractionDigits: 3 })}%`;
 const tone = (n: number | null) => (n === null ? '' : n > 0 ? 'positive' : n < 0 ? 'negative' : '');
 const key = (r: LabRow) => `${r.type}|${r.mode}|${r.horizon}`;
+// The "from" moment of the check is a per-viewer setting, kept in this browser only.
+const fromKey = 'trade-bot.lab-from';
+function savedFrom() {
+  try {
+    return localStorage.getItem(fromKey) ?? '';
+  } catch {
+    return '';
+  }
+}
+// datetime-local value (local time) to epoch ms; empty means all data.
+const fromMsOf = (value: string) => (value ? new Date(value).getTime() : null);
 
 // The signal lab: for every event type, trading with or against it, and every holding time — what it would have made after
 // fees and spread on the recorded data, and whether that holds on both halves of the events. Research only, no orders.
@@ -20,14 +31,15 @@ export function SignalLabPanel() {
   const [report, setReport] = useState<LabReport | null>(null);
   const [fee, setFee] = useState(0.1);
   const [all, setAll] = useState(false);
+  const [from, setFrom] = useState(savedFrom);
   const [selected, setSelected] = useState<LabRow | null>(null);
   const [trades, setTrades] = useState<Trade[] | null>(null);
   const [error, setError] = useState('');
 
-  async function load(feePct = fee) {
+  async function load(feePct = fee, since = from) {
     if (!Number.isFinite(feePct)) return;
     try {
-      setReport(await api.labReport(feePct));
+      setReport(await api.labReport(feePct, fromMsOf(since)));
       setError('');
     } catch (e) {
       setError((e as Error).message);
@@ -63,7 +75,7 @@ export function SignalLabPanel() {
     if (!selected) return;
     let stopped = false;
     api
-      .labTrades(selected, fee)
+      .labTrades(selected, fee, fromMsOf(from))
       .then((t) => {
         if (!stopped) setTrades(t);
       })
@@ -86,7 +98,7 @@ export function SignalLabPanel() {
 
   const running = status?.state === 'running';
   const rows = (report?.rows ?? [])
-    .filter((r) => r.count > 0 && (all || r.count >= 30))
+    .filter((r) => r.episodes > 0 && (all || r.episodes >= 30))
     .sort((a, b) => b.meanPct - a.meanPct);
   const stable = rows.filter((r) => r.stable).length;
   return (
@@ -125,12 +137,43 @@ export function SignalLabPanel() {
               onChange={(e) => setFee(e.target.valueAsNumber)}
             />
           </label>
+          <label className="field lab-from">
+            <span>Только события с</span>
+            <input
+              type="datetime-local"
+              value={from}
+              onChange={(e) => {
+                setFrom(e.target.value);
+                try {
+                  localStorage.setItem(fromKey, e.target.value);
+                } catch {
+                  // Storage may be unavailable; the choice then lasts for this page only.
+                }
+              }}
+            />
+          </label>
           <button className="button secondary" onClick={() => void load()}>
             Пересчитать
           </button>
+          {from && (
+            <button
+              className="text-button"
+              onClick={() => {
+                setFrom('');
+                try {
+                  localStorage.removeItem(fromKey);
+                } catch {
+                  // See above.
+                }
+                void load(fee, '');
+              }}
+            >
+              Все данные
+            </button>
+          )}
           <label className="checkbox-field">
             <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />
-            <span>Показывать и редкие (меньше 30 событий)</span>
+            <span>Показывать и редкие (меньше 30 эпизодов)</span>
           </label>
         </div>
         {status && status.state !== 'idle' && !running && (
@@ -149,15 +192,19 @@ export function SignalLabPanel() {
               {report.counts.map((c) => (
                 <div className="quality-item" key={c.type}>
                   <span>{c.type}</span>
-                  <strong>{c.count}</strong>
-                  <small>{c.perHour.toLocaleString('ru-RU')} в час</small>
+                  <strong>{c.episodes}</strong>
+                  <small>
+                    эпизодов · событий {c.count} · {c.perHour.toLocaleString('ru-RU')} в час
+                  </small>
                 </div>
               ))}
             </div>
             <p className={stable > 0 ? 'quality-hint positive' : 'quality-hint'}>
               {stable > 0
                 ? `Устойчиво в плюсе после комиссий: ${stable}. Это кандидаты — их нужно подтвердить на новых днях.`
-                : 'Устойчиво прибыльных сигналов пока нет: ни одна комбинация не в плюсе на обеих половинах данных при 100+ событиях.'}
+                : 'Устойчиво прибыльных сигналов пока нет: ни одна комбинация не в плюсе на обеих половинах данных при 100+ эпизодах.'}
+              {report.fromMs !== null &&
+                ` Учтены только события с ${new Date(report.fromMs).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })} (МСК).`}
             </p>
             <div
               className="table-scroll"
@@ -172,6 +219,7 @@ export function SignalLabPanel() {
                     <th>Сигнал</th>
                     <th>Сделка</th>
                     <th>Время</th>
+                    <th>Эпизодов</th>
                     <th>Событий</th>
                     <th>Средний результат</th>
                     <th>Прибыльных</th>
@@ -193,6 +241,7 @@ export function SignalLabPanel() {
                       </td>
                       <td>{modes[r.mode]}</td>
                       <td>{horizons[r.horizon] ?? `${r.horizon} с`}</td>
+                      <td>{r.episodes}</td>
                       <td>{r.count}</td>
                       <td className={tone(r.meanPct)}>{pct(r.meanPct)}</td>
                       <td>{r.winRate.toLocaleString('ru-RU')}%</td>

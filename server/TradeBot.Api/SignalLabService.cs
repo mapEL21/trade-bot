@@ -4,10 +4,12 @@ using System.Text.RegularExpressions;
 namespace TradeBot.Api;
 
 public sealed record LabStatus(string State, string Explanation, int Done, int Total, long Lines, string? Current);
+// Count: events with a known result; Episodes: independent market moments they form. Mean, win rate and halves are per episode.
 public sealed record LabRow(string Type, string Mode, int Horizon, int Count, decimal MeanPct, decimal WinRate, decimal? FirstHalf,
-    decimal? SecondHalf, bool Stable);
-public sealed record LabCount(string Type, int Count, decimal PerHour);
-public sealed record LabReport(int Recordings, decimal Hours, int Events, decimal FeePct, LabCount[] Counts, LabRow[] Rows, string[] Notes);
+    decimal? SecondHalf, bool Stable, int Episodes = 0);
+public sealed record LabCount(string Type, int Count, decimal PerHour, int Episodes = 0);
+public sealed record LabReport(int Recordings, decimal Hours, int Events, decimal FeePct, LabCount[] Counts, LabRow[] Rows, string[] Notes,
+    long? FromMs = null);
 
 // The signal lab: runs every finished scanner recording through SignalDetector once (the result is kept next to the recording
 // as signal-lab-v1.json) and then sums up, for every event type, both trading directions and every horizon, what the trade
@@ -16,6 +18,24 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
 {
     public const string File = "signal-lab-v1.json";
     public const int MinCount = 100;
+    // Events of one type and direction starting within this time of each other, on any coins, are one market moment.
+    public const long EpisodeMs = 10_000;
+
+    // A market-wide jerk fires the same event on many coins at once; counting each would multiply one observation.
+    public static List<List<LabEvent>> Episodes(IEnumerable<LabEvent> events)
+    {
+        var episodes = new List<List<LabEvent>>();
+        foreach (var group in events.GroupBy(e => (e.Type, e.Direction)))
+        {
+            List<LabEvent>? current = null;
+            foreach (var e in group.OrderBy(e => e.AtMs))
+            {
+                if (current is null || e.AtMs - current[0].AtMs > EpisodeMs) episodes.Add(current = []);
+                current.Add(e);
+            }
+        }
+        return episodes.OrderBy(e => e[0].AtMs).ToList();
+    }
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private readonly object gate = new();
     private readonly CancellationTokenSource shutdown = new();
@@ -77,45 +97,57 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
 
     private List<LabRecording> Load() => Recordings().Select(Cached).OfType<LabRecording>().ToList();
 
-    public LabReport Report(decimal feePct)
+    // fromMs: only events from this moment on, so a hypothesis chosen earlier is checked on data it was not chosen on.
+    public LabReport Report(decimal feePct, long? fromMs = null)
     {
         if (feePct is < 0 or > 1) throw new ArgumentException("Комиссии круга — от 0 до 1%.");
-        var recordings = Load();
-        var events = recordings.SelectMany(r => r.Events).OrderBy(e => e.AtMs).ToList();
-        var hours = recordings.Sum(r => Math.Max(0, r.LastMs - r.FirstMs)) / 3_600_000m;
+        if (fromMs is < 0) throw new ArgumentException("Некорректная дата начала.");
+        var from = fromMs ?? 0;
+        var recordings = Load().Where(r => r.LastMs >= from).ToList();
+        var events = recordings.SelectMany(r => r.Events).Where(e => e.AtMs >= from).OrderBy(e => e.AtMs).ToList();
+        var hours = recordings.Sum(r => Math.Max(0, r.LastMs - Math.Max(r.FirstMs, from))) / 3_600_000m;
+        var episodes = Episodes(events);
         var rows = new List<LabRow>();
         foreach (var type in SignalDetector.Types)
             foreach (var withEvent in new[] { true, false })
                 for (var i = 0; i < SignalDetector.Horizons.Length; i++)
                 {
-                    var values = events.Where(e => e.Type == type).Select(e => e.Move(i, withEvent)).OfType<decimal>().Select(v => v - feePct).ToList();
+                    // One value per episode: the average result of its events with a known exit, after fees.
+                    var known = episodes.Where(ep => ep[0].Type == type)
+                        .Select(ep => ep.Select(e => e.Move(i, withEvent)).OfType<decimal>().ToList()).Where(m => m.Count > 0).ToList();
+                    var values = known.Select(m => m.Average() - feePct).ToList();
                     if (values.Count == 0) { rows.Add(new(type, withEvent ? "follow" : "fade", SignalDetector.Horizons[i], 0, 0, 0, null, null, false)); continue; }
                     var half = values.Count / 2;
                     decimal? Mean(IEnumerable<decimal> v) => v.Any() ? Math.Round(v.Average(), 4) : null;
                     var first = Mean(values.Take(half)); var second = Mean(values.Skip(half));
-                    rows.Add(new(type, withEvent ? "follow" : "fade", SignalDetector.Horizons[i], values.Count, Math.Round(values.Average(), 4),
+                    rows.Add(new(type, withEvent ? "follow" : "fade", SignalDetector.Horizons[i], known.Sum(m => m.Count), Math.Round(values.Average(), 4),
                         Math.Round(values.Count(v => v > 0) * 100m / values.Count, 1), first, second,
-                        values.Count >= MinCount && first > 0 && second > 0));
+                        values.Count >= MinCount && first > 0 && second > 0, values.Count));
                 }
-        var counts = SignalDetector.Types.Select(t => { var n = events.Count(e => e.Type == t); return new LabCount(t, n, hours > 0 ? Math.Round(n / hours, 1) : 0); }).ToArray();
+        var counts = SignalDetector.Types.Select(t =>
+        {
+            var n = events.Count(e => e.Type == t);
+            return new LabCount(t, n, hours > 0 ? Math.Round(n / hours, 1) : 0, episodes.Count(ep => ep[0].Type == t));
+        }).ToArray();
         string[] notes =
         [
             "Вход через 0,25 с после события по встречной цене стакана (покупка по ask, продажа по bid), выход через выбранное время тоже по встречной цене: спред уже учтён. Из результата вычтены комиссии круга.",
-            "«По движению» — сделка в сторону события, «против» — в обратную. Половины — первые и вторые 50% событий по времени; «устойчиво» — от " + MinCount + " событий и плюс на обеих половинах.",
+            "Эпизод — события одного типа и направления, начавшиеся в пределах 10 с друг от друга на любых монетах: общий рывок рынка на десяти монетах — одно наблюдение, а не десять. Средний результат, доля прибыльных и половины считаются по эпизодам.",
+            "«По движению» — сделка в сторону события, «против» — в обратную. Половины — первые и вторые 50% эпизодов по времени; «устойчиво» — от " + MinCount + " эпизодов и плюс на обеих половинах.",
             $"Комбинаций {SignalDetector.Types.Length * 2 * SignalDetector.Horizons.Length}: часть может оказаться в плюсе случайно. Найденное нужно проверить на новых днях, прежде чем строить на нём бота.",
             "Проскальзывание глубже лучшей цены и задержка исполнения больше 0,25 с не учтены: для крупных заявок и медленного подключения результат будет хуже.",
         ];
-        return new(recordings.Count, Math.Round(hours, 2), events.Count, feePct, counts, rows.ToArray(), notes);
+        return new(recordings.Count, Math.Round(hours, 2), events.Count, feePct, counts, rows.ToArray(), notes, fromMs);
     }
 
     // Trades of one signal for the result chart: 100 USDT each, entry and exit at the recorded best prices.
-    public BotTrade[] Trades(string type, string mode, int horizon, decimal feePct)
+    public BotTrade[] Trades(string type, string mode, int horizon, decimal feePct, long? fromMs = null)
     {
         var i = Array.IndexOf(SignalDetector.Horizons, horizon);
         if (!SignalDetector.Types.Contains(type) || mode is not ("follow" or "fade") || i < 0 || feePct is < 0 or > 1)
             throw new ArgumentException("Неизвестный сигнал, направление или время.");
         var withEvent = mode == "follow";
-        return Load().SelectMany(r => r.Events).Where(e => e.Type == type).OrderBy(e => e.AtMs).Select((e, n) =>
+        return Load().SelectMany(r => r.Events).Where(e => e.Type == type && e.AtMs >= (fromMs ?? 0)).OrderBy(e => e.AtMs).Select((e, n) =>
         {
             if (e.Move(i, withEvent) is not { } move) return null;
             var longSide = (e.Direction > 0) == withEvent;

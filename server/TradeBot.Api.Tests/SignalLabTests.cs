@@ -114,5 +114,38 @@ public sealed class SignalLabTests : IDisposable
         Assert.Throws<ArgumentException>(() => lab.Report(5));
     }
 
+    [Fact]
+    public void SimultaneousEventsOnManyCoinsAreOneEpisodeAndTheDateFilterKeepsOnlyNewData()
+    {
+        // Three coins jerk up within 5 s: one market moment; the same signal a minute later is a second one.
+        static LabEvent Spike(string symbol, long at, decimal exit) => new(symbol, "Вынос цены", 1, at, 100, "", 99.99m, 100,
+            [exit, exit, exit, exit], [exit + .01m, exit + .01m, exit + .01m, exit + .01m]);
+        var events = new[] { Spike("AUSDT", T0, 101), Spike("BUSDT", T0 + 2000, 103), Spike("CUSDT", T0 + 5000, 102), Spike("AUSDT", T0 + 60_000, 99) };
+        var episodes = SignalLab.Episodes(events);
+        Assert.Equal([3, 1], episodes.Select(e => e.Count));
+        // An event in the other direction at the same moment is a separate episode.
+        Assert.Equal(3, SignalLab.Episodes(events.Append(events[0] with { Direction = -1 })).Count);
+
+        var dir = Path.Combine(root, "20261015T100000Z-33333333333333333333333333333333"); Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "summary.json"), "{}");
+        File.WriteAllText(Path.Combine(dir, "manifest.json"), "{}");
+        File.WriteAllText(Path.Combine(dir, SignalLab.File), JsonSerializer.Serialize(new LabRecording(SignalDetector.Version, "x", T0, T0 + 3_600_000, 3, events),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        using var lab = new SignalLab(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Scanner:Path"] = root }).Build(),
+            new Microsoft.Extensions.Hosting.Internal.HostingEnvironment { ContentRootPath = root },
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<SignalLab>.Instance);
+        var row = lab.Report(0).Rows.Single(r => r.Type == "Вынос цены" && r.Mode == "follow" && r.Horizon == 5);
+        // Episode 1: the average of its three trades (entry at the ask 100, exits at bids 101, 103, 102); episode 2: exit 99.
+        Assert.Equal((4, 2), (row.Count, row.Episodes));
+        Assert.Equal(Math.Round(((1m + 3 + 2) / 3 + -1) / 2, 4), row.MeanPct);
+        Assert.Equal(50, row.WinRate);
+        Assert.Equal(2, lab.Report(0).Counts.Single(c => c.Type == "Вынос цены").Episodes);
+        // From half a minute in: only the later episode, and only the hours after that moment.
+        var recent = lab.Report(0, T0 + 30_000);
+        Assert.Equal((1, 1), (recent.Events, recent.Rows.Single(r => r.Type == "Вынос цены" && r.Mode == "follow" && r.Horizon == 5).Episodes));
+        Assert.True(recent.Hours < 1);
+        Assert.Single(lab.Trades("Вынос цены", "follow", 5, 0, T0 + 30_000));
+    }
+
     public void Dispose() { if (Directory.Exists(root)) Directory.Delete(root, true); }
 }

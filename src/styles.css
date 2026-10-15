@@ -2215,6 +2215,9 @@ tbody tr:hover {
 .scanner-form .lab-fee {
   flex: 0 0 150px;
 }
+.scanner-form .lab-from {
+  flex: 0 0 210px;
+}
 .lab-selected td {
   background: #16212e;
 }

@@ -258,6 +258,7 @@ test('signal lab runs the recordings, ranks signals after fees and charts the ch
     firstHalf: mean + 0.01,
     secondHalf: stable ? mean - 0.01 : -0.02,
     stable,
+    episodes: count,
   });
   await page.route('**/api/v1/lab/report*', (route) =>
     route.fulfill({
@@ -267,8 +268,8 @@ test('signal lab runs the recordings, ranks signals after fees and charts the ch
         events: 420,
         feePct: 0.1,
         counts: [
-          { type: 'Каскад ликвидаций', count: 140, perHour: 93.3 },
-          { type: 'Перекос стакана', count: 280, perHour: 186.7 },
+          { type: 'Каскад ликвидаций', count: 140, perHour: 93.3, episodes: 120 },
+          { type: 'Перекос стакана', count: 280, perHour: 186.7, episodes: 250 },
         ],
         rows: [
           row('Перекос стакана', 'follow', 5, 280, -0.09, false),
@@ -276,6 +277,9 @@ test('signal lab runs the recordings, ranks signals after fees and charts the ch
           row('Каскад ликвидаций', 'follow', 300, 12, 0.3, false),
         ],
         notes: ['Комбинаций 48: часть может оказаться в плюсе случайно.'],
+        fromMs: new URL(route.request().url()).searchParams.has('fromMs')
+          ? Number(new URL(route.request().url()).searchParams.get('fromMs'))
+          : null,
       },
     }),
   );
@@ -311,6 +315,18 @@ test('signal lab runs the recordings, ranks signals after fees and charts the ch
   await expect(table.locator('tbody tr')).toHaveCount(2);
   await expect(table.locator('tbody tr').first()).toContainText('Каскад ликвидаций');
   await expect(table.locator('tbody tr').first()).toContainText('Против движения');
+  // A hypothesis is checked on new data only: the report is asked for events from the chosen moment.
+  await page.getByLabel('Только события с').fill('2026-10-16T00:00');
+  const fromRequest = page.waitForRequest(
+    (r) => r.url().includes('/lab/report') && r.url().includes('fromMs='),
+  );
+  await page.getByRole('button', { name: 'Пересчитать' }).click();
+  expect(new URL((await fromRequest).url()).searchParams.get('fromMs')).toBe(
+    String(new Date('2026-10-16T00:00').getTime()),
+  );
+  await expect(page.getByText(/Учтены только события с/)).toBeVisible();
+  await page.getByRole('button', { name: 'Все данные' }).click();
+  await expect(page.getByText(/Учтены только события с/)).toHaveCount(0);
   await page.getByLabel(/Показывать и редкие/).check();
   await expect(table.locator('tbody tr')).toHaveCount(3);
   await table.locator('tbody tr').nth(1).getByRole('button', { name: 'Каскад ликвидаций' }).click();

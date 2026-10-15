@@ -198,13 +198,16 @@ export interface LabRow {
   firstHalf: number | null;
   secondHalf: number | null;
   stable: boolean;
+  // Independent market moments: events of one type and direction within 10 s on any coins count once.
+  episodes: number;
 }
 export interface LabReport {
   recordings: number;
   hours: number;
   events: number;
   feePct: number;
-  counts: { type: string; count: number; perHour: number }[];
+  counts: { type: string; count: number; perHour: number; episodes: number }[];
+  fromMs: number | null;
   rows: LabRow[];
   notes: string[];
 }
@@ -241,11 +244,13 @@ export const api = {
     request<ScanStats>(`/scanner/stats?feePct=${encodeURIComponent(feePct)}`, { signal }),
   labStatus: (signal?: AbortSignal) => request<LabStatus>('/lab/status', { signal }),
   runLab: () => request<void>('/lab/run', { method: 'POST' }),
-  labReport: (feePct: number) =>
-    request<LabReport>(`/lab/report?feePct=${encodeURIComponent(feePct)}`),
-  labTrades: (row: LabRow, feePct: number) =>
+  labReport: (feePct: number, fromMs: number | null) =>
+    request<LabReport>(
+      `/lab/report?feePct=${encodeURIComponent(feePct)}${fromMs !== null ? `&fromMs=${fromMs}` : ''}`,
+    ),
+  labTrades: (row: LabRow, feePct: number, fromMs: number | null) =>
     request<Trade[]>(
-      `/lab/trades?type=${encodeURIComponent(row.type)}&mode=${row.mode}&horizon=${row.horizon}&feePct=${encodeURIComponent(feePct)}`,
+      `/lab/trades?type=${encodeURIComponent(row.type)}&mode=${row.mode}&horizon=${row.horizon}&feePct=${encodeURIComponent(feePct)}${fromMs !== null ? `&fromMs=${fromMs}` : ''}`,
     ),
   storage: (signal?: AbortSignal) => request<StorageStatus>('/storage', { signal }),
   startScanner: (options: {
