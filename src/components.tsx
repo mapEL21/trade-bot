@@ -78,7 +78,10 @@ export function Tooltip({ text }: { text: string }) {
     </button>
   );
 }
-export function Chart({ trades }: { trades: Trade[] }) {
+export type ChartMode = 'line' | 'bars';
+// Result of closed trades: with fees (solid) and without them (dashed, transparent), so the cost of fees is visible.
+// Line: the running total. Bars: each trade's result, or each day's when there are many trades.
+export function Chart({ trades, mode = 'line' }: { trades: Trade[]; mode?: ChartMode }) {
   const [active, setActive] = useState<number | null>(null);
   const [width, setWidth] = useState(748);
   const container = useRef<HTMLDivElement>(null);
@@ -89,26 +92,67 @@ export function Chart({ trades }: { trades: Trade[] }) {
     if (container.current) observer.observe(container.current);
     return () => observer.disconnect();
   }, []);
+  useEffect(() => setActive(null), [mode]);
   const id = useId().replace(/:/g, '');
-  let sum = 0;
   const sorted = [...trades].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
-  const values = [0, ...sorted.map((t) => (sum += net(t)))];
-  const high = Math.max(...values, 0.1) * 1.16;
-  const low = Math.min(...values, 0) * 1.16;
+  const day = (at: string) =>
+    new Date(at).toLocaleDateString('ru-RU', {
+      day: 'numeric',
+      month: 'short',
+      timeZone: 'Europe/Moscow',
+    });
+  const time = (at: string) =>
+    new Date(at).toLocaleTimeString('ru-RU', {
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'Europe/Moscow',
+    });
+  const byDay = mode === 'bars' && sorted.length > 80;
+  // Bars: one per trade, or per day; line: the running totals, starting from zero.
+  const items: { label: string; net: number; gross: number }[] = [];
+  if (mode === 'bars') {
+    for (const t of sorted) {
+      const label = byDay ? day(t.at) : `${day(t.at)}, ${time(t.at)}`;
+      const last = items[items.length - 1];
+      if (byDay && last?.label === label) {
+        last.net += net(t);
+        last.gross += t.gross;
+      } else items.push({ label, net: net(t), gross: t.gross });
+    }
+  } else {
+    let n = 0;
+    let g = 0;
+    items.push({ label: sorted.length ? day(sorted[0].at) : '', net: 0, gross: 0 });
+    for (const t of sorted)
+      items.push({ label: day(t.at), net: (n += net(t)), gross: (g += t.gross) });
+  }
+  const all = items.flatMap((p) => [p.net, p.gross]);
+  const high = Math.max(...all, 0.1) * 1.16;
+  const low = Math.min(...all, 0) * 1.16;
   const plotWidth = width - 62;
-  const points = values.map((v, i) => ({
-    x: 12 + (i / (values.length - 1)) * plotWidth,
-    y: 180 - ((v - low) / (high - low)) * 164,
-  }));
-  const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
-  const current = active === null ? null : points[active];
+  const y = (v: number) => 180 - ((v - low) / (high - low)) * 164;
+  const slot = plotWidth / Math.max(1, items.length);
+  const x = (i: number) =>
+    mode === 'bars'
+      ? 12 + slot * i + slot / 2
+      : 12 + (i / Math.max(1, items.length - 1)) * plotWidth;
+  const path = (key: 'net' | 'gross') =>
+    items.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(i)},${y(p[key])}`).join(' ');
+  const total =
+    mode === 'bars' ? items.reduce((s, p) => s + p.net, 0) : items[items.length - 1].net;
+  const current = active === null ? null : items[active];
+  const bar = Math.max(1, Math.min(28, slot * 0.7));
   return (
     <div className="chart-wrap">
       <div className="chart-plot" ref={container}>
         <svg
           viewBox={`0 0 ${width} 210`}
           role="img"
-          aria-label={`Кривая накопленного результата: ${formatMoney(sum)} USDT, ${trades.length} сделок`}
+          aria-label={
+            mode === 'bars'
+              ? `Результат ${byDay ? 'по дням' : 'по сделкам'}: ${formatMoney(total)} USDT с комиссиями, ${trades.length} сделок`
+              : `Кривая накопленного результата: ${formatMoney(total)} USDT с комиссиями, ${trades.length} сделок`
+          }
           onMouseLeave={() => setActive(null)}
         >
           <defs>
@@ -117,86 +161,128 @@ export function Chart({ trades }: { trades: Trade[] }) {
               <stop offset="100%" stopColor="#55d6b1" stopOpacity="0" />
             </linearGradient>
           </defs>
-          {[16, 57, 98, 139, 180].map((y, i) => (
-            <g key={y}>
+          {[16, 57, 98, 139, 180].map((yy, i) => (
+            <g key={yy}>
               <line
                 x1="12"
                 x2={12 + plotWidth}
-                y1={y}
-                y2={y}
+                y1={yy}
+                y2={yy}
                 stroke="#232c3c"
                 strokeDasharray="3 5"
               />
-              <text x={width - 1} y={y + 4} textAnchor="end" fill="#79869b" fontSize="10">
+              <text x={width - 1} y={yy + 4} textAnchor="end" fill="#79869b" fontSize="10">
                 {formatMoney(high - (i / 4) * (high - low))}
               </text>
             </g>
           ))}
-          <path d={`${path} L${12 + plotWidth},180 L12,180 Z`} fill={`url(#${id})`} />
-          <path
-            d={path}
-            fill="none"
-            stroke="#55d6b1"
-            strokeWidth="2.5"
-            strokeLinejoin="round"
-            strokeLinecap="round"
-          />
-          {current && (
+          {mode === 'line' ? (
+            <>
+              <path d={`${path('net')} L${12 + plotWidth},180 L12,180 Z`} fill={`url(#${id})`} />
+              <path
+                className="chart-gross"
+                d={path('gross')}
+                fill="none"
+                stroke="#9fb0c6"
+                strokeOpacity=".55"
+                strokeWidth="1.6"
+                strokeDasharray="5 4"
+              />
+              <path
+                d={path('net')}
+                fill="none"
+                stroke="#55d6b1"
+                strokeWidth="2.5"
+                strokeLinejoin="round"
+                strokeLinecap="round"
+              />
+            </>
+          ) : (
+            <>
+              <line x1="12" x2={12 + plotWidth} y1={y(0)} y2={y(0)} stroke="#3a4658" />
+              {items.map((p, i) => (
+                <g key={i}>
+                  <rect
+                    className="chart-gross"
+                    x={x(i) - bar / 2}
+                    width={bar}
+                    y={Math.min(y(p.gross), y(0))}
+                    height={Math.max(1, Math.abs(y(p.gross) - y(0)))}
+                    fill="none"
+                    stroke="#9fb0c6"
+                    strokeOpacity=".55"
+                    strokeDasharray="3 2"
+                  />
+                  <rect
+                    x={x(i) - bar / 2}
+                    width={bar}
+                    y={Math.min(y(p.net), y(0))}
+                    height={Math.max(1, Math.abs(y(p.net) - y(0)))}
+                    fill={p.net >= 0 ? '#55d6b1' : '#f0616d'}
+                    fillOpacity={active === i ? 1 : 0.8}
+                  />
+                </g>
+              ))}
+            </>
+          )}
+          {current && active !== null && (
             <>
               <line
-                x1={current.x}
-                x2={current.x}
+                x1={x(active)}
+                x2={x(active)}
                 y1="12"
                 y2="180"
                 stroke="#718395"
                 strokeDasharray="3 4"
               />
-              <circle
-                cx={current.x}
-                cy={current.y}
-                r="5"
-                fill="#55d6b1"
-                stroke="#101723"
-                strokeWidth="3"
-              />
+              {mode === 'line' && (
+                <circle
+                  cx={x(active)}
+                  cy={y(current.net)}
+                  r="5"
+                  fill="#55d6b1"
+                  stroke="#101723"
+                  strokeWidth="3"
+                />
+              )}
               <g
-                transform={`translate(${Math.max(12, Math.min(width - 115, current.x - 45))},${Math.max(3, current.y - 40)})`}
+                transform={`translate(${Math.max(12, Math.min(width - 175, x(active) - 85))},${Math.max(3, Math.min(y(current.net), 120) - 52)})`}
               >
-                <rect width="110" height="27" rx="6" fill="#273244" />
-                <text x="55" y="18" textAnchor="middle" fill="#eef5fa" fontSize="12">
-                  {formatMoney(values[active!], true)} USDT
+                <rect width="170" height="44" rx="6" fill="#273244" />
+                <text x="85" y="18" textAnchor="middle" fill="#eef5fa" fontSize="12">
+                  {formatMoney(current.net, true)} USDT с комиссиями
+                </text>
+                <text x="85" y="35" textAnchor="middle" fill="#9fb0c6" fontSize="11">
+                  {formatMoney(current.gross, true)} без комиссий
                 </text>
               </g>
             </>
           )}
-          {points.map((p, i) => (
+          {items.map((_, i) => (
             <rect
               key={i}
-              x={Math.max(0, p.x - plotWidth / values.length / 2)}
+              x={Math.max(0, x(i) - slot / 2)}
               y="0"
-              width={plotWidth / values.length + 2}
+              width={slot + 2}
               height="185"
               fill="transparent"
               onMouseEnter={() => setActive(i)}
               onTouchStart={() => setActive(i)}
             />
           ))}
-          {[0, Math.floor((sorted.length - 1) / 2), sorted.length - 1].map((i, n) => (
-            <text
-              key={n}
-              x={[12, 12 + plotWidth / 2, 12 + plotWidth][n]}
-              y="205"
-              textAnchor={n === 0 ? 'start' : n === 2 ? 'end' : 'middle'}
-              fill="#79869b"
-              fontSize="10"
-            >
-              {new Date(sorted[i].at).toLocaleDateString('ru-RU', {
-                day: 'numeric',
-                month: 'short',
-                timeZone: 'Europe/Moscow',
-              })}
-            </text>
-          ))}
+          {sorted.length > 0 &&
+            [0, Math.floor((items.length - 1) / 2), items.length - 1].map((i, n) => (
+              <text
+                key={n}
+                x={[12, 12 + plotWidth / 2, 12 + plotWidth][n]}
+                y="205"
+                textAnchor={n === 0 ? 'start' : n === 2 ? 'end' : 'middle'}
+                fill="#79869b"
+                fontSize="10"
+              >
+                {items[i].label.split(',')[0]}
+              </text>
+            ))}
         </svg>
       </div>
     </div>

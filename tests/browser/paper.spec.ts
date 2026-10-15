@@ -227,14 +227,10 @@ async function server(page: Page) {
 test('leader-lag bot is created with its strategy parameters', async ({ page }) => {
   const state = await server(page);
   await page.goto('/');
-  await page.getByRole('button', { name: 'Стратегии', exact: true }).click();
-  await page
-    .locator('.strategy-card', {
-      has: page.getByRole('heading', { name: 'Поводырь → отстающая биржа' }),
-    })
-    .getByRole('button', { name: 'Создать экземпляр' })
-    .click();
+  // Bots are created from the form; the strategy is chosen in it.
+  await page.getByRole('button', { name: 'Создать бота' }).first().click();
   const dialog = page.getByRole('dialog');
+  await dialog.getByRole('radio', { name: /Поводырь/ }).check();
   await expect(dialog.getByRole('radio', { name: /Поводырь/ })).toBeChecked();
   // A new leader-lag bot starts from the statistics template: 100 USDT, 2x, 200 USDT orders.
   await expect(dialog.getByLabel('Выделенный баланс, USDT')).toHaveValue('100');

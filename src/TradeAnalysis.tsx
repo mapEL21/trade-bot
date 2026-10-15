@@ -1,6 +1,6 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Activity, ArrowDownToLine, Gauge, ShieldCheck, TrendingUp, Wallet } from 'lucide-react';
-import { Chart, Empty, Tooltip, download } from './components';
+import { Chart, Empty, Tooltip, download, type ChartMode } from './components';
 import {
   csvCell,
   formatMoney,
@@ -106,7 +106,26 @@ function Stat({
     </div>
   );
 }
+// The chart mode is a per-viewer convenience, remembered in this browser only.
+function savedMode(): ChartMode {
+  try {
+    return localStorage.getItem('trade-bot.chart-mode') === 'bars' ? 'bars' : 'line';
+  } catch {
+    return 'line';
+  }
+}
 export function Performance({ trades, pnl }: { trades: Trade[]; pnl: number }) {
+  const [mode, setMode] = useState<ChartMode>(savedMode);
+  function choose(next: ChartMode) {
+    setMode(next);
+    try {
+      localStorage.setItem('trade-bot.chart-mode', next);
+    } catch {
+      // Storage may be unavailable (private window); the choice then lasts for this page only.
+    }
+  }
+  const gross = trades.reduce((s, t) => s + t.gross, 0);
+  const fees = trades.reduce((s, t) => s + t.fee, 0);
   return (
     <section className="panel performance">
       <div className="section-line">
@@ -114,23 +133,43 @@ export function Performance({ trades, pnl }: { trades: Trade[]; pnl: number }) {
           Динамика результата{' '}
           <Tooltip
             text={
-              'Накопленный результат закрытых сделок живой симуляции за выбранный период с учётом комиссий. Это не реальная торговля.'
+              'Закрытые сделки за выбранный период. Сплошная линия — результат с комиссиями, пунктирная — без них: разница между ними и есть комиссии. Это симуляция, не реальная торговля.'
             }
           />
         </h3>
-        <span className="chart-legend">
-          <span className="tiny-dot" />
-          {'Чистый PnL · симуляция'}
-        </span>
+        <div className="segmented" aria-label="Вид графика">
+          {(
+            [
+              ['line', 'Линия'],
+              ['bars', 'Столбцы'],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              aria-pressed={mode === value}
+              className={mode === value ? 'active' : ''}
+              onClick={() => choose(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
       <div className="chart-summary">
         <strong className={pnl >= 0 ? 'positive' : 'negative'}>
           {formatMoney(pnl, true)} <span>USDT</span>
         </strong>
-        <span>за выбранный период</span>
+        <span>
+          с комиссиями за период · без комиссий {formatMoney(gross, true)} · комиссии{' '}
+          {formatMoney(fees)}
+        </span>
+      </div>
+      <div className="chart-legend">
+        <span className="legend-net" /> С комиссиями
+        <span className="legend-gross" /> Без комиссий
       </div>
       {trades.length ? (
-        <Chart trades={trades} />
+        <Chart trades={trades} mode={mode} />
       ) : (
         <Empty
           icon={<TrendingUp size={26} />}
@@ -239,7 +278,12 @@ export function TradeQuality({ trades }: { trades: Trade[] }) {
         />
       </div>
       {hints.length > 0 && <p className="quality-hint">{hints.join(' ')}</p>}
-      <div className="table-scroll">
+      <div
+        className="table-scroll"
+        tabIndex={0}
+        role="region"
+        aria-label="Причины выхода, прокрутка"
+      >
         <table>
           <thead>
             <tr>
@@ -346,7 +390,12 @@ export function TradesTable({
           text={'Здесь появятся закрытые сделки живой симуляции бота.'}
         />
       ) : (
-        <div className="table-scroll">
+        <div
+          className="table-scroll"
+          tabIndex={0}
+          role="region"
+          aria-label="История сделок, прокрутка"
+        >
           <table>
             <thead>
               <tr>

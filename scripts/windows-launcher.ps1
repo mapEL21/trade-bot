@@ -125,8 +125,7 @@ try {
             }
             # Running simulations each have their own recording: stop them first so their results are saved.
             # ForEach-Object unrolls the JSON array: Windows PowerShell 5.1 passes it as one object.
-            # A server started before several simulations existed has no such endpoint; its one simulation is stopped below
-            # together with its recording, as before.
+            # A server started before several simulations existed has no such endpoint and is simply stopped.
             try { $sessions = @((Request-Local "$api/paper/sessions") | ConvertFrom-Json | ForEach-Object { $_ }) } catch { $sessions = @() }
             if ($sessions.Count -gt 0) {
                 Write-Host "Останавливаем симуляции ($($sessions.Count)) и ждём сохранения результатов..."
@@ -151,17 +150,6 @@ try {
                     $scan = (Request-Local "$api/scanner") | ConvertFrom-Json
                 } while ($scan.state -in @('starting', 'scanning') -and [DateTime]::UtcNow -lt $deadline)
                 if ($scan.state -in @('starting', 'scanning')) { throw 'Сканер ещё сохраняет запись. Сервер оставлен работающим; повторите остановку позже.' }
-            }
-            $snapshot = (Request-Local "$api/research") | ConvertFrom-Json
-            if ($snapshot.active) {
-                Write-Host 'Завершаем запись и ждём сохранения событий...'
-                Request-Local "$api/research/$($snapshot.id)/stop" 'POST' | Out-Null
-                $deadline = [DateTime]::UtcNow.AddSeconds(45)
-                do {
-                    Start-Sleep -Milliseconds 500
-                    $snapshot = (Request-Local "$api/research") | ConvertFrom-Json
-                } while ($snapshot.active -and [DateTime]::UtcNow -lt $deadline)
-                if ($snapshot.active) { throw 'Запись ещё сохраняется. Сервер оставлен работающим; повторите остановку позже.' }
             }
         }
         Stop-Owned 'web'

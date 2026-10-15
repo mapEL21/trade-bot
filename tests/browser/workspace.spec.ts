@@ -128,7 +128,22 @@ test('overview, trade periods and bot navigation work without console errors', a
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Всё под контролем' })).toBeVisible();
   await expect(page.getByText('Живая симуляция.', { exact: false }).first()).toBeVisible();
+  // The result chart: with fees (solid) and without (dashed); line or bars, the choice kept in the browser.
+  const chart = page.locator('.performance');
+  await expect(chart).toContainText('без комиссий');
+  await expect(chart.locator('.chart-legend')).toContainText('С комиссиями');
+  await expect(chart.locator('.chart-legend')).toContainText('Без комиссий');
+  await expect(chart.locator('path.chart-gross')).toHaveCount(1);
+  await expect(chart.getByRole('img', { name: /Кривая накопленного результата/ })).toBeVisible();
+  await chart.getByRole('button', { name: 'Столбцы', exact: true }).click();
+  await expect(chart.getByRole('img', { name: /Результат по сделкам/ })).toBeVisible();
+  await expect(chart.locator('rect.chart-gross')).toHaveCount(5);
   await page.screenshot({ path: 'artifacts/overview-desktop.png', fullPage: true });
+  await page.reload();
+  await expect(
+    page.locator('.performance').getByRole('img', { name: /Результат по сделкам/ }),
+  ).toBeVisible();
+  await page.locator('.performance').getByRole('button', { name: 'Линия', exact: true }).click();
   await page.getByRole('button', { name: 'Статистика' }).click();
   await expect(page.getByRole('heading', { name: 'Поводырь · MAGIC' })).toBeVisible();
   // The common trade quality block groups exit reasons; a retried exit counts under its original reason.
@@ -156,7 +171,7 @@ test('overview, trade periods and bot navigation work without console errors', a
   await page.getByLabel('Название бота').fill('Мой поводырь');
   await page.getByRole('button', { name: 'Сохранить изменения' }).click();
   await expect(page.getByRole('heading', { name: 'Мой поводырь' })).toBeVisible();
-  await page.getByRole('button', { name: 'Журнал', exact: true }).click();
+  await page.locator('.detail-tabs').getByRole('button', { name: 'Журнал', exact: true }).click();
   await expect(page.getByText('Настройки экземпляра обновлены.')).toBeVisible();
   expect(errors).toEqual([]);
 });
@@ -251,7 +266,7 @@ test('mobile navigation and modal fit the viewport', async ({ page }) => {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: 'artifacts/overview-mobile.png', fullPage: true });
   await page.getByRole('button', { name: 'Открыть меню' }).click();
-  await page.getByRole('button', { name: 'Мои боты', exact: false }).first().click();
+  await page.getByRole('button', { name: /^Боты/ }).first().click();
   await page.getByRole('button', { name: 'Создать бота', exact: true }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
   await page.screenshot({ path: 'artifacts/create-mobile.png', fullPage: true });

@@ -197,23 +197,16 @@ public sealed class ResearchSession(string id, RecorderOptions options, IRecordi
     public void Dispose() => stop.Dispose();
 }
 
-// The research page drives one manual recording at a time. Live paper sessions each get their own background recording
-// (with the session as a tap), so several simulations and a manual recording can run side by side.
+// Background recordings for live paper sessions: each session gets its own recording, with the session as a tap, so several
+// simulations run side by side. (The manual recording page was removed; recordings are only made for simulations and the scanner.)
 public sealed class MarketResearch(IRecordingRunner runner, IConfiguration configuration, IHostEnvironment environment,
     ILogger<MarketResearch> logger) : IHostedService, IDisposable
 {
     private readonly object gate = new();
-    private ResearchSession? current;
-    private Task? task;
     private readonly Dictionary<string, (ResearchSession Session, Task Task)> background = [];
     private bool shuttingDown;
 
-    public ResearchSnapshot Snapshot()
-    {
-        lock (gate) return current?.Snapshot() ?? new(null, "idle", false, null, null, 0, 0, 0, 0, 0, null, null, null, [], []);
-    }
-
-    public string Start(ResearchRequest request, IRecordingObserver? tap = null)
+    public string Start(ResearchRequest request, IRecordingObserver tap)
     {
         var root = configuration["Market:Path"] ?? Path.Combine(environment.ContentRootPath, "data", "market");
         var options = RecorderOptions.Parse(["--coin", request.Coin ?? "", "--symbol", MarketCatalog.Symbol(request.Exchange, request.Coin ?? ""), "--exchange", request.Exchange, "--source-exchange", request.SourceExchange,
@@ -221,14 +214,6 @@ public sealed class MarketResearch(IRecordingRunner runner, IConfiguration confi
         lock (gate)
         {
             if (shuttingDown) throw new InvalidOperationException("Сервер останавливается. Новые записи не начинаются.");
-            if (tap is null)
-            {
-                if (task is { IsCompleted: false }) throw new InvalidOperationException("Уже идёт запись или её остановка. Обновите состояние.");
-                current?.Dispose();
-                current = new ResearchSession(Guid.NewGuid().ToString(), options, null);
-                task = Run(current, options);
-                return current.Id;
-            }
             foreach (var done in background.Where(x => x.Value.Task.IsCompleted).ToList()) { done.Value.Session.Dispose(); background.Remove(done.Key); }
             var session = new ResearchSession(Guid.NewGuid().ToString(), options, tap);
             background[session.Id] = (session, Run(session, options));
@@ -251,9 +236,8 @@ public sealed class MarketResearch(IRecordingRunner runner, IConfiguration confi
     {
         lock (gate)
         {
-            var session = current?.Id == id ? current : background.TryGetValue(id, out var entry) ? entry.Session : null;
-            if (session is null) return false;
-            session.RequestStop();
+            if (!background.TryGetValue(id, out var entry)) return false;
+            entry.Session.RequestStop();
             return true;
         }
     }
@@ -265,8 +249,6 @@ public sealed class MarketResearch(IRecordingRunner runner, IConfiguration confi
         lock (gate)
         {
             shuttingDown = true;
-            current?.RequestStop();
-            if (task is not null) running.Add(task);
             foreach (var (session, recording) in background.Values) { session.RequestStop(); running.Add(recording); }
         }
         await Task.WhenAll(running).WaitAsync(ct);
@@ -274,9 +256,6 @@ public sealed class MarketResearch(IRecordingRunner runner, IConfiguration confi
     public void Dispose()
     {
         lock (gate)
-        {
-            if (task is null || task.IsCompleted) current?.Dispose();
             foreach (var (session, recording) in background.Values) if (recording.IsCompleted) session.Dispose();
-        }
     }
 }

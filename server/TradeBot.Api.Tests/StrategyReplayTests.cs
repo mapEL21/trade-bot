@@ -208,26 +208,6 @@ public class StrategyReplayTests
     }
 
     [Fact]
-    public void SeriesTotalsCombineOnlyEvaluatedRecordingsAndCountOrderOutcomes()
-    {
-        var first = Run(Data());
-        var flat = Data().Select(x => x.Quote is { } q ? x with { Quote = q with { Bid = 99.99m, Ask = 100.01m } } : x).ToList();
-        var noLeader = StrategyReplay.Run(Recording with { Id = "flat" }, Settings, 1000, 0, 125000, flat, default);
-        var second = StrategyReplay.Run(Recording with { Id = "second", StartedUtc = DateTimeOffset.UnixEpoch.AddDays(1) }, Settings, 1000, 0, 125000, Data(), default);
-        var series = StrategySeries.Build(Settings, [(StrategySeries.Row(first), first), (StrategySeries.Row(noLeader), noLeader),
-            (StrategySeries.Row(second), second), (StrategySeries.Failed("broken", "Повреждённая строка 3."), null)], DateTimeOffset.UnixEpoch);
-        Assert.Equal(4, series.Recordings.Length); Assert.Equal("error", series.Recordings[3].Status);
-        Assert.Equal(8, series.Totals.Length);
-        var follow = series.Totals.Single(x => x.Mode == "follow" && x.DelayMs == 10);
-        var single = first.Scenarios.Single(x => x.Mode == "follow" && x.DelayMs == 10);
-        Assert.Equal(2, follow.Recordings); Assert.Equal(2, follow.RecordingsPositive);
-        Assert.Equal(2, follow.OrdersSent); Assert.Equal(2, follow.EntriesFilled); Assert.Equal(0, follow.OrdersUnfilled);
-        Assert.Equal(2, follow.Trades); Assert.Equal(2 * single.SumNetBps, follow.SumNetBps); Assert.Equal(single.MeanNetBps, follow.MeanNetBps);
-        var counter = series.Totals.Single(x => x.Mode == "counter" && x.DelayMs == 10);
-        Assert.Equal(0, counter.RecordingsPositive); Assert.Equal(-counter.SumNetBps, counter.DrawdownBps);
-    }
-
-    [Fact]
     public void TooSmallResidualIsLoggedAsSkippedRatherThanForcedTrade()
     {
         var result = StrategyReplay.Run(Recording, Settings with { MinEdgeBps = 100 }, 1000, 0, 125000, Data(), default);

@@ -231,14 +231,6 @@ export const api = {
       `/research/instrument?exchange=${encodeURIComponent(exchange)}&coin=${encodeURIComponent(coin)}`,
       { signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]) },
     ),
-  startResearch: (config: {
-    coin: string;
-    seconds: number;
-    maxMb: number;
-    exchange: string;
-    sourceExchange: string;
-  }) => request<{ id: string }>('/research', { method: 'POST', body: JSON.stringify(config) }),
-  stopResearch: (id: string) => request<void>(`/research/${id}/stop`, { method: 'POST' }),
   templates: (signal?: AbortSignal) => request<BotTemplate[]>('/templates', { signal }),
   saveTemplate: (template: Omit<BotTemplate, 'id' | 'savedAt' | 'builtIn' | 'description'>) =>
     request<BotTemplate>('/templates', { method: 'POST', body: JSON.stringify(template) }),

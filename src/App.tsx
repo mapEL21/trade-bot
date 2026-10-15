@@ -22,13 +22,10 @@ import {
   Search,
   ShieldCheck,
   Trash2,
-  Waypoints,
   X,
   Zap,
 } from 'lucide-react';
 import { api, type InstrumentInfo, type StrategyDefinition } from './api';
-import { Strategies } from './Strategies';
-import { Research } from './Research';
 import { Scanner } from './Scanner';
 import { activeStatuses } from './PaperRun';
 import { strategyView } from './strategyViews';
@@ -56,18 +53,13 @@ import {
 
 const emptyWorkspace: Workspace = { schemaVersion: 1, bots: [], events: [] };
 
-type Page =
-  'strategies' | 'overview' | 'bots' | 'trades' | 'events' | 'connections' | 'research' | 'scanner';
+type Page = 'overview' | 'bots' | 'scanner' | 'events';
 type Tab = 'overview' | 'trades' | 'settings' | 'events';
 const nav: { id: Page; label: string; icon: typeof BotIcon }[] = [
   { id: 'overview', label: 'Обзор', icon: LayoutDashboard },
-  { id: 'bots', label: 'Мои боты', icon: BotIcon },
-  { id: 'strategies', label: 'Стратегии', icon: Zap },
-  { id: 'scanner', label: 'Сканер', icon: ScanSearch },
-  { id: 'research', label: 'Исследование рынка', icon: Radio },
-  { id: 'trades', label: 'Сделки', icon: Activity },
-  { id: 'events', label: 'Журнал событий', icon: Clock3 },
-  { id: 'connections', label: 'Подключения', icon: Waypoints },
+  { id: 'bots', label: 'Боты', icon: BotIcon },
+  { id: 'scanner', label: 'Лаборатория', icon: ScanSearch },
+  { id: 'events', label: 'Журнал', icon: Clock3 },
 ];
 const defaultConfig: BotConfig = {
   name: '',
@@ -347,9 +339,6 @@ export default function App() {
             <FlaskConical size={21} />
             <strong>Только симуляция</strong>
             <p>Боты работают на публичных данных бирж. Реальных заявок и ключей нет.</p>
-            <button onClick={() => go('connections')}>
-              О рабочем пространстве <ArrowUpRight size={15} />
-            </button>
           </div>
           <div className="sidebar-footer">
             <span className="tiny-dot" />
@@ -391,10 +380,6 @@ export default function App() {
               сервера. Боты работают по публичным данным бирж; реальные заявки не отправляются,
               торговые подключения не созданы.
             </span>
-            <button onClick={() => go('connections')}>
-              Подробнее
-              <ArrowRight size={14} />
-            </button>
           </div>
           {serverError && (
             <div className="error-banner" role="alert">
@@ -568,14 +553,10 @@ export default function App() {
                   <p>
                     {
                       {
-                        overview: 'Результаты, стратегии и боты — в одном пространстве.',
-                        bots: 'Экземпляры стратегий: настройки, состояние и статистика.',
-                        strategies: 'Наши алгоритмы, их версии и готовность к запуску.',
-                        scanner: 'Ищем уровни и оцениваем пробои на живых данных Binance.',
-                        research: 'Сравниваем выбранные биржи на реальных данных.',
-                        trades: 'История исполнений всех ботов в одном месте.',
+                        overview: 'Результат всех ботов, их сделки и статистика.',
+                        bots: 'Боты: настройки, живая симуляция и статистика.',
+                        scanner: 'Сканер рынка и проверка идей на живых данных Binance.',
                         events: 'Все изменения вашего рабочего пространства.',
-                        connections: 'Биржевые подключения и данные приложения.',
                       }[page]
                     }
                   </p>
@@ -584,19 +565,7 @@ export default function App() {
                   {(page === 'overview' || page === 'bots') && actions}
                 </div>
               </div>
-              {page === 'research' && <Research />}
               {page === 'scanner' && <Scanner />}
-              {page === 'strategies' && (
-                <Strategies
-                  items={strategies}
-                  onCreate={(item) =>
-                    setEditor({
-                      config:
-                        item.id === 'leader-lag' ? leaderLagConfig(item.version) : defaultConfig,
-                    })
-                  }
-                />
-              )}
               {page === 'overview' && (
                 <>
                   <div className="section-line">
@@ -647,9 +616,6 @@ export default function App() {
                       <div className="health-footer">
                         <span className="tiny-dot amber" />
                         Биржи не подключены
-                        <button onClick={() => go('connections')} aria-label="Открыть подключения">
-                          <ArrowUpRight size={17} />
-                        </button>
                       </div>
                     </div>
                   </div>
@@ -699,6 +665,8 @@ export default function App() {
                     <ShieldCheck size={14} />{' '}
                     {'Настройки и журнал сохраняются в базе локального сервера.'}
                   </div>
+                  <TradeQuality trades={trades} />
+                  <TradesTable trades={trades} showBot />
                 </>
               )}
               {page === 'bots' && (
@@ -785,60 +753,7 @@ export default function App() {
                   )}
                 </>
               )}
-              {page === 'trades' && (
-                <>
-                  <div className="section-line">
-                    <span className="muted">
-                      {'Сделки живой симуляции всех ботов · не реальная торговля'}
-                    </span>
-                    {period}
-                  </div>
-                  <TradesTable trades={periodTrades(allTrades, days, now)} showBot />
-                </>
-              )}
               {page === 'events' && <Events events={workspace.events} />}
-              {page === 'connections' && (
-                <>
-                  <div className="connection-grid">
-                    {exchanges.map((exchange, i) => (
-                      <div className="panel exchange-card" key={exchange}>
-                        <div className={`exchange-logo exchange-${i}`}>
-                          {exchange === 'Binance' ? '◇' : exchange === 'Bybit' ? 'by' : '▦'}
-                        </div>
-                        <h3>{exchange}</h3>
-                        <span className="neutral-badge">Не подключена</span>
-                        <p>
-                          Интеграция появится после создания торгового движка и проверки брокерского
-                          API.
-                        </p>
-                        <button className="button secondary" disabled>
-                          Скоро
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="panel local-data">
-                    <div className="section-line">
-                      <div>
-                        <h3>Данные рабочего пространства</h3>
-                        <p className="muted">
-                          {'Настройки и журнал сохраняются сервером в SQLite.'} Секретные ключи
-                          здесь не запрашиваются.
-                        </p>
-                      </div>
-                      <ShieldCheck size={25} className="positive" />
-                    </div>
-                    <div className="inline-note">
-                      <FlaskConical size={18} />
-                      <span>
-                        Сервер записывает публичные потоки бирж и ведёт живую симуляцию ботов
-                        «Поводырь». Торговые подключения к аккаунтам ещё не созданы, реальные заявки
-                        не отправляются. Выбранный тикер — пример, а не рекомендация.
-                      </span>
-                    </div>
-                  </div>
-                </>
-              )}
             </>
           )}
         </main>

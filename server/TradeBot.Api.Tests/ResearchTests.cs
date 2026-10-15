@@ -111,69 +111,21 @@ public class ResearchTests
     }
 
     [Fact]
-    public async Task ApiOwnsSession_RejectsConcurrentStartsAndStaleStopIds()
+    public async Task ApiBlocksChangesWithoutTheClientHeaderOrFromAnotherSite()
     {
         var runner = new ControlledRunner();
         using var factory = Factory(runner);
         using var client = factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-TradeBot-Client", "web");
-        var requests = await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => client.PostAsJsonAsync("/api/v1/research", new ResearchRequest("ARB", 60, 5))));
-        Assert.Single(requests, r => r.StatusCode == HttpStatusCode.Accepted);
-        Assert.Single(requests, r => r.StatusCode == HttpStatusCode.Conflict);
-        await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var snapshot = (await client.GetFromJsonAsync<ResearchSnapshot>("/api/v1/research"))!;
-        Assert.True(snapshot.Active);
-        Assert.False(snapshot.ExecutionEnabled);
-        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsync($"/api/v1/research/{Guid.NewGuid()}/stop", null)).StatusCode);
-        using var anotherClient = factory.CreateClient();
-        Assert.Equal(snapshot.Id, (await anotherClient.GetFromJsonAsync<ResearchSnapshot>("/api/v1/research"))!.Id);
-        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/research/{snapshot.Id}/stop", null)).StatusCode);
-        await runner.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.False((await client.GetFromJsonAsync<ResearchSnapshot>("/api/v1/research"))!.Active);
-        Assert.Equal(1, runner.Runs);
-    }
-
-    [Theory]
-    [InlineData("{\"coin\":\"ARB\",\"seconds\":3601,\"maxMb\":5}")]
-    [InlineData("{\"coin\":\"ARB\\n\",\"seconds\":60,\"maxMb\":5}")]
-    [InlineData("{\"coin\":\"ARB\",\"seconds\":60,\"maxMb\":0}")]
-    [InlineData("{\"coin\":null,\"seconds\":60,\"maxMb\":5}")]
-    [InlineData("{\"coin\":\"ARB\",\"seconds\":60,\"maxMb\":5,\"output\":\"C:/secret\"}")]
-    public async Task ApiRejectsUnsafeParametersWithoutStartingRecorder(string json)
-    {
-        var runner = new ControlledRunner();
-        using var factory = Factory(runner);
-        using var client = factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-TradeBot-Client", "web");
-        var response = await client.PostAsync("/api/v1/research", new StringContent(json, System.Text.Encoding.UTF8, "application/json"));
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Equal(0, runner.Runs);
-    }
-
-    [Fact]
-    public async Task ApiBlocksCrossSiteStart_AndStreamsIdleStateWithoutStartingNetworkFeeds()
-    {
-        var runner = new ControlledRunner();
-        using var factory = Factory(runner);
-        using var client = factory.CreateClient();
-        Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/v1/research", new ResearchRequest("ARB", 60, 5))).StatusCode);
+        var request = new PaperRequest("ARB", "hyperliquid", "binance", 600, new ReplaySettings(ExecutionModel: "bbo"));
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/v1/paper", request)).StatusCode);
         client.DefaultRequestHeaders.Add("X-TradeBot-Client", "web");
         client.DefaultRequestHeaders.Add("Origin", "https://untrusted.example");
-        Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/v1/research", new ResearchRequest("ARB", 60, 5))).StatusCode);
-        client.DefaultRequestHeaders.Remove("Origin");
-        using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        using var response = await client.GetAsync("/api/v1/research/stream", HttpCompletionOption.ResponseHeadersRead, cancel.Token);
-        Assert.Equal("text/event-stream", response.Content.Headers.ContentType!.MediaType);
-        using var reader = new StreamReader(await response.Content.ReadAsStreamAsync(cancel.Token));
-        var line = await reader.ReadLineAsync(cancel.Token);
-        Assert.Contains("\"state\":\"idle\"", line);
-        Assert.Contains("\"executionEnabled\":false", line);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/v1/paper", request)).StatusCode);
         Assert.Equal(0, runner.Runs);
-        cancel.Cancel();
     }
 
     [Fact]
-    public async Task PaperApiRunsSeveralSessionsBesideAManualRecordingAndStopsDuringCalibration()
+    public async Task PaperApiRunsSeveralSessionsAndStopsDuringCalibration()
     {
         var runner = new ControlledRunner(withManifest: true);
         using var factory = Factory(runner);
@@ -189,18 +141,15 @@ public class ResearchTests
             Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
             return (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString()!;
         }
-        // Up to four sessions run at once, each on its own recording, and a manual recording can run beside them.
+        // Up to four sessions run at once, each on its own recording.
         string[] ids = [await Start("ARB"), await Start("SOL"), await Start("ETH"), await Start("BTC")];
         await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/v1/paper", new PaperRequest("DOGE", "hyperliquid", "binance", 600, settings))).StatusCode);
-        var manual = await client.PostAsJsonAsync("/api/v1/research", new ResearchRequest("ARB", 60, 5));
-        Assert.Equal(HttpStatusCode.Accepted, manual.StatusCode);
-        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/v1/research", new ResearchRequest("ARB", 60, 5))).StatusCode);
         PaperSnapshot[] active;
         do active = (await client.GetFromJsonAsync<PaperSnapshot[]>("/api/v1/paper/sessions"))!; while (active.Any(x => x.State == "starting"));
         Assert.Equal(ids.Order(), active.Select(x => x.Id!).Order());
         Assert.All(active, x => { Assert.Equal("calibrating", x.State); Assert.False(x.ExecutionEnabled); });
-        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref runner.Runs) == 5, 5000));
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref runner.Runs) == 4, 5000));
         Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsync($"/api/v1/paper/{Guid.NewGuid()}/stop", null)).StatusCode);
         // Stopping one session leaves the others running.
         Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/paper/{ids[0]}/stop", null)).StatusCode);
@@ -215,8 +164,6 @@ public class ResearchTests
         Assert.NotNull(saved.EndedUtc);
         // Stop everything and wait for the final records, so nothing writes while the test database is removed.
         foreach (var id in ids[1..].Append(doge)) Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/paper/{id}/stop", null)).StatusCode);
-        var manualId = (await manual.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString();
-        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/research/{manualId}/stop", null)).StatusCode);
         do active = (await client.GetFromJsonAsync<PaperSnapshot[]>("/api/v1/paper/sessions", wait.Token))!; while (active.Length > 0);
         PaperRunRecord[] all;
         do all = await runs.ListAsync(null, 10, wait.Token); while (all.Length < 5 || all.Any(x => x.EndedUtc is null));

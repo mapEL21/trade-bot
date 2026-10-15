@@ -21,7 +21,6 @@ builder.Services.AddOpenApi();
 builder.Services.AddSingleton<StrategyCatalog>();
 builder.Services.AddSingleton<IRecordingRunner, RecordingRunner>();
 builder.Services.AddSingleton<MarketResearch>();
-builder.Services.AddSingleton<RecordingAnalysisStore>();
 builder.Services.AddSingleton<PaperTrading>();
 builder.Services.AddSingleton(_ => new ResearchMarkets(new HttpClient { Timeout = TimeSpan.FromSeconds(8) }));
 builder.Services.AddHostedService(services => services.GetRequiredService<MarketResearch>());
@@ -94,10 +93,6 @@ app.MapOpenApi();
 var api = app.MapGroup("/api/v1").RequireRateLimiting("local");
 api.MapGet("/health", () => Results.Ok(new { status = "ok", executionEnabled = false }));
 api.MapGet("/storage", (StorageHousekeeper storage) => Results.Ok(storage.Status));
-api.MapGet("/research", (MarketResearch research) => Results.Ok(research.Snapshot()));
-api.MapGet("/research/recordings", (RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ListAsync(ct)));
-api.MapGet("/research/recordings/{id}/analysis", (string id, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReadAsync(id, ct)));
-api.MapPost("/research/recordings/{id}/analysis", (string id, AnalysisSettings settings, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.AnalyzeAsync(id, settings, ct)));
 api.MapGet("/research/markets", async (string exchange, string? sourceExchange, ResearchMarkets markets, HttpContext context) =>
 {
     try { return Results.Ok(await markets.GetAsync(exchange, context.RequestAborted, sourceExchange ?? "hyperliquid")); }
@@ -122,12 +117,6 @@ api.MapGet("/research/instrument", async (string exchange, string coin, Research
         return Results.Problem(statusCode: 503, title: "Не удалось загрузить правила инструмента с биржи. Повторите позже.");
     }
 });
-api.MapPost("/research", (ResearchRequest request, MarketResearch research) =>
-{
-    try { return Results.Accepted("/api/v1/research", new { id = research.Start(request) }); }
-    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
-    catch (InvalidOperationException e) { return Results.Problem(statusCode: 409, title: e.Message); }
-});
 // Level scanner: public Binance data only; it finds levels and scores breakouts, it never trades.
 api.MapGet("/scanner", (MarketScanner scanner) => Results.Ok(scanner.Snapshot()));
 api.MapPost("/scanner", (ScanStart request, MarketScanner scanner) =>
@@ -146,28 +135,7 @@ api.MapGet("/scanner/stats", (decimal? feePct, MarketScanner scanner) =>
 });
 api.MapGet("/scanner/symbols/{symbol}", (string symbol, MarketScanner scanner) => scanner.Detail(symbol) is { } detail
     ? Results.Ok(detail) : Results.Problem(statusCode: 404, title: "Монета не найдена в текущем сканере."));
-api.MapPost("/research/{id:guid}/stop", (Guid id, MarketResearch research) => research.Stop(id.ToString())
-    ? Results.Accepted("/api/v1/research", new { id = id.ToString() })
-    : Results.Problem(statusCode: 409, title: "Сессия уже сменилась. Обновите состояние перед остановкой."));
-api.MapGet("/research/stream", async (HttpContext context, MarketResearch research) =>
-{
-    context.Response.ContentType = "text/event-stream";
-    context.Response.Headers["X-Accel-Buffering"] = "no";
-    var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
-    try
-    {
-        while (!context.RequestAborted.IsCancellationRequested)
-        {
-            await context.Response.WriteAsync($"data: {JsonSerializer.Serialize(research.Snapshot(), json)}\n\n", context.RequestAborted);
-            await context.Response.Body.FlushAsync(context.RequestAborted);
-            await Task.Delay(1000, context.RequestAborted);
-        }
-    }
-    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
-});
 api.MapGet("/strategies", (StrategyCatalog catalog) => Results.Ok(catalog.Items));
-api.MapGet("/research/recordings/{id}/replay", (string id, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReadReplayAsync(id, ct)));
-api.MapPost("/research/recordings/{id}/replay", (string id, ReplaySettings settings, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReplayAsync(id, settings, ct)));
 api.MapGet("/paper", (PaperTrading paper) => Results.Ok(paper.Snapshot()));
 api.MapGet("/paper/sessions", (PaperTrading paper) => Results.Ok(paper.Active()));
 api.MapGet("/bots/{id:guid}/paper", (Guid id, PaperTrading paper) => Results.Ok(paper.SnapshotFor(id.ToString())));
@@ -191,8 +159,6 @@ api.MapPost("/paper/{id:guid}/pause", (Guid id, PaperTrading paper) => paper.Pau
     ? Results.Accepted("/api/v1/paper") : Results.Problem(statusCode: 409, title: "Симуляция уже завершена или сменилась."));
 api.MapPost("/paper/{id:guid}/resume", (Guid id, PaperTrading paper) => paper.Pause(id.ToString(), false)
     ? Results.Accepted("/api/v1/paper") : Results.Problem(statusCode: 409, title: "Симуляция уже завершена или сменилась."));
-api.MapGet("/research/series/replay", (RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.ReadSeriesAsync(ct)));
-api.MapPost("/research/series/replay", (SeriesRequest request, RecordingAnalysisStore store, CancellationToken ct) => AnalysisResult(() => store.SeriesAsync(request, ct)));
 api.MapGet("/workspace", async (IWorkspaceStore store, PaperRunStore runs, PaperTrading paper, CancellationToken ct) =>
 {
     var workspace = await store.ReadAsync(ct);
@@ -305,19 +271,5 @@ static IResult Failure(StoreStatus status) => status switch
     _ => Results.Problem(statusCode: 500, title: "Не удалось сохранить изменения.")
 };
 
-static async Task<IResult> AnalysisResult<T>(Func<Task<T>> action)
-{
-    try { return Results.Ok(await action()); }
-    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
-    catch (FileNotFoundException) { return Results.Problem(statusCode: 404, title: "Запись или отчёт не найдены."); }
-    catch (DirectoryNotFoundException) { return Results.Problem(statusCode: 404, title: "Запись не найдена."); }
-    catch (InvalidDataException e) { return Results.Problem(statusCode: 422, title: e.Message); }
-    catch (InvalidOperationException) { return Results.Problem(statusCode: 409, title: "Анализ недоступен: завершите запись и дождитесь окончания другого анализа."); }
-    catch (OperationCanceledException) { return Results.Problem(statusCode: 408, title: "Анализ отменён или превысил 60 секунд. Попробуйте более короткую запись."); }
-    catch (Exception e) when (e is JsonException or KeyNotFoundException or OverflowException or FormatException)
-    { return Results.Problem(statusCode: 422, title: "Некорректный формат записи или отчёта."); }
-    catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-    { return Results.Problem(statusCode: 503, title: "Не удалось прочитать запись или сохранить отчёт."); }
-}
 
 public partial class Program;

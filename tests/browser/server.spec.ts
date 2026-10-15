@@ -26,18 +26,11 @@ test('catalog creates a server instance that survives a new browser, edits, expo
   try {
     await page.goto('/');
     await expect(page.getByText('Данные загружены с сервера')).toBeVisible();
-    await page.getByRole('button', { name: 'Стратегии', exact: true }).click();
-    await expect(page.getByRole('heading', { name: 'Импульс', exact: true })).toBeVisible();
-    await expect(page.getByText('В разработке · v0.1.0')).toBeVisible();
     expect(
       (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze()).violations,
     ).toEqual([]);
-    await page
-      .locator('.strategy-card', {
-        has: page.getByRole('heading', { name: 'Импульс', exact: true }),
-      })
-      .getByRole('button', { name: 'Создать экземпляр' })
-      .click();
+    await page.getByRole('button', { name: 'Создать бота' }).first().click();
+    await expect(page.getByRole('dialog').getByRole('radio', { name: /Импульс/ })).toBeChecked();
     await page.getByLabel('Название бота').fill(name);
     const responsePromise = page.waitForResponse(
       (response) =>
@@ -58,7 +51,7 @@ test('catalog creates a server instance that survives a new browser, edits, expo
     const second = await secondContext.newPage();
     await second.goto('http://127.0.0.1:5175/');
     await expect(second.getByText('Данные загружены с сервера')).toBeVisible();
-    await second.getByRole('button', { name: 'Мои боты', exact: false }).first().click();
+    await second.getByRole('button', { name: /^Боты/ }).first().click();
     await second.getByRole('button', { name: `${name} Импульс v0.1.0` }).click();
     await expect(second.getByRole('heading', { name })).toBeVisible();
     await second.getByRole('button', { name: 'Настройки', exact: true }).click();

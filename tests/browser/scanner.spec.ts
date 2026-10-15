@@ -159,7 +159,7 @@ test('scanner starts with chosen limits, shows scored breakouts, coins and a cha
   page.on('pageerror', (e) => errors.push(e.message));
   const state = await server(page);
   await page.goto('/');
-  await page.getByRole('button', { name: 'Сканер', exact: true }).first().click();
+  await page.getByRole('button', { name: 'Лаборатория', exact: true }).first().click();
   await expect(page.getByRole('heading', { name: /Сканер пробоев уровня/ })).toBeVisible();
   // Statistics over the saved journals: overall edge, by score band and by each sign.
   const stats = page.locator('.scan-stats');
