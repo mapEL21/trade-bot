@@ -48,6 +48,8 @@ public sealed class SignalLabTests : IDisposable
         Assert.Equal(1, burst.Direction);
         Assert.Equal(Burst, burst.AtMs);
         Assert.Single(result.Events, e => e.Type == "Перекос агрессора" && e.Direction == 1);
+        // The recording's span is its market data, from the first update, not from the first event.
+        Assert.Equal(T0, result.FirstMs);
         // Entry 250 ms later at the ask (100.01) for a long, the bid (99.99) for a short; exits at the book of the horizon.
         Assert.Equal((100.19m / 100.01m - 1) * 100, burst.Move(0, withEvent: true)!.Value, 10);
         Assert.Equal((99.99m / 100.21m - 1) * 100, burst.Move(0, withEvent: false)!.Value, 10);
@@ -144,6 +146,13 @@ public sealed class SignalLabTests : IDisposable
         var recent = lab.Report(0, T0 + 30_000);
         Assert.Equal((1, 1), (recent.Events, recent.Rows.Single(r => r.Type == "Вынос цены" && r.Mode == "follow" && r.Horizon == 5).Episodes));
         Assert.True(recent.Hours < 1);
+        // A recording that ended before any event (start unknown in older results) adds no hours.
+        var empty = Path.Combine(root, "20261015T110000Z-66666666666666666666666666666666"); Directory.CreateDirectory(empty);
+        File.WriteAllText(Path.Combine(empty, "summary.json"), "{}");
+        File.WriteAllText(Path.Combine(empty, "manifest.json"), "{}");
+        File.WriteAllText(Path.Combine(empty, SignalLab.File), JsonSerializer.Serialize(new LabRecording(SignalDetector.Version, "e", 0, T0 + 60_000, 3, []),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        Assert.Equal(1m, lab.Report(0).Hours);
         Assert.Single(lab.Trades("Вынос цены", "follow", 5, 0, T0 + 30_000));
     }
 

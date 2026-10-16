@@ -181,7 +181,8 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
         var from = fromMs ?? 0;
         var recordings = Load().Where(r => r.LastMs >= from).ToList();
         var events = recordings.SelectMany(r => r.Events).Where(e => e.AtMs >= from).OrderBy(e => e.AtMs).ToList();
-        var hours = recordings.Sum(r => Math.Max(0, r.LastMs - Math.Max(r.FirstMs, from))) / 3_600_000m;
+        // A recording without a known start (FirstMs 0) adds no hours instead of the time since 1970.
+        var hours = recordings.Where(r => r.FirstMs > 0).Sum(r => Math.Max(0, r.LastMs - Math.Max(r.FirstMs, from))) / 3_600_000m;
         var episodes = Episodes(events);
         var rows = new List<LabRow>();
         foreach (var type in SignalDetector.Types)

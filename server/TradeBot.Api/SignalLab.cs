@@ -41,7 +41,9 @@ public sealed class SignalDetector
 {
     // 2: an event before the coin's first book snapshot no longer gets a zero entry price.
     // 3: the price path after each entry (LabPath) and the coin's typical minute range are kept for the bot; results are the same.
-    public const int Version = 3;
+    // 4: the recording's span starts at its first market data, not its first event; a recording without events got 0
+    // and the report counted hundreds of thousands of hours.
+    public const int Version = 4;
     public static readonly int[] Horizons = [5, 15, 60, 300];
     public static readonly string[] Types = ["Всплеск объёма", "Перекос агрессора", "Каскад ликвидаций", "Вынос цены", "Перекос стакана", "Пробой уровня"];
     private const long Window = 10_000, Baseline = 15 * 60_000, Cooldown = 60_000, Latency = 250, BookAge = 2_000;
@@ -197,12 +199,12 @@ public sealed class SignalDetector
         if (ranges.Count >= 30) e = e with { TypicalPct = Math.Round(ranges.Average() * 100, 4) };
         var pending = new Pending(e);
         state.Pending.Add(pending); all.Add(pending);
-        firstMs = Math.Min(firstMs, e.AtMs);
     }
 
     // Entry and exits are read from the book as the coin's own clock passes them; a stale book leaves the value unknown.
     private void Advance(State state, long ms)
     {
+        firstMs = Math.Min(firstMs, ms);
         lastMs = Math.Max(lastMs, ms);
         foreach (var p in state.Pending.ToArray())
         {
