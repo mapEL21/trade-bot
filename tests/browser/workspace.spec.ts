@@ -425,6 +425,15 @@ test('testnet keys are entered in a panel and a testnet run shows its orders on 
     .first()
     .click();
   await expect(page.getByText('ТЕСТОВАЯ СЕТЬ', { exact: true })).toBeVisible();
+  // Stopping a testnet run closes its positions on the exchange: the button says so and asks first.
+  let stopped = false;
+  await page.route('**/api/v1/bots/*/signal/stop', (route) => {
+    stopped = true;
+    return route.fulfill({ status: 202 });
+  });
+  page.once('dialog', (d) => void d.dismiss());
+  await page.getByRole('button', { name: 'Остановить и закрыть всё' }).click();
+  expect(stopped).toBe(false);
   await expect(page.getByText('KAVAUSDT лонг 1470 от 0.0681, защитный стоп 0.0675')).toBeVisible();
   await expect(page.getByRole('region', { name: /Заявки на бирже/ })).toContainText(
     'стоп за уровнем отмены',

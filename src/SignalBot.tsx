@@ -65,6 +65,8 @@ export function SignalFields({
         {number('Комиссии круга, %', 'feePct', 0, 1, 0.01)}
         {number('Плечо не больше', 'maxLeverage', 1, maxLeverage, 1)}
         {number('Сделок одновременно', 'maxPositions', 1, 20, 1)}
+        {number('Дневной лимит убытка, % начального депозита', 'dailyLossPct', 1, 100, 1)}
+        {number('Позиция не больше, USDT', 'maxNotional', 5, 1_000_000, 1)}
       </div>
       <p className="field-hint signal-example">
         {strategies.find((s) => s.id === p.signal)?.description} Вход и выход — по логике стратегии,
@@ -140,6 +142,7 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
   const result = current?.result;
   const density = bot.signal?.signal === 'Плотность';
   const live = current?.state === 'running' && current.run.live;
+  const onExchange = current?.state === 'running' && current.run.execution === 'testnet';
   const skipped = Object.entries(result?.skipped ?? {}).sort((a, b) => b[1] - a[1]);
   return (
     <section className="panel paper-run signal-run" aria-labelledby="signal-run-title">
@@ -154,16 +157,29 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
         {density
           ? 'С этого момента бот работает вживую: монеты, у которых скринер нашёл плотность ближе 1,5% к цене, подключаются к потоку сделок и стакана, и бот решает по каждой сделке. С датой в прошлом он проходит прошлые записи данных.'
           : 'Бот проходит каждую завершённую запись рынка: новые сделки появляются после её окончания, примерно раз в час. С датой в прошлом он сначала пройдёт записи с этого момента.'}{' '}
-        Сделки виртуальные: заявки на биржу не отправляются.
+        {current?.state === 'running' && current.run.execution === 'testnet'
+          ? 'Решения уходят заявками в тестовую сеть Binance.'
+          : 'Сделки виртуальные: заявки на биржу не отправляются.'}{' '}
+        Бот не входит по устаревшему стакану; после дневного лимита убытка новые сделки ждут
+        следующего дня по Москве.
       </p>
       <div className="paper-controls">
         {running ? (
           <button
             className="button secondary"
             disabled={busy}
-            onClick={() => void act(() => api.stopSignal(bot))}
+            onClick={() => {
+              if (
+                onExchange &&
+                !window.confirm(
+                  'Остановить бота и закрыть его позиции на бирже рыночными заявками? Заявки на его монетах будут сняты.',
+                )
+              )
+                return;
+              void act(() => api.stopSignal(bot));
+            }}
           >
-            <Square size={15} /> Остановить
+            <Square size={15} /> {onExchange ? 'Остановить и закрыть всё' : 'Остановить'}
           </button>
         ) : (
           <>

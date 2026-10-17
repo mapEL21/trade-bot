@@ -7,8 +7,10 @@ namespace TradeBot.Api;
 // Settings of a bot: its strategy and money management only. Entries and exits are the strategy's own logic
 // (docs/BOT_LOGIC.md), never a stop or a target set in the form. RiskPct: the share of the deposit lost, fees included, when
 // the strategy's cancel level is reached; it sets the size. MaxLeverage caps the notional of all open trades.
+// DailyLossPct: once the realized loss of a Moscow calendar day reaches this share of the starting deposit, no new trade opens
+// until the next day. MaxNotional: a hard cap on one position in USDT, whatever the size calculation says.
 public sealed record SignalParameters(string Signal = SignalParameters.Density, decimal RiskPct = 1.5m, decimal FeePct = .1m,
-    int MaxLeverage = 20, int MaxPositions = 3, string[]? Sessions = null)
+    int MaxLeverage = 20, int MaxPositions = 3, string[]? Sessions = null, decimal DailyLossPct = 10, decimal MaxNotional = 100)
 {
     public const string Density = "Плотность", Spike = "Вынос цены";
     public static readonly string[] Strategies = [Density, Spike];
@@ -26,12 +28,15 @@ public sealed record SignalParameters(string Signal = SignalParameters.Density, 
         if (FeePct is < 0 or > 1) errors["feePct"] = ["Комиссии круга — от 0 до 1%."];
         if (MaxLeverage is < 1 or > MaxLeverageLimit) errors["maxLeverage"] = [$"Плечо — от 1 до {MaxLeverageLimit}."];
         if (MaxPositions is < 1 or > 20) errors["maxPositions"] = ["Одновременных сделок — от 1 до 20."];
+        if (DailyLossPct is < 1 or > 100) errors["dailyLossPct"] = ["Дневной лимит убытка — от 1 до 100% начального депозита."];
+        if (MaxNotional is < MinNotional or > 1_000_000) errors["maxNotional"] = [$"Размер позиции — от {MinNotional} до 1 000 000 USDT."];
         if (Sessions is { } list && (list.Length > TradingSessions.All.Length || list.Distinct().Count() != list.Length || list.Any(x => !TradingSessions.Valid(x) || x is null)))
             errors["sessions"] = ["Неизвестная торговая сессия."];
         return errors;
     }
 
-    // The engine result of a recording depends on everything here except money; the key names its cached file.
+    // The engine result of a recording depends on everything here except money (the loss limits and the position cap);
+    // the key names its cached file.
     public string Key()
     {
         var text = $"{BotEngine.Version}|{SignalDetector.Version}|{Signal}|{RiskPct}|{FeePct}|{MaxLeverage}|{MaxPositions}|{string.Join(',', (Sessions ?? []).Order())}";
@@ -55,6 +60,19 @@ public sealed record SignalRunResult(BotTrade[] Trades, Dictionary<string, int> 
     int Recordings, long? LastDataMs, string? EntriesBlocked, int Pending = 0, decimal? Unrealized = null);
 public sealed record SignalRunView(SignalRun Run, SignalRunResult Result, string State, LiveView? Live = null);
 public sealed record SignalStart(long? FromMs = null, string Execution = SignalRun.Simulation);
+
+// The daily loss limit: the realized result of the Moscow calendar day; at a loss of DailyLossPct of the starting deposit new
+// trades wait for the next day. The money pass and the exchange executor share it.
+public sealed class DailyLoss(decimal budget, decimal pct)
+{
+    private long day = long.MinValue;
+    private decimal result;
+    public static long Day(long ms) => (ms + 3 * 3_600_000) / 86_400_000;
+    public decimal Limit => budget * pct / 100;
+    public void Add(long ms, decimal pnl) { Roll(ms); result += pnl; }
+    public bool Blocked(long ms) { Roll(ms); return -result >= Limit; }
+    private void Roll(long ms) { var d = Day(ms); if (d > day) { day = d; result = 0; } }
+}
 
 // Bot runs: the engine goes through each finished recording of the run once per settings key (the result is cached next to
 // the recording as bot-<key>.json, computed in the background), then the money pass turns the trades into USDT in time order.
@@ -189,12 +207,13 @@ public sealed class SignalBots(PaperRunStore store, SignalLab lab, LiveBots live
         }
     }
 
-    // Trades of the run's period in time order: the notional is the trade's share of the deposit at its entry; after the
-    // loss limit no trade is opened.
+    // Trades of the run's period in time order: the notional is the trade's share of the deposit at its entry, at most
+    // MaxNotional; after the loss limit no trade is opened, after the daily one none until the next Moscow day.
     public static SignalRunResult Money(SignalRun run, IReadOnlyList<EngineResult> results, int pending = 0)
     {
         var deposit = run.Budget;
         var floor = run.Budget - run.LossLimit;
+        var daily = new DailyLoss(run.Budget, run.Parameters.DailyLossPct);
         var skipped = new Dictionary<string, int>();
         foreach (var (reason, count) in results.SelectMany(r => r.Skipped)) skipped[reason] = skipped.GetValueOrDefault(reason) + count;
         void Skip(string reason) => skipped[reason] = skipped.GetValueOrDefault(reason) + 1;
@@ -213,6 +232,7 @@ public sealed class SignalBots(PaperRunStore store, SignalLab lab, LiveBots live
                 var gross = t.Side == "long" ? quantity * (t.Exit - t.Entry) : quantity * (t.Entry - t.Exit);
                 var fee = (o.Notional + quantity * t.Exit) * run.Parameters.FeePct / 200;
                 deposit += gross - fee;
+                daily.Add(t.ClosedMs, gross - fee);
                 trades.Add(new($"{run.Id}-{t.Symbol}-{t.OpenedMs}", DateTimeOffset.FromUnixTimeMilliseconds(t.ClosedMs).ToString("O"), t.Side,
                     Math.Round(gross, 6), Math.Round(fee, 6), t.Entry, t.Exit, quantity, run.Id, true, t.Symbol, "Binance",
                     DateTimeOffset.FromUnixTimeMilliseconds(t.OpenedMs).ToString("O"), (t.ClosedMs - t.OpenedMs) / 1000.0, Math.Round(o.Notional, 2),
@@ -223,11 +243,14 @@ public sealed class SignalBots(PaperRunStore store, SignalLab lab, LiveBots live
         {
             Realize(t.OpenedMs);
             if (deposit <= floor) { blocked ??= "Достигнут лимит убытка: новые сделки не открываются."; Skip("лимит убытка"); continue; }
-            var notional = deposit * t.Fraction;
+            if (daily.Blocked(t.OpenedMs)) { Skip("дневной лимит убытка"); continue; }
+            var notional = Math.Min(deposit * t.Fraction, run.Parameters.MaxNotional);
             if (notional < SignalParameters.MinNotional) { Skip("номинал меньше 5 USDT"); continue; }
             open.Add((t, notional));
         }
         Realize(long.MaxValue);
+        if (blocked is null && results.Count > 0 && daily.Blocked(results.Max(r => r.LastMs)))
+            blocked = "Достигнут дневной лимит убытка: новые сделки — со следующего дня по Москве.";
         return new(trades.ToArray(), skipped, results.Sum(r => r.Signals), results.Sum(r => r.Incomplete), Math.Round(deposit, 4), results.Count,
             results.Count == 0 ? null : results.Max(r => r.LastMs), blocked, pending);
     }

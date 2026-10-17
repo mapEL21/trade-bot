@@ -119,6 +119,8 @@ public sealed class LiveBotsTests : IDisposable
         {
             ["Live:Enabled"] = "true", ["Live:Path"] = Path.Combine(root, "live"), ["Screener:Path"] = Path.Combine(root, "screener"),
             ["Exchange:KeysPath"] = Path.Combine(root, "keys.json"), ["Exchange:TestnetUrl"] = "https://testnet.example",
+            // The stream of this test is from 2025: its data is "late" by the clock, which is not what this test checks.
+            ["Exchange:MaxDelayMs"] = long.MaxValue.ToString(),
         }).Build();
         var environment = new Microsoft.Extensions.Hosting.Internal.HostingEnvironment { ContentRootPath = root };
         var source = new FakeSource();

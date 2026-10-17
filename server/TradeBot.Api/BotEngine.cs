@@ -36,7 +36,8 @@ public interface IBotStrategy
 public sealed class BotEngine
 {
     // 2: density bounce entry by price steps and the queue before the wall (user's rule of 18.10.2026), screener walls.
-    public const int Version = 2;
+    // 3: no entry decided on a book older than BookAge.
+    public const int Version = 3;
     public const long Latency = 250, BookAge = 2_000;
 
     public sealed class Position(string symbol, int side, decimal fraction, string entryReason, object? context)
@@ -141,6 +142,8 @@ public sealed class BotEngine
     public bool Open(string symbol, int side, long ms, decimal riskPct, string reason, object? context)
     {
         if (!parameters.InSession(ms)) { Skip("вне выбранных торговых сессий"); return false; }
+        // A decision on an old book is a decision on a market that may be gone.
+        if (detector.View(symbol) is not { Bid: > 0, Ask: > 0 } book || ms - book.BookMs > BookAge) { Skip("стакан устарел"); return false; }
         if (positions.TryGetValue(symbol, out var held) && !held.Exiting || orders.Any(o => o.Symbol == symbol && !o.Exit))
         { Skip("уже в сделке по этой монете"); return false; }
         var open = positions.Values.Where(p => !p.Exiting).ToList();

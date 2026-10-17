@@ -219,7 +219,8 @@ public sealed class LiveBots(PaperRunStore store, DensityScreener screener, IDep
             else
             {
                 var client = new BinanceFuturesClient(http.Client, ExchangeModes.BaseUrl(configuration, run.Execution), keys.Key, keys.Secret);
-                session.Executor = new ExchangeExecutor(client, run, store, logger);
+                session.Executor = new ExchangeExecutor(client, run, store, logger,
+                    configuration.GetValue("Exchange:MaxDelayMs", ExchangeExecutor.MaxDelayMs));
                 session.Engine.Intent += session.Executor.Enqueue;
             }
         }

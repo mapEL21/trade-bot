@@ -39,6 +39,7 @@ internal sealed class FakeBinance : HttpMessageHandler
             ("POST", "/fapi/v1/order") => Market(q, Order),
             ("GET", "/fapi/v1/order") => Orders.GetValueOrDefault(q["origClientOrderId"]),
             ("DELETE", "/fapi/v1/order") => "{}",
+            ("DELETE", "/fapi/v1/allOpenOrders") => """{"code":200,"msg":"The operation of cancel all open order is done."}""",
             ("GET", "/fapi/v2/positionRisk") => Position == 0 ? "[]" : $"[{{\"symbol\":\"XUSDT\",\"positionAmt\":\"{S(Position)}\",\"entryPrice\":\"100\",\"unRealizedProfit\":\"0\"}}]",
             _ => throw new InvalidOperationException($"unexpected {request.Method} {path}"),
         };

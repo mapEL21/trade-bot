@@ -100,6 +100,8 @@ public sealed class BinanceFuturesClient(HttpClient http, string baseUrl, string
 {
     private long offset;
     private static string S(decimal v) => v.ToString(CultureInfo.InvariantCulture);
+    // The exchange's clock, as far as the last time sync knows it.
+    public long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + offset;
 
     public async Task SyncTimeAsync(CancellationToken ct)
     {
@@ -181,6 +183,10 @@ public sealed class BinanceFuturesClient(HttpClient http, string baseUrl, string
             ["workingType"] = "MARK_PRICE", ["newClientOrderId"] = clientId,
         }, true, ct));
 
+    // Every open order of the coin (stops left behind included).
+    public async Task CancelAllAsync(string symbol, CancellationToken ct) =>
+        await Send(HttpMethod.Delete, "/fapi/v1/allOpenOrders", new() { ["symbol"] = symbol }, true, ct);
+
     public async Task<ExchangeOrder?> QueryAsync(string symbol, string clientId, CancellationToken ct)
     {
         try { return Order(await Send(HttpMethod.Get, "/fapi/v1/order", new() { ["symbol"] = symbol, ["origClientOrderId"] = clientId }, true, ct)); }
@@ -234,6 +240,8 @@ public sealed class ExchangeExecutor : IDisposable
 {
     // The protective stop sits this far beyond the cancel level: in normal work the bot exits first by its own logic.
     public const decimal StopBufferPct = .3m;
+    // An entry decided on data older than this (by the exchange's clock) is not sent: the market may already be elsewhere.
+    public const long MaxDelayMs = 3_000;
     private sealed record Holding(string Symbol, int Side, decimal Quantity, decimal Entry, decimal StopPrice, string StopId, long OpenedMs);
 
     private readonly BinanceFuturesClient client;
@@ -245,14 +253,19 @@ public sealed class ExchangeExecutor : IDisposable
     private readonly Dictionary<string, SymbolRules> rules = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> leverage = new(StringComparer.Ordinal);
     private readonly HashSet<string> strangers = new(StringComparer.Ordinal);
+    // Coins the run has traded: a stop sweeps them for leftover positions and orders.
+    private readonly HashSet<string> touched = new(StringComparer.Ordinal);
+    private readonly DailyLoss daily;
+    private readonly long maxDelayMs;
     private readonly Task worker;
     private decimal realized;
     private int sequence;
     private bool synced;
 
-    public ExchangeExecutor(BinanceFuturesClient client, SignalRun run, PaperRunStore store, ILogger logger)
+    public ExchangeExecutor(BinanceFuturesClient client, SignalRun run, PaperRunStore store, ILogger logger, long maxDelayMs = MaxDelayMs)
     {
-        this.client = client; this.run = run; this.store = store; this.logger = logger;
+        this.client = client; this.run = run; this.store = store; this.logger = logger; this.maxDelayMs = maxDelayMs;
+        daily = new DailyLoss(run.Budget, run.Parameters.DailyLossPct);
         worker = Task.Run(Work);
     }
 
@@ -276,7 +289,8 @@ public sealed class ExchangeExecutor : IDisposable
     }
     private readonly System.Collections.Concurrent.ConcurrentQueue<TaskCompletionSource> drains = new();
 
-    // Closes every position of the run and stops taking orders; waits for the queue to finish.
+    // Closes every position of the run, then whatever is still open on the coins it traded (positions and orders), and stops
+    // taking orders; waits for the queue to finish. Positions on other coins (opened by hand) are left alone.
     public async Task FlattenAndStopAsync()
     {
         queue.Writer.TryWrite(new("flatten", "", 0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 0, 0, null, "бот остановлен"));
@@ -315,6 +329,7 @@ public sealed class ExchangeExecutor : IDisposable
                         List<string> open;
                         lock (holdings) open = holdings.Keys.ToList();
                         foreach (var symbol in open) await Exit(symbol, intent.Reason);
+                        await Sweep();
                         break;
                 }
             }
@@ -348,13 +363,28 @@ public sealed class ExchangeExecutor : IDisposable
     {
         lock (holdings) if (holdings.ContainsKey(intent.Symbol)) return;
         var side = Side(intent.Side);
+        var delay = client.Now - intent.Ms;
+        if (delay > maxDelayMs)
+        {
+            await Log(intent.Symbol, "пропуск", side, 0, intent.Price, "", "skipped",
+                $"Данные опаздывают на {Money(delay / 1000m)} с: вход не отправлен.");
+            return;
+        }
         if (Deposit <= run.Budget - run.LossLimit)
         {
             await Log(intent.Symbol, "пропуск", side, 0, intent.Price, "", "skipped", "Достигнут лимит убытка бота: новые сделки на бирже не открываются.");
             return;
         }
+        if (daily.Blocked(client.Now))
+        {
+            await Log(intent.Symbol, "пропуск", side, 0, intent.Price, "", "skipped",
+                $"Достигнут дневной лимит убытка ({Money(daily.Limit)} USDT): новые сделки — со следующего дня по Москве.");
+            return;
+        }
         if (!rules.TryGetValue(intent.Symbol, out var r)) rules[intent.Symbol] = r = await client.RulesAsync(intent.Symbol, CancellationToken.None);
-        var quantity = Floor(Deposit * intent.Fraction / intent.Price, r.StepSize);
+        // The size the risk asks for, never above the bot's cap on one position.
+        var notional = Math.Min(Deposit * intent.Fraction, run.Parameters.MaxNotional);
+        var quantity = Floor(notional / intent.Price, r.StepSize);
         if (quantity < r.MinQty || quantity * intent.Price < r.MinNotional)
         {
             await Log(intent.Symbol, "пропуск", side, quantity, intent.Price, "", "skipped",
@@ -362,13 +392,14 @@ public sealed class ExchangeExecutor : IDisposable
             return;
         }
         // Isolated margin: the leverage the notional needs out of the deposit, within the bot's limit.
-        var needed = (int)Math.Clamp(Math.Ceiling(intent.Fraction), 1, run.Parameters.MaxLeverage);
+        var needed = (int)Math.Clamp(Math.Ceiling(notional / Deposit), 1, run.Parameters.MaxLeverage);
         if (leverage.GetValueOrDefault(intent.Symbol) != needed)
         {
             await client.SetupAsync(intent.Symbol, needed, CancellationToken.None);
             leverage[intent.Symbol] = needed;
         }
         var id = Id("e");
+        touched.Add(intent.Symbol);
         var order = await Market(intent.Symbol, side, quantity, id, false);
         if (order.ExecutedQty <= 0)
         {
@@ -392,7 +423,7 @@ public sealed class ExchangeExecutor : IDisposable
             await Log(intent.Symbol, "ошибка", Side(-intent.Side), order.ExecutedQty, stopPrice, stopId, "error", $"Защитный стоп не поставлен ({e.Message}): позиция закрывается.");
             var close = await Market(intent.Symbol, Side(-intent.Side), order.ExecutedQty, Id("x"), true);
             var pnl = intent.Side * order.ExecutedQty * (close.AvgPrice - order.AvgPrice) - order.ExecutedQty * (order.AvgPrice + close.AvgPrice) * run.Parameters.FeePct / 200;
-            realized += pnl;
+            Realize(pnl);
             await Log(intent.Symbol, "выход", Side(-intent.Side), close.ExecutedQty, close.AvgPrice, close.ClientId, close.Status,
                 $"Закрыта: не удалось поставить защитный стоп. Результат {Money(pnl)} USDT.");
         }
@@ -407,8 +438,33 @@ public sealed class ExchangeExecutor : IDisposable
         var id = Id("x");
         var order = await Market(symbol, Side(-h.Side), h.Quantity, id, true);
         var pnl = h.Side * h.Quantity * (order.AvgPrice - h.Entry) - h.Quantity * (h.Entry + order.AvgPrice) * run.Parameters.FeePct / 200;
-        realized += pnl;
+        Realize(pnl);
         await Log(symbol, "выход", Side(-h.Side), order.ExecutedQty, order.AvgPrice, id, order.Status, $"{reason}. Результат {Money(pnl)} USDT (комиссия — оценка).");
+    }
+
+    private void Realize(decimal pnl)
+    {
+        realized += pnl;
+        daily.Add(client.Now, pnl);
+    }
+
+    // After the run's own exits: a position still open on a coin the run traded (an answer lost, a fill the bot did not see)
+    // is closed, and every order left on those coins is cancelled.
+    private async Task Sweep()
+    {
+        if (touched.Count == 0) return;
+        var positions = await client.PositionsAsync(CancellationToken.None);
+        foreach (var p in positions.Where(p => touched.Contains(p.Symbol) && p.Amount != 0))
+        {
+            var close = await Market(p.Symbol, p.Amount > 0 ? "SELL" : "BUY", Math.Abs(p.Amount), Id("x"), true);
+            await Log(p.Symbol, "выход", close.Side, close.ExecutedQty, close.AvgPrice, close.ClientId, close.Status,
+                "Остановка: закрыт остаток позиции на монете бота.");
+        }
+        foreach (var symbol in touched)
+        {
+            try { await client.CancelAllAsync(symbol, CancellationToken.None); }
+            catch (ExchangeException e) { await Log(symbol, "ошибка", "", 0, 0, "", "error", $"Не удалось снять заявки: {e.Message}"); }
+        }
     }
 
     private async Task ReconcileNow()
@@ -423,7 +479,7 @@ public sealed class ExchangeExecutor : IDisposable
             var stop = await client.QueryAsync(h.Symbol, h.StopId, CancellationToken.None);
             var price = stop is { AvgPrice: > 0 } ? stop.AvgPrice : h.StopPrice;
             var pnl = h.Side * h.Quantity * (price - h.Entry) - h.Quantity * (h.Entry + price) * run.Parameters.FeePct / 200;
-            realized += pnl;
+            Realize(pnl);
             await Log(h.Symbol, "закрыта биржей", Side(-h.Side), h.Quantity, price, h.StopId, stop?.Status ?? "unknown",
                 $"Позиции на бирже больше нет: сработал защитный стоп. Результат {Money(pnl)} USDT.");
         }

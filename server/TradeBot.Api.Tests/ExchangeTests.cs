@@ -17,18 +17,19 @@ public sealed class ExchangeTests : IDisposable
     private readonly string root = Path.Combine(Path.GetTempPath(), "exchange-tests-" + Guid.NewGuid());
 
     private static readonly SignalRun Run = new("12345678-aaaa-bbbb-cccc-1234567890ab", "bot", 0, null, DateTimeOffset.UnixEpoch, 100, 30,
-        new SignalParameters(MaxLeverage: 20), Live: true, Execution: ExchangeModes.Testnet);
+        new SignalParameters(MaxLeverage: 20, MaxNotional: 1000), Live: true, Execution: ExchangeModes.Testnet);
 
-    private (ExchangeExecutor Executor, FakeBinance Exchange, PaperRunStore Store) Executor()
+    private (ExchangeExecutor Executor, FakeBinance Exchange, PaperRunStore Store) Executor(SignalRun? run = null)
     {
+        run ??= Run;
         var exchange = new FakeBinance();
         var client = new BinanceFuturesClient(new HttpClient(exchange), "https://testnet.example", "key", "secret");
         var store = new PaperRunStore(Path.Combine(root, "workspace.db"));
-        return (new ExchangeExecutor(client, Run, store, NullLogger.Instance), exchange, store);
+        return (new ExchangeExecutor(client, run, store, NullLogger.Instance), exchange, store);
     }
 
     // A long worth 2.5× the 100 USDT deposit, cancelled at 99.5.
-    private static EngineIntent Entry() => new("entry", "XUSDT", 1, 0, 2.5m, 100, 99.5m, "отскок от плотности");
+    private static EngineIntent Entry() => new("entry", "XUSDT", 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 2.5m, 100, 99.5m, "отскок от плотности");
 
     [Fact]
     public async Task AnEntryGoesToTheExchangeWithAProtectiveStopAndAnExitClosesIt()
@@ -118,6 +119,48 @@ public sealed class ExchangeTests : IDisposable
         await executor.DrainAsync();
         Assert.DoesNotContain(exchange.Requests, r => r.Path == "/fapi/v1/order");
         Assert.Contains("меньше минимальной заявки биржи", (await store.ExchangeLogAsync(Run.Id, 1, CancellationToken.None))[0].Message);
+    }
+
+    [Fact]
+    public async Task AnEntryOnLateDataIsNotSent()
+    {
+        var (executor, exchange, store) = Executor();
+        executor.Enqueue(Entry() with { Ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 10_000 });
+        await executor.DrainAsync();
+        Assert.DoesNotContain(exchange.Requests, r => r.Path == "/fapi/v1/order");
+        Assert.StartsWith("Данные опаздывают на", (await store.ExchangeLogAsync(Run.Id, 1, CancellationToken.None))[0].Message);
+    }
+
+    [Fact]
+    public async Task ThePositionCapAndTheDailyLossLimitHoldOnTheExchange()
+    {
+        // A 40 USDT cap: the 250 USDT the risk asks for becomes 0.4 coins at 100, at 1× leverage.
+        var (executor, exchange, store) = Executor(Run with { Parameters = new SignalParameters(MaxLeverage: 20, MaxNotional: 40, DailyLossPct: 1) });
+        executor.Enqueue(Entry());
+        await executor.DrainAsync();
+        Assert.Equal("0.400", exchange.Requests.First(r => r.Path == "/fapi/v1/order" && r.Method == "POST").Query["quantity"]);
+        Assert.Equal("1", exchange.Requests.Single(r => r.Path == "/fapi/v1/leverage").Query["leverage"]);
+        // A 1.2 USDT loss is over 1% of the 100 USDT start: the next entry today is not sent.
+        exchange.Price = 97;
+        executor.Enqueue(new("exit", "XUSDT", -1, 0, 0, 97, null, "выход"));
+        executor.Enqueue(Entry());
+        await executor.DrainAsync();
+        Assert.Single(exchange.Requests, r => r.Path == "/fapi/v1/order" && r.Method == "POST" && r.Query["type"] == "MARKET" && r.Query.GetValueOrDefault("reduceOnly") != "true");
+        Assert.StartsWith("Достигнут дневной лимит убытка", (await store.ExchangeLogAsync(Run.Id, 1, CancellationToken.None))[0].Message);
+    }
+
+    [Fact]
+    public async Task AStopClosesWhatIsLeftOnTheBotsCoinsAndCancelsTheirOrders()
+    {
+        var (executor, exchange, store) = Executor();
+        executor.Enqueue(Entry());
+        await executor.DrainAsync();
+        // A fill the bot did not see: the exchange holds more than the bot knows.
+        exchange.Position += 1;
+        await executor.FlattenAndStopAsync();
+        Assert.Equal(0m, exchange.Position);
+        Assert.Contains(exchange.Requests, r => r.Method == "DELETE" && r.Path == "/fapi/v1/allOpenOrders" && r.Query["symbol"] == "XUSDT");
+        Assert.Contains("остаток позиции", (await store.ExchangeLogAsync(Run.Id, 1, CancellationToken.None))[0].Message);
     }
 
     [Fact]

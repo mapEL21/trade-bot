@@ -27,6 +27,10 @@ const signal: StrategyView = {
       { label: 'Комиссии круга', value: pct(p.feePct) },
       { label: 'Плечо · сделок одновременно', value: `до ${p.maxLeverage}x · ${p.maxPositions}` },
       {
+        label: 'Дневной лимит · позиция',
+        value: `${pct(p.dailyLossPct ?? 10)} депозита · до ${formatMoney(p.maxNotional ?? 100)} USDT`,
+      },
+      {
         label: 'Сессии',
         value: p.sessions?.length
           ? tradingSessions
