@@ -9,7 +9,26 @@ public sealed record LabRow(string Type, string Mode, int Horizon, int Count, de
     decimal? SecondHalf, bool Stable, int Episodes = 0);
 public sealed record LabCount(string Type, int Count, decimal PerHour, int Episodes = 0);
 public sealed record LabReport(int Recordings, decimal Hours, int Events, decimal FeePct, LabCount[] Counts, LabRow[] Rows, string[] Notes,
-    long? FromMs = null);
+    long? FromMs = null, string? Session = null);
+public sealed record LabSessionRow(string Session, string Name, int Episodes, decimal? MeanPct, decimal? WinRate, decimal Hours);
+// Scalping check per coin: how often the spread alone would pay two maker fees.
+public sealed record LabSpreadRow(string Symbol, long Snapshots, decimal MeanBps, decimal Above4Pct, decimal Above10Pct, int Recordings);
+
+// Trading sessions by the UTC hour of the event: Asia 00-08, Europe 08-13, US with Europe 13-21, quiet hours 21-24.
+public static class TradingSessions
+{
+    public static readonly (string Id, string Name, int From, int To)[] All =
+    [
+        ("asia", "Азия · 03:00–11:00 МСК", 0, 8), ("europe", "Европа · 11:00–16:00 МСК", 8, 13),
+        ("us", "США и Европа · 16:00–00:00 МСК", 13, 21), ("late", "Тихие часы · 00:00–03:00 МСК", 21, 24),
+    ];
+    public static string Of(long ms)
+    {
+        var hour = DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime.Hour;
+        return All.First(s => hour >= s.From && hour < s.To).Id;
+    }
+    public static bool Valid(string? id) => id is null || All.Any(s => s.Id == id);
+}
 // One signal of the pre-registered hypothesis and where its check stands: "collecting", "confirmed" or "rejected".
 public sealed record HypothesisSignal(string Type, string Mode, int Horizon, int Episodes, int Needed, decimal? MeanPct, decimal? WinRate,
     decimal? FirstHalf, decimal? SecondHalf, string Verdict);
@@ -174,15 +193,17 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
     }
 
     // fromMs: only events from this moment on, so a hypothesis chosen earlier is checked on data it was not chosen on.
-    public LabReport Report(decimal feePct, long? fromMs = null)
+    public LabReport Report(decimal feePct, long? fromMs = null, string? session = null)
     {
+        if (!TradingSessions.Valid(session)) throw new ArgumentException("Неизвестная торговая сессия.");
         if (feePct is < 0 or > 1) throw new ArgumentException("Комиссии круга — от 0 до 1%.");
         if (fromMs is < 0) throw new ArgumentException("Некорректная дата начала.");
         var from = fromMs ?? 0;
         var recordings = Load().Where(r => r.LastMs >= from).ToList();
-        var events = recordings.SelectMany(r => r.Events).Where(e => e.AtMs >= from).OrderBy(e => e.AtMs).ToList();
+        var events = recordings.SelectMany(r => r.Events).Where(e => e.AtMs >= from && (session is null || TradingSessions.Of(e.AtMs) == session))
+            .OrderBy(e => e.AtMs).ToList();
         // A recording without a known start (FirstMs 0) adds no hours instead of the time since 1970.
-        var hours = recordings.Where(r => r.FirstMs > 0).Sum(r => Math.Max(0, r.LastMs - Math.Max(r.FirstMs, from))) / 3_600_000m;
+        var hours = recordings.Where(r => r.FirstMs > 0).Sum(r => Span(r, from, session)) / 3_600_000m;
         var episodes = Episodes(events);
         var rows = new List<LabRow>();
         foreach (var type in SignalDetector.Types)
@@ -214,7 +235,7 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
             $"Комбинаций {SignalDetector.Types.Length * 2 * SignalDetector.Horizons.Length}: часть может оказаться в плюсе случайно. Найденное нужно проверить на новых днях, прежде чем строить на нём бота.",
             "Проскальзывание глубже лучшей цены и задержка исполнения больше 0,25 с не учтены: для крупных заявок и медленного подключения результат будет хуже.",
         ];
-        return new(recordings.Count, Math.Round(hours, 2), events.Count, feePct, counts, rows.ToArray(), notes, fromMs);
+        return new(recordings.Count, Math.Round(hours, 2), events.Count, feePct, counts, rows.ToArray(), notes, fromMs, session);
     }
 
     // The hypothesis fixed on 16 October 2026 from the first 2.2 hours, before any of the data it is checked on existed: after a
@@ -226,6 +247,41 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
     public const int HypothesisEpisodes = 50;
     public const decimal HypothesisFee = 0.1m;
     private static readonly (string Type, string Mode, int Horizon)[] HypothesisSignals = [("Вынос цены", "follow", 300), ("Каскад ликвидаций", "follow", 300)];
+
+    // Recorded time from fromMs on, only the part inside the session when one is given (counted by the minute).
+    private static long Span(LabRecording r, long from, string? session)
+    {
+        var start = Math.Max(r.FirstMs, from);
+        if (r.LastMs <= start) return 0;
+        if (session is null) return r.LastMs - start;
+        long total = 0;
+        for (var t = start; t < r.LastMs; t += 60_000)
+            if (TradingSessions.Of(t) == session) total += Math.Min(60_000, r.LastMs - t);
+        return total;
+    }
+
+    // One signal (type, direction, holding time) in each trading session: more activity does not mean a better result.
+    public LabSessionRow[] Sessions(string type, string mode, int horizon, decimal feePct, long? fromMs = null)
+    {
+        if (!SignalDetector.Types.Contains(type) || mode is not ("follow" or "fade") || !SignalDetector.Horizons.Contains(horizon))
+            throw new ArgumentException("Неизвестный сигнал, направление или время.");
+        return TradingSessions.All.Select(s =>
+        {
+            var report = Report(feePct, fromMs, s.Id);
+            var row = report.Rows.Single(r => r.Type == type && r.Mode == mode && r.Horizon == horizon);
+            return new LabSessionRow(s.Id, s.Name, row.Episodes, row.Episodes > 0 ? row.MeanPct : null, row.Episodes > 0 ? row.WinRate : null, report.Hours);
+        }).ToArray();
+    }
+
+    // Spread per coin over the processed recordings, widest first.
+    public LabSpreadRow[] Spreads(long? fromMs = null) => Load().Where(r => r.LastMs >= (fromMs ?? 0))
+        .SelectMany(r => (r.Spreads ?? []).Select(s => (r.Id, s))).GroupBy(x => x.s.Symbol)
+        .Select(g =>
+        {
+            var n = g.Sum(x => x.s.Snapshots);
+            return new LabSpreadRow(g.Key, n, n > 0 ? Math.Round(g.Sum(x => x.s.SumBps) / n, 2) : 0,
+                n > 0 ? Math.Round(g.Sum(x => x.s.Above4) * 100m / n, 1) : 0, n > 0 ? Math.Round(g.Sum(x => x.s.Above10) * 100m / n, 1) : 0, g.Count());
+        }).OrderByDescending(x => x.MeanBps).ToArray();
 
     public HypothesisCheck Hypothesis()
     {

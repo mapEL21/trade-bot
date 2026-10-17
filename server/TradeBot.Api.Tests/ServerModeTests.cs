@@ -81,7 +81,9 @@ public sealed class ServerModeTests : IDisposable
         Assert.Equal((5, 3600), (runner.Options!.MaxSymbols, runner.Options.Seconds));
         Assert.Equal(["BTCUSDT", "ETHUSDT"], runner.Options.Exclude!);
         runner.Hold = true;
-        do snapshot = (await client.GetFromJsonAsync<ScanSnapshot>("/api/v1/scanner", wait.Token))!; while (snapshot.State != "scanning" || !runner.Holding);
+        // Read the snapshot only once the held recording runs: one read earlier may still show the segment before it.
+        while (!runner.Holding) await Task.Delay(20, wait.Token);
+        do snapshot = (await client.GetFromJsonAsync<ScanSnapshot>("/api/v1/scanner", wait.Token))!; while (snapshot.State != "scanning");
         Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/scanner/{snapshot.Id}/stop", null)).StatusCode);
         do snapshot = (await client.GetFromJsonAsync<ScanSnapshot>("/api/v1/scanner", wait.Token))!; while (snapshot.State == "scanning");
         var runs = runner.Runs;

@@ -166,6 +166,30 @@ export interface HypothesisCheck {
   verdict: Verdict;
   explanation: string;
 }
+// Trading sessions by the UTC hour (TradingSessions on the server).
+export const tradingSessions: { id: string; name: string }[] = [
+  { id: 'asia', name: 'Азия · 03:00–11:00 МСК' },
+  { id: 'europe', name: 'Европа · 11:00–16:00 МСК' },
+  { id: 'us', name: 'США и Европа · 16:00–00:00 МСК' },
+  { id: 'late', name: 'Тихие часы · 00:00–03:00 МСК' },
+];
+export interface LabSessionRow {
+  session: string;
+  name: string;
+  episodes: number;
+  meanPct: number | null;
+  winRate: number | null;
+  hours: number;
+}
+// How often the spread alone would pay two maker fees (4 bp), per coin.
+export interface LabSpreadRow {
+  symbol: string;
+  snapshots: number;
+  meanBps: number;
+  above4Pct: number;
+  above10Pct: number;
+  recordings: number;
+}
 export interface LabReport {
   recordings: number;
   hours: number;
@@ -173,6 +197,7 @@ export interface LabReport {
   feePct: number;
   counts: { type: string; count: number; perHour: number; episodes: number }[];
   fromMs: number | null;
+  session: string | null;
   rows: LabRow[];
   notes: string[];
 }
@@ -194,10 +219,16 @@ export const api = {
   labStatus: (signal?: AbortSignal) => request<LabStatus>('/lab/status', { signal }),
   runLab: () => request<void>('/lab/run', { method: 'POST' }),
   labHypothesis: () => request<HypothesisCheck>('/lab/hypothesis'),
-  labReport: (feePct: number, fromMs: number | null) =>
+  labReport: (feePct: number, fromMs: number | null, session: string | null = null) =>
     request<LabReport>(
-      `/lab/report?feePct=${encodeURIComponent(feePct)}${fromMs !== null ? `&fromMs=${fromMs}` : ''}`,
+      `/lab/report?feePct=${encodeURIComponent(feePct)}${fromMs !== null ? `&fromMs=${fromMs}` : ''}${session ? `&session=${session}` : ''}`,
     ),
+  labSessions: (row: LabRow, feePct: number, fromMs: number | null) =>
+    request<LabSessionRow[]>(
+      `/lab/sessions?type=${encodeURIComponent(row.type)}&mode=${row.mode}&horizon=${row.horizon}&feePct=${encodeURIComponent(feePct)}${fromMs !== null ? `&fromMs=${fromMs}` : ''}`,
+    ),
+  labSpreads: (fromMs: number | null) =>
+    request<LabSpreadRow[]>(`/lab/spreads${fromMs !== null ? `?fromMs=${fromMs}` : ''}`),
   labTrades: (row: LabRow, feePct: number, fromMs: number | null) =>
     request<Trade[]>(
       `/lab/trades?type=${encodeURIComponent(row.type)}&mode=${row.mode}&horizon=${row.horizon}&feePct=${encodeURIComponent(feePct)}${fromMs !== null ? `&fromMs=${fromMs}` : ''}`,

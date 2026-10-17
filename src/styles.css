@@ -2369,3 +2369,20 @@ tbody tr:hover {
 .signal-example {
   margin-top: 4px;
 }
+
+.scanner-form .lab-session {
+  flex: 0 0 230px;
+}
+.signal-sessions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin: 6px 0 0;
+  border: 0;
+  padding: 0;
+}
+.signal-sessions legend {
+  font-size: 11px;
+  color: #9aa8bc;
+  margin-bottom: 4px;
+}

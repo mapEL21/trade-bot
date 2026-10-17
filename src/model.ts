@@ -51,7 +51,10 @@ export interface SignalParameters {
   feePct: number;
   maxLeverage: number;
   maxPositions: number;
+  // Trading sessions the bot opens trades in (asia, europe, us, late); missing or empty means all hours.
+  sessions?: string[];
 }
+export const sessionIds = ['asia', 'europe', 'us', 'late'];
 export const signalTypes = [
   'Вынос цены',
   'Каскад ликвидаций',
@@ -59,6 +62,10 @@ export const signalTypes = [
   'Перекос агрессора',
   'Перекос стакана',
   'Пробой уровня',
+  'Подход к плотности',
+  'Проедание плотности',
+  'Снятие плотности',
+  'Переставление плотности',
 ];
 export const signalVersion = '0.1.0';
 // The hypothesis under check: follow a forced price jerk for 5 minutes, risking 1.5% of the deposit with fees.
@@ -457,6 +464,13 @@ function validateSignalBot(v: Record<string, unknown>): BotConfig {
     throw new Error(`Плечо — целое число от 1 до ${maxLeverage}.`);
   if (!inRange(p.maxPositions, 1, 20) || !Number.isInteger(p.maxPositions))
     throw new Error('Одновременных сделок — от 1 до 20.');
+  if (
+    p.sessions != null &&
+    (!Array.isArray(p.sessions) ||
+      p.sessions.some((x) => !sessionIds.includes(x)) ||
+      new Set(p.sessions).size !== p.sessions.length)
+  )
+    throw new Error('Неизвестная торговая сессия.');
   return {
     name: (v.name as string).trim(),
     exchange: 'Binance',
@@ -475,6 +489,7 @@ function validateSignalBot(v: Record<string, unknown>): BotConfig {
       feePct: p.feePct,
       maxLeverage: p.maxLeverage,
       maxPositions: p.maxPositions,
+      ...(p.sessions?.length ? { sessions: p.sessions } : {}),
     },
   };
 }

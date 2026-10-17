@@ -5,8 +5,11 @@ namespace TradeBot.Api;
 // The stop is StopRanges typical 1-minute ranges of the coin away from the entry. A trade whose fees would take more than
 // MaxFeeShare of the risk is skipped: on a coin that barely moves the size, the leverage and the fees grow until they eat it.
 public sealed record SignalParameters(string Signal = "Вынос цены", string Mode = "follow", int HoldSeconds = 300, decimal RiskPct = 1.5m,
-    decimal StopRanges = 2, decimal MaxFeeShare = .3m, decimal FeePct = .1m, int MaxLeverage = 20, int MaxPositions = 3)
+    decimal StopRanges = 2, decimal MaxFeeShare = .3m, decimal FeePct = .1m, int MaxLeverage = 20, int MaxPositions = 3,
+    string[]? Sessions = null)
 {
+    // Sessions: the trading sessions (TradingSessions ids) the bot opens trades in; null or empty means all of them.
+    public bool InSession(long ms) => Sessions is not { Length: > 0 } s || s.Contains(TradingSessions.Of(ms));
     public const decimal MinNotional = 5;
 
     public Dictionary<string, string[]> Validate()
@@ -21,6 +24,8 @@ public sealed record SignalParameters(string Signal = "Вынос цены", str
         if (FeePct is < 0 or > 1) errors["feePct"] = ["Комиссии круга — от 0 до 1%."];
         if (MaxLeverage is < 1 or > LeaderLagParameters.MaxLeverage) errors["maxLeverage"] = [$"Плечо — от 1 до {LeaderLagParameters.MaxLeverage}."];
         if (MaxPositions is < 1 or > 20) errors["maxPositions"] = ["Одновременных сделок — от 1 до 20."];
+        if (Sessions is { } list && (list.Length > TradingSessions.All.Length || list.Distinct().Count() != list.Length || list.Any(x => !TradingSessions.Valid(x) || x is null)))
+            errors["sessions"] = ["Неизвестная торговая сессия."];
         return errors;
     }
 }
@@ -83,6 +88,7 @@ public static class SignalEngine
             {
                 Realize(e.AtMs);
                 signals++;
+                if (!p.InSession(e.AtMs)) { Skip("вне выбранных торговых сессий"); continue; }
                 if (deposit <= floor) { blocked ??= "Достигнут лимит убытка: новые сделки не открываются."; Skip("лимит убытка"); continue; }
                 if (open.Any(o => o.Symbol == e.Symbol)) { Skip("уже в сделке по этой монете"); continue; }
                 if (open.Count >= p.MaxPositions) { Skip("достигнут предел одновременных сделок"); continue; }

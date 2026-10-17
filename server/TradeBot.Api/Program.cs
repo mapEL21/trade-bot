@@ -138,12 +138,18 @@ api.MapPost("/scanner/{id:guid}/stop", (Guid id, MarketScanner scanner) => scann
 api.MapGet("/lab/status", (SignalLab lab) => Results.Ok(lab.Status));
 api.MapPost("/lab/run", (SignalLab lab) => lab.Start()
     ? Results.Accepted("/api/v1/lab/status") : Results.Problem(statusCode: 409, title: "Записи уже обрабатываются."));
-api.MapGet("/lab/report", (decimal? feePct, long? fromMs, SignalLab lab) =>
+api.MapGet("/lab/report", (decimal? feePct, long? fromMs, string? session, SignalLab lab) =>
 {
-    try { return Results.Ok(lab.Report(feePct ?? 0.1m, fromMs)); }
+    try { return Results.Ok(lab.Report(feePct ?? 0.1m, fromMs, session)); }
     catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
 });
 api.MapGet("/lab/hypothesis", (SignalLab lab) => Results.Ok(lab.Hypothesis()));
+api.MapGet("/lab/sessions", (string type, string mode, int horizon, decimal? feePct, long? fromMs, SignalLab lab) =>
+{
+    try { return Results.Ok(lab.Sessions(type, mode, horizon, feePct ?? 0.1m, fromMs)); }
+    catch (ArgumentException e) { return Results.Problem(statusCode: 400, title: e.Message); }
+});
+api.MapGet("/lab/spreads", (long? fromMs, SignalLab lab) => Results.Ok(lab.Spreads(fromMs)));
 api.MapGet("/lab/trades", (string type, string mode, int horizon, decimal? feePct, long? fromMs, SignalLab lab) =>
 {
     try { return Results.Ok(lab.Trades(type, mode, horizon, feePct ?? 0.1m, fromMs)); }

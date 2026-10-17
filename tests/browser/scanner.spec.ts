@@ -210,7 +210,68 @@ test('signal lab runs the recordings, ranks signals after fees and charts the ch
         fromMs: new URL(route.request().url()).searchParams.has('fromMs')
           ? Number(new URL(route.request().url()).searchParams.get('fromMs'))
           : null,
+        session: new URL(route.request().url()).searchParams.get('session'),
       },
+    }),
+  );
+  await page.route('**/api/v1/lab/sessions*', (route) =>
+    route.fulfill({
+      json: [
+        {
+          session: 'asia',
+          name: 'Азия · 03:00–11:00 МСК',
+          episodes: 40,
+          meanPct: -0.12,
+          winRate: 40,
+          hours: 8,
+        },
+        {
+          session: 'europe',
+          name: 'Европа · 11:00–16:00 МСК',
+          episodes: 30,
+          meanPct: 0.21,
+          winRate: 57,
+          hours: 5,
+        },
+        {
+          session: 'us',
+          name: 'США и Европа · 16:00–00:00 МСК',
+          episodes: 50,
+          meanPct: 0.08,
+          winRate: 52,
+          hours: 8,
+        },
+        {
+          session: 'late',
+          name: 'Тихие часы · 00:00–03:00 МСК',
+          episodes: 0,
+          meanPct: null,
+          winRate: null,
+          hours: 3,
+        },
+      ],
+    }),
+  );
+  await page.route('**/api/v1/lab/spreads*', (route) =>
+    route.fulfill({
+      json: [
+        {
+          symbol: 'ZUSDT',
+          snapshots: 7200,
+          meanBps: 6.4,
+          above4Pct: 71.2,
+          above10Pct: 12.5,
+          recordings: 2,
+        },
+        {
+          symbol: 'XUSDT',
+          snapshots: 7200,
+          meanBps: 1.1,
+          above4Pct: 0.4,
+          above10Pct: 0,
+          recordings: 2,
+        },
+      ],
     }),
   );
   await page.route('**/api/v1/lab/trades*', (route) =>
@@ -267,6 +328,16 @@ test('signal lab runs the recordings, ranks signals after fees and charts the ch
   await expect(page.getByText(/Учтены только события с/)).toBeVisible();
   await page.getByRole('button', { name: 'Все данные' }).click();
   await expect(page.getByText(/Учтены только события с/)).toHaveCount(0);
+  // One trading session at a time.
+  const sessionRequest = page.waitForRequest((r) => r.url().includes('session=asia'));
+  await page.getByLabel('Торговая сессия').selectOption('asia');
+  await sessionRequest;
+  await expect(page.getByText(/Только сессия «Азия/)).toBeVisible();
+  await page.getByLabel('Торговая сессия').selectOption('');
+  // Scalping check: where the spread alone pays two maker fees.
+  const spreads = page.getByRole('table', { name: /Спред лучших цен/ });
+  await expect(spreads.locator('tbody tr').first()).toContainText('ZUSDT');
+  await expect(spreads).toContainText('71,2% времени');
   await page.getByLabel(/Показывать и редкие/).check();
   await expect(table.locator('tbody tr')).toHaveCount(3);
   await table.locator('tbody tr').nth(1).getByRole('button', { name: 'Каскад ликвидаций' }).click();
@@ -274,6 +345,9 @@ test('signal lab runs the recordings, ranks signals after fees and charts the ch
     page.getByRole('heading', { name: /Каскад ликвидаций · против движения · 15 с/ }),
   ).toBeVisible();
   await expect(page.getByRole('img', { name: /Кривая накопленного результата/ })).toBeVisible();
+  const bySession = page.getByRole('table', { name: /по торговым сессиям/ });
+  await expect(bySession.locator('tbody tr')).toHaveCount(4);
+  await expect(bySession.locator('tbody tr').nth(1)).toContainText('+0,21%');
   await expect(page.locator('.trades-panel')).toContainText('Расчёт по записям рынка');
   expect((await new AxeBuilder({ page }).include('.signal-lab').analyze()).violations).toEqual([]);
   await page.screenshot({ path: 'artifacts/lab-desktop.png', fullPage: true });

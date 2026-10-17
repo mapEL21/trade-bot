@@ -22,7 +22,10 @@ public sealed record LabEvent(string Symbol, string Type, int Direction, long At
         return longSide ? (exitBid / ask - 1) * 100 : (bid / exitAsk - 1) * 100;
     }
 }
-public sealed record LabRecording(int Version, string Id, long FirstMs, long LastMs, int Symbols, LabEvent[] Events);
+// Spreads: per coin, how wide the best bid/ask spread was over the recording's book snapshots, for the scalping check.
+public sealed record LabRecording(int Version, string Id, long FirstMs, long LastMs, int Symbols, LabEvent[] Events, LabSpread[]? Spreads = null);
+// Snapshots counted, mean spread in bp, the share of snapshots with a spread of at least 4 bp (two maker fees of 0.02%) and 10 bp.
+public sealed record LabSpread(string Symbol, long Snapshots, decimal SumBps, long Above4, long Above10);
 
 // The best prices after one event's entry, second by second for 5 minutes, so a bot can replay stops and any holding time.
 // Samples[k] covers the (k+1)-th second after the entry: last bid, last ask, lowest bid and highest ask among the fresh book
@@ -43,9 +46,15 @@ public sealed class SignalDetector
     // 3: the price path after each entry (LabPath) and the coin's typical minute range are kept for the bot; results are the same.
     // 4: the recording's span starts at its first market data, not its first event; a recording without events got 0
     // and the report counted hundreds of thousands of hours.
-    public const int Version = 4;
+    // 5: order book walls (approach, eaten, pulled, moved) and spread statistics.
+    public const int Version = 5;
     public static readonly int[] Horizons = [5, 15, 60, 300];
-    public static readonly string[] Types = ["Всплеск объёма", "Перекос агрессора", "Каскад ликвидаций", "Вынос цены", "Перекос стакана", "Пробой уровня"];
+    public static readonly string[] Types = ["Всплеск объёма", "Перекос агрессора", "Каскад ликвидаций", "Вынос цены", "Перекос стакана", "Пробой уровня",
+        "Подход к плотности", "Проедание плотности", "Снятие плотности", "Переставление плотности"];
+    // A wall: a level of the visible book worth at least 5 median levels and 0.02% of the coin's 24-hour volume. It counts once
+    // it has stood for 30 s; it stays a wall while the level keeps at least half that size.
+    private const decimal WallLevels = 5, WallVolumeShare = .0002m, WallKeep = .5m, WallNear = .001m, WallPulledNear = .0015m;
+    private const long WallAge = 30_000;
     private const long Window = 10_000, Baseline = 15 * 60_000, Cooldown = 60_000, Latency = 250, BookAge = 2_000;
 
     private sealed class Pending(LabEvent e)
@@ -55,8 +64,16 @@ public sealed class SignalDetector
         public bool[] Done = new bool[Horizons.Length];
         public readonly int[]?[] Samples = new int[]?[LabPath.Seconds];
     }
-    private sealed class State
+    private sealed class Wall(int side, decimal price, decimal quote, long firstMs)
     {
+        // Side: +1 a bid wall below the price, -1 an ask wall above it.
+        public readonly int Side = side; public decimal Price = price, Quote = quote; public long FirstMs = firstMs; public bool Approached;
+    }
+    private sealed class State(decimal volume)
+    {
+        public readonly decimal Volume = volume;
+        public readonly List<Wall> Walls = [];
+        public long Snapshots, Above4, Above10; public decimal SpreadSum;
         // Rolling windows kept as running sums: the last 10 s, the 15 min before them, and prices of the last 30 s.
         public readonly Queue<(long Ms, decimal Price, decimal Quote, bool Buy)> Recent = new(), Older = new();
         public readonly Queue<(long Ms, decimal Price)> Prices = new();
@@ -77,7 +94,7 @@ public sealed class SignalDetector
 
     public SignalDetector(IReadOnlyDictionary<string, decimal> quoteVolumes, bool liquidations)
     {
-        states = quoteVolumes.Keys.ToDictionary(x => x, _ => new State(), StringComparer.Ordinal);
+        states = quoteVolumes.ToDictionary(x => x.Key, x => new State(x.Value), StringComparer.Ordinal);
         levels = new LevelScanner(new ScanSettings(), quoteVolumes, liquidations);
     }
 
@@ -189,6 +206,75 @@ public sealed class SignalDetector
         if (heavy && !state.BookHeavy && ms - state.FirstTradeMs >= 5 * 60_000)
             Emit(state, new(symbol, "Перекос стакана", Math.Sign(imbalance), ms, mid, $"Заявок {(imbalance > 0 ? "на покупку" : "на продажу")} на {Math.Abs(imbalance) * 100:0}% больше в пределах 0,3%"));
         state.BookHeavy = heavy;
+        if (mid > 0 && state.Ask >= state.Bid)
+        {
+            var spread = (state.Ask - state.Bid) / mid * 10_000;
+            state.Snapshots++; state.SpreadSum += spread;
+            if (spread >= 4) state.Above4++;
+            if (spread >= 10) state.Above10++;
+        }
+        Walls(symbol, state, ms, mid, bids, asks);
+    }
+
+    // Large resting orders ("плотности") and what happens to them. Approach: the price came within 0.1% of a wall that has
+    // stood 30 s (with the event: through the wall; against: a bounce). Eaten: the price went through a standing wall.
+    // Pulled: a standing wall vanished while the price was within 0.15% of it, the way a supporting order is pulled before
+    // it is hit (direction: towards where it stood). Moved: a standing wall vanished and a wall of similar size appeared on
+    // the same side at another price in the same snapshot, the way an order is moved after the price (direction: where it
+    // moved). Only the visible 20 levels are known: a wall that left the visible range is dropped without an event.
+    private void Walls(string symbol, State state, long ms, decimal mid, JsonElement bids, JsonElement asks)
+    {
+        if (mid <= 0) return;
+        var levels = bids.EnumerateArray().Select(l => (Side: 1, Price: Dec(l[0]), Quote: Dec(l[0]) * Dec(l[1])))
+            .Concat(asks.EnumerateArray().Select(l => (Side: -1, Price: Dec(l[0]), Quote: Dec(l[0]) * Dec(l[1])))).ToList();
+        if (levels.Count < 10) return;
+        var sorted = levels.Select(l => l.Quote).Order().ToList();
+        var threshold = Math.Max(WallLevels * sorted[sorted.Count / 2], WallVolumeShare * state.Volume);
+        var ready = ms - state.FirstTradeMs >= 5 * 60_000;
+        var lowestBid = levels.Where(l => l.Side == 1).Min(l => l.Price);
+        var highestAsk = levels.Where(l => l.Side == -1).Max(l => l.Price);
+        var big = levels.Where(l => l.Quote >= threshold).ToList();
+        var gone = new List<Wall>();
+        foreach (var wall in state.Walls)
+        {
+            var level = levels.FirstOrDefault(l => l.Side == wall.Side && l.Price == wall.Price);
+            if (level.Quote >= WallKeep * threshold) { wall.Quote = level.Quote; continue; }
+            gone.Add(wall);
+        }
+        foreach (var wall in gone)
+        {
+            state.Walls.Remove(wall);
+            var standing = ms - wall.FirstMs >= WallAge;
+            // Out of the visible range: nothing is known about it.
+            if (wall.Side == 1 ? wall.Price < lowestBid : wall.Price > highestAsk) continue;
+            var through = wall.Side == 1 ? state.Bid < wall.Price : state.Ask > wall.Price;
+            var moved = big.Where(l => l.Side == wall.Side && l.Price != wall.Price && state.Walls.All(w => w.Price != l.Price || w.Side != l.Side)
+                    && l.Quote >= wall.Quote * .7m && l.Quote <= wall.Quote * 1.3m)
+                .OrderBy(l => Math.Abs(l.Price - wall.Price)).Select(l => (decimal?)l.Price).FirstOrDefault();
+            var distance = Math.Abs(wall.Price / mid - 1);
+            var size = $"{wall.Quote / 1000:0.#} тыс. $";
+            if (!standing || !ready) { if (moved is { } p) state.Walls.Add(new(wall.Side, p, wall.Quote, wall.FirstMs)); continue; }
+            if (through)
+                Emit(state, new(symbol, "Проедание плотности", -wall.Side, ms, mid, $"Плотность {size} на {wall.Price} пройдена"));
+            else if (moved is { } to)
+            {
+                Emit(state, new(symbol, "Переставление плотности", Math.Sign(to - wall.Price), ms, mid,
+                    $"Плотность {size} {(wall.Side == 1 ? "на покупку" : "на продажу")} переставлена с {wall.Price} на {to}"));
+                // The moved order is the same wall: its age carries over, so the next move counts as well.
+                state.Walls.Add(new(wall.Side, to, wall.Quote, wall.FirstMs));
+            }
+            else if (distance <= WallPulledNear)
+                Emit(state, new(symbol, "Снятие плотности", -wall.Side, ms, mid, $"Плотность {size} на {wall.Price} снята в {distance * 100:0.##}% от цены"));
+        }
+        foreach (var l in big.Where(l => state.Walls.All(w => w.Side != l.Side || w.Price != l.Price)))
+            state.Walls.Add(new(l.Side, l.Price, l.Quote, ms));
+        if (!ready) return;
+        foreach (var wall in state.Walls.Where(w => !w.Approached && ms - w.FirstMs >= WallAge && Math.Abs(w.Price / mid - 1) <= WallNear))
+        {
+            wall.Approached = true;
+            Emit(state, new(symbol, "Подход к плотности", -wall.Side, ms, mid,
+                $"Цена в {Math.Abs(wall.Price / mid - 1) * 100:0.##}% от плотности {wall.Quote / 1000:0.#} тыс. $ {(wall.Side == 1 ? "на покупку" : "на продажу")}"));
+        }
     }
 
     private void Emit(State state, LabEvent e, bool cooldown = true)
@@ -238,7 +324,9 @@ public sealed class SignalDetector
     }
 
     public LabRecording Result(string id) => new(Version, id, firstMs == long.MaxValue ? 0 : firstMs, lastMs, states.Count,
-        all.Select(p => p.Event with { EntryAsk = p.Ask, EntryBid = p.Bid, ExitBid = p.ExitBid, ExitAsk = p.ExitAsk }).ToArray());
+        all.Select(p => p.Event with { EntryAsk = p.Ask, EntryBid = p.Bid, ExitBid = p.ExitBid, ExitAsk = p.ExitAsk }).ToArray(),
+        states.Where(x => x.Value.Snapshots > 0)
+            .Select(x => new LabSpread(x.Key, x.Value.Snapshots, Math.Round(x.Value.SpreadSum, 4), x.Value.Above4, x.Value.Above10)).ToArray());
 
     // Paths of the events that got an entry, in the order of Result().Events.
     public List<LabPath> Paths() => all.Select((p, i) => (p, i)).Where(x => x.p.Ask is not null)

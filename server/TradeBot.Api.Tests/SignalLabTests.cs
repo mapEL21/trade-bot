@@ -154,6 +154,14 @@ public sealed class SignalLabTests : IDisposable
             new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         Assert.Equal(1m, lab.Report(0).Hours);
         Assert.Single(lab.Trades("Вынос цены", "follow", 5, 0, T0 + 30_000));
+        // By session: T0 is 22:13 UTC, the quiet hours; the other sessions have neither events nor hours here.
+        var sessions = lab.Sessions("Вынос цены", "follow", 5, 0);
+        Assert.Equal(["asia", "europe", "us", "late"], sessions.Select(x => x.Session));
+        var late = sessions.Single(x => x.Session == "late");
+        Assert.Equal(2, late.Episodes);
+        Assert.Equal(row.MeanPct, late.MeanPct);
+        Assert.Equal((0, (decimal?)null), (sessions.Single(x => x.Session == "asia").Episodes, sessions.Single(x => x.Session == "asia").MeanPct));
+        Assert.Throws<ArgumentException>(() => lab.Report(0, null, "mars"));
     }
 
     [Theory]

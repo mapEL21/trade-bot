@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { PaperRun } from './PaperRun';
+import { tradingSessions } from './api';
 import { SignalRunPanel } from './SignalBot';
 import { formatMoney, type Bot } from './model';
 
@@ -93,6 +94,15 @@ const signal: StrategyView = {
         value: `${pct(p.feePct)} · не больше ${pct(p.maxFeeShare * 100)} риска`,
       },
       { label: 'Плечо · сделок одновременно', value: `до ${p.maxLeverage}x · ${p.maxPositions}` },
+      {
+        label: 'Сессии',
+        value: p.sessions?.length
+          ? tradingSessions
+              .filter((s) => p.sessions!.includes(s.id))
+              .map((s) => s.name.split(' · ')[0])
+              .join(', ')
+          : 'все часы',
+      },
       { label: 'Лимит убытка', value: `${formatMoney(bot.lossLimit)} USDT` },
     ];
   },

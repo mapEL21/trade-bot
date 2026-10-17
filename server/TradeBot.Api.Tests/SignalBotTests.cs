@@ -103,6 +103,20 @@ public sealed class SignalBotTests : IDisposable
     }
 
     [Fact]
+    public void ABotLimitedToSessionsSkipsSignalsOutsideThem()
+    {
+        // T0 is 09:06 UTC (Europe); a signal 6 hours later is in the US session.
+        Assert.Equal("europe", TradingSessions.Of(T0));
+        LabEvent[] events = [Spike("AUSDT", T0), Spike("BUSDT", T0 + 6 * 3_600_000)];
+        var only = new SignalParameters(Sessions: ["us"]);
+        Assert.Empty(only.Validate());
+        Assert.NotEmpty(new SignalParameters(Sessions: ["mars"]).Validate());
+        var result = SignalEngine.Run(Run(only), [Recording(events, Path(0), Path(1))]);
+        Assert.Equal("BUSDT", Assert.Single(result.Trades).Symbol);
+        Assert.Equal(1, result.Skipped["вне выбранных торговых сессий"]);
+    }
+
+    [Fact]
     public void LossLimitStopsNewEntriesAndTheDepositCarriesToTheNextRecording()
     {
         // Each trade is stopped out for 1.5% of the current deposit; with a 2 USDT limit the third signal is not traded.

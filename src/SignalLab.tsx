@@ -5,7 +5,10 @@ import {
   type HypothesisCheck,
   type LabReport,
   type LabRow,
+  type LabSessionRow,
+  type LabSpreadRow,
   type LabStatus,
+  tradingSessions,
   type Verdict,
 } from './api';
 import { metrics, type Trade } from './model';
@@ -50,19 +53,24 @@ export function SignalLabPanel() {
   const [fee, setFee] = useState(0.1);
   const [all, setAll] = useState(false);
   const [from, setFrom] = useState(savedFrom);
+  const [session, setSession] = useState('');
   const [selected, setSelected] = useState<LabRow | null>(null);
+  const [bySession, setBySession] = useState<LabSessionRow[] | null>(null);
+  const [spreads, setSpreads] = useState<LabSpreadRow[] | null>(null);
   const [trades, setTrades] = useState<Trade[] | null>(null);
   const [error, setError] = useState('');
 
-  async function load(feePct = fee, since = from) {
+  async function load(feePct = fee, since = from, within = session) {
     if (!Number.isFinite(feePct)) return;
     try {
-      const [next, check] = await Promise.all([
-        api.labReport(feePct, fromMsOf(since)),
+      const [next, check, spread] = await Promise.all([
+        api.labReport(feePct, fromMsOf(since), within || null),
         api.labHypothesis(),
+        api.labSpreads(fromMsOf(since)),
       ]);
       setReport(next);
       setHypothesis(check);
+      setSpreads(spread);
       setError('');
     } catch (e) {
       setError((e as Error).message);
@@ -97,6 +105,13 @@ export function SignalLabPanel() {
   useEffect(() => {
     if (!selected) return;
     let stopped = false;
+    setBySession(null);
+    api
+      .labSessions(selected, fee, fromMsOf(from))
+      .then((s) => {
+        if (!stopped) setBySession(s);
+      })
+      .catch(() => {});
     api
       .labTrades(selected, fee, fromMsOf(from))
       .then((t) => {
@@ -177,6 +192,23 @@ export function SignalLabPanel() {
               }}
             />
           </label>
+          <label className="field lab-session">
+            <span>Торговая сессия</span>
+            <select
+              value={session}
+              onChange={(e) => {
+                setSession(e.target.value);
+                void load(fee, from, e.target.value);
+              }}
+            >
+              <option value="">Все часы</option>
+              {tradingSessions.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </label>
           <button className="button secondary" onClick={() => void load()}>
             Пересчитать
           </button>
@@ -230,6 +262,8 @@ export function SignalLabPanel() {
                 : 'Устойчиво прибыльных сигналов пока нет: ни одна комбинация не в плюсе на обеих половинах данных при 100+ эпизодах.'}
               {report.fromMs !== null &&
                 ` Учтены только события с ${new Date(report.fromMs).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })} (МСК).`}
+              {report.session &&
+                ` Только сессия «${tradingSessions.find((s) => s.id === report.session)?.name}».`}
             </p>
             <div
               className="table-scroll"
@@ -297,14 +331,103 @@ export function SignalLabPanel() {
               Закрыть
             </button>
           </div>
+          {bySession && <SessionTable rows={bySession} />}
           <Performance trades={trades} pnl={metrics(trades).pnl} />
           <TradesTable
             trades={trades}
-            note="Расчёт по записям рынка: вход и выход по лучшим ценам стакана, сделок не было."
+            note="Расчёт по записям рынка: вход и выход по лучшим ценам стакана, сделок не было. График и сделки — за все часы."
           />
         </>
       )}
+      {spreads && spreads.length > 0 && <SpreadPanel rows={spreads} />}
     </div>
+  );
+}
+
+// The chosen signal in each trading session: more activity does not mean a better result, so each is shown on its own.
+function SessionTable({ rows }: { rows: LabSessionRow[] }) {
+  return (
+    <section className="panel" aria-labelledby="lab-sessions-title">
+      <h3 id="lab-sessions-title">По торговым сессиям</h3>
+      <div className="table-scroll" tabIndex={0} role="region" aria-label="Сессии, прокрутка">
+        <table>
+          <caption className="sr-only">Результат выбранного сигнала по торговым сессиям</caption>
+          <thead>
+            <tr>
+              <th>Сессия</th>
+              <th>Записано, ч</th>
+              <th>Эпизодов</th>
+              <th>Средний результат</th>
+              <th>Прибыльных</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.session}>
+                <td>{r.name}</td>
+                <td>{r.hours.toLocaleString('ru-RU')}</td>
+                <td>{r.episodes}</td>
+                <td className={tone(r.meanPct)}>{pct(r.meanPct)}</td>
+                <td>{r.winRate === null ? '—' : `${r.winRate.toLocaleString('ru-RU')}%`}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="field-hint">
+        Сессии по часам UTC; разбивка уменьшает число эпизодов в каждой, поэтому разница между
+        сессиями при десятках эпизодов почти всегда случайна.
+      </p>
+    </section>
+  );
+}
+
+// Scalping on the spread pays only where the spread alone covers two maker fees and both orders get filled.
+function SpreadPanel({ rows }: { rows: LabSpreadRow[] }) {
+  const [open, setOpen] = useState(false);
+  const shown = open ? rows : rows.slice(0, 8);
+  return (
+    <section className="panel" aria-labelledby="lab-spreads-title">
+      <div className="section-line">
+        <h3 id="lab-spreads-title">Пипсовка: спред по монетам</h3>
+      </div>
+      <p className="field-hint">
+        Пипсовка зарабатывает на спреде: покупка по bid и продажа по ask заявками maker. Это имеет
+        смысл, только если спред сам покрывает две комиссии maker (0,02% × 2 = 4 б.п.) и обе заявки
+        исполняются, а цена за это время не уходит против. Таблица — первая проверка: как часто
+        спред вообще был шире 4 и 10 б.п. Исполнение и очередь здесь не учитываются.
+      </p>
+      <div className="table-scroll" tabIndex={0} role="region" aria-label="Спреды, прокрутка">
+        <table>
+          <caption className="sr-only">Спред лучших цен по монетам записи</caption>
+          <thead>
+            <tr>
+              <th>Монета</th>
+              <th>Средний спред, б.п.</th>
+              <th>Спред ≥ 4 б.п.</th>
+              <th>Спред ≥ 10 б.п.</th>
+              <th>Снимков стакана</th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((r) => (
+              <tr key={r.symbol}>
+                <td>{r.symbol}</td>
+                <td className="mono">{r.meanBps.toLocaleString('ru-RU')}</td>
+                <td className="mono">{r.above4Pct.toLocaleString('ru-RU')}% времени</td>
+                <td className="mono">{r.above10Pct.toLocaleString('ru-RU')}% времени</td>
+                <td className="mono">{r.snapshots.toLocaleString('ru-RU')}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {rows.length > 8 && (
+        <button className="text-button" onClick={() => setOpen(!open)}>
+          {open ? 'Свернуть' : `Показать все монеты (${rows.length})`}
+        </button>
+      )}
+    </section>
   );
 }
 

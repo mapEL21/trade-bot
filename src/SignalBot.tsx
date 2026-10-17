@@ -1,6 +1,6 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
 import { Play, Square } from 'lucide-react';
-import { api, type SignalRunView } from './api';
+import { api, tradingSessions, type SignalRunView } from './api';
 import { SelectField } from './components';
 import {
   formatMoney,
@@ -113,6 +113,22 @@ export function SignalFields({
         {number('Плечо не больше', 'maxLeverage', 1, maxLeverage, 1)}
         {number('Сделок одновременно', 'maxPositions', 1, 20, 1)}
       </div>
+      <fieldset className="signal-sessions">
+        <legend>Торговые сессии (ни одной — все часы)</legend>
+        {tradingSessions.map((s) => (
+          <label className="checkbox-field" key={s.id}>
+            <input
+              type="checkbox"
+              checked={p.sessions?.includes(s.id) ?? false}
+              onChange={(e) => {
+                const next = (p.sessions ?? []).filter((x) => x !== s.id);
+                set({ sessions: e.target.checked ? [...next, s.id] : next });
+              }}
+            />
+            <span>{s.name}</span>
+          </label>
+        ))}
+      </fieldset>
       <p className="field-hint signal-example">
         Пример: монета с обычной минутной свечой 0,3% — стоп {num(example.stop)}% от входа, комиссия{' '}
         {num(example.feeShare * 100, 0)}% риска
