@@ -171,7 +171,38 @@ export interface StorageStatus {
   error: string | null;
 }
 
+// Density screener: walls in the order books of every Binance USDT perpetual and what happened to them.
+export interface ScreenerWall {
+  symbol: string;
+  side: number;
+  price: number;
+  quote: number;
+  peak: number;
+  ratio: number;
+  distancePct: number;
+  ticks: number;
+  tickSize: number;
+  firstMs: number;
+  seenMs: number;
+  status: 'stands' | 'near' | 'eating' | 'eaten' | 'pulled';
+  // Minutes of the coin's average trading it would take to eat the wall.
+  minutes: number;
+}
+export interface ScreenerSnapshot {
+  state: string;
+  explanation: string;
+  markets: number;
+  rounds: number;
+  roundMs: number | null;
+  roundSeconds: number | null;
+  walls: ScreenerWall[];
+  finished: ScreenerWall[];
+  day: { found: number; eaten: number; pulled: number; medianMinutes: number | null };
+}
 export const api = {
+  screener: () => request<ScreenerSnapshot>('/screener'),
+  startScreener: () => request<void>('/screener/start', { method: 'POST' }),
+  stopScreener: () => request<void>('/screener/stop', { method: 'POST' }),
   scanner: (signal?: AbortSignal) => request<ScanSnapshot>('/scanner', { signal }),
   labStatus: (signal?: AbortSignal) => request<LabStatus>('/lab/status', { signal }),
   runLab: () => request<void>('/lab/run', { method: 'POST' }),

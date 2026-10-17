@@ -30,6 +30,9 @@ var storagePath = builder.Configuration["Storage:Path"] ?? Path.Combine(builder.
 builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(storagePath));
 builder.Services.AddSingleton(_ => new PaperRunStore(storagePath));
 builder.Services.AddSingleton<SignalBots>();
+builder.Services.AddSingleton<IDepthSource, BinanceDepthSource>();
+builder.Services.AddSingleton<DensityScreener>();
+builder.Services.AddHostedService(services => services.GetRequiredService<DensityScreener>());
 builder.Services.AddRateLimiter(options =>
 {
     options.AddFixedWindowLimiter("local", settings =>
@@ -104,6 +107,12 @@ api.MapPost("/scanner/{id:guid}/continuous", (Guid id, ScanContinuous request, M
 api.MapPost("/scanner/{id:guid}/stop", (Guid id, MarketScanner scanner) => scanner.Stop(id.ToString())
     ? Results.Accepted("/api/v1/scanner", new { id = id.ToString() })
     : Results.Problem(statusCode: 409, title: "Сканер уже сменился. Обновите состояние перед остановкой."));
+// Density screener: walls in the order books of every Binance USDT perpetual and what happens to them; it never trades.
+api.MapGet("/screener", (DensityScreener screener) => Results.Ok(screener.Snapshot()));
+api.MapPost("/screener/start", (DensityScreener screener) => screener.Start()
+    ? Results.Accepted("/api/v1/screener") : Results.Problem(statusCode: 409, title: "Скринер уже работает."));
+api.MapPost("/screener/stop", (DensityScreener screener) => screener.Stop()
+    ? Results.Accepted("/api/v1/screener") : Results.Problem(statusCode: 409, title: "Скринер не запущен."));
 // Signal lab: events found in the scanner recordings and what price did after them; research only, no orders.
 api.MapGet("/lab/status", (SignalLab lab) => Results.Ok(lab.Status));
 api.MapPost("/lab/run", (SignalLab lab) => lab.Start()

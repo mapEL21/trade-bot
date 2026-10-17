@@ -11,6 +11,7 @@ import {
   tradingSessions,
   type Verdict,
 } from './api';
+import { DensityScreenerPanel } from './DensityScreener';
 import { metrics, type Trade } from './model';
 import { Performance, TradesTable } from './TradeAnalysis';
 
@@ -485,13 +486,14 @@ function HypothesisPanel({ check }: { check: HypothesisCheck }) {
 
 // The Laboratory page: the data recording and the signal lab that studies it.
 export function Laboratory({ scanner }: { scanner: ReactNode }) {
-  const [tab, setTab] = useState<'lab' | 'scanner'>('lab');
+  const [tab, setTab] = useState<'lab' | 'walls' | 'scanner'>('lab');
   return (
     <>
       <div className="detail-tabs">
         {(
           [
             ['lab', 'Лаборатория сигналов'],
+            ['walls', 'Плотности'],
             ['scanner', 'Запись данных'],
           ] as const
         ).map(([value, label]) => (
@@ -505,7 +507,7 @@ export function Laboratory({ scanner }: { scanner: ReactNode }) {
           </button>
         ))}
       </div>
-      {tab === 'lab' ? <SignalLabPanel /> : scanner}
+      {tab === 'lab' ? <SignalLabPanel /> : tab === 'walls' ? <DensityScreenerPanel /> : scanner}
     </>
   );
 }

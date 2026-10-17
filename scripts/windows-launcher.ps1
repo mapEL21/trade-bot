@@ -165,7 +165,7 @@ try {
             $assembly = Join-Path $root 'server\TradeBot.Api\bin\Debug\net10.0\TradeBot.Api.dll'
             # Housekeeping here only compresses finished recordings and copies the database daily; nothing is deleted
             # (Storage:RetentionDays stays 0).
-            Start-Owned 'api' $dotnet ('"' + $assembly + '" --Api:Port=5080 --Storage:Housekeeping=true --Lab:AutoProcess=true') (Join-Path $root 'server\TradeBot.Api')
+            Start-Owned 'api' $dotnet ('"' + $assembly + '" --Api:Port=5080 --Storage:Housekeeping=true --Lab:AutoProcess=true --Screener:AutoStart=true') (Join-Path $root 'server\TradeBot.Api')
             $started += 'api'
         }
         Wait-Ready 'api' 5080 "$api/health"

@@ -355,3 +355,73 @@ test('signal lab runs the recordings, ranks signals after fees and charts the ch
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(errors).toEqual([]);
 });
+
+test('density screener tab shows walls near the price first and what happened to finished ones', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.route('**/api/v1/workspace', (route) =>
+    route.fulfill({ json: { schemaVersion: 1, bots: [], events: [] } }),
+  );
+  await page.route('**/api/v1/strategies', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/v1/lab/**', (route) => route.fulfill({ status: 503, json: {} }));
+  const now = Date.now();
+  const wall = (symbol: string, status: string, distancePct: number, extra = {}) => ({
+    symbol,
+    side: 1,
+    price: 0.4512,
+    quote: 120000,
+    peak: 120000,
+    ratio: 24.5,
+    distancePct,
+    ticks: 3,
+    tickSize: 0.0001,
+    firstMs: now - 45 * 60000,
+    seenMs: now,
+    status,
+    minutes: 12.5,
+    ...extra,
+  });
+  let running = true;
+  await page.route('**/api/v1/screener', (route) =>
+    route.fulfill({
+      json: {
+        state: running ? 'running' : 'stopped',
+        explanation: running ? 'Обходим стаканы 312 фьючерсов.' : 'Скринер остановлен.',
+        markets: 312,
+        rounds: 4,
+        roundMs: now - 60000,
+        roundSeconds: 160,
+        walls: [wall('PUMPUSDT', 'near', 0.12), wall('WLDUSDT', 'stands', 2.4)],
+        finished: [wall('ZEREBROUSDT', 'eaten', 0.05, { quote: 30000 })],
+        day: { found: 7, eaten: 2, pulled: 3, medianMinutes: 18.5 },
+      },
+    }),
+  );
+  await page.route('**/api/v1/screener/stop', (route) => {
+    running = false;
+    return route.fulfill({ status: 202 });
+  });
+  await page.goto('/');
+  await page
+    .getByRole('button', { name: /^Лаборатория/ })
+    .first()
+    .click();
+  await page.getByRole('button', { name: 'Плотности', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Плотности', level: 2 })).toBeVisible();
+  await expect(page.getByText('Найдено за сутки')).toBeVisible();
+  const current = page.getByRole('table', { name: /Плотности в стаканах сейчас/ });
+  await expect(current.locator('tbody tr').first()).toContainText('PUMPUSDT');
+  await expect(current.locator('tbody tr').first()).toContainText('120 тыс. $');
+  await expect(current.locator('tbody tr').first()).toContainText('0,12% · 3 шаг.');
+  await expect(current.locator('tbody tr').first()).toContainText('Цена рядом');
+  await expect(page.getByRole('table', { name: /проели или сняли/ })).toContainText('Проели');
+  expect((await new AxeBuilder({ page }).include('.signal-lab').analyze()).violations).toEqual([]);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.getByRole('button', { name: 'Остановить' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Остановлен' })).toBeVisible();
+  expect(errors).toEqual([]);
+});
