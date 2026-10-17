@@ -32,8 +32,9 @@ public sealed record LabSpread(string Symbol, long Snapshots, decimal SumBps, lo
 // count the aggressor trades at the wall's price since the last book snapshot (the book comes every 500 ms, trades in real
 // time), so the bot sees a wall being eaten between snapshots. Departures: how far the price went from this wall before
 // coming back to it (or running away), %; CoinDepartures: the same for every wall of the coin over the last hour.
+// Ticks: price steps from the best price on the wall's side to the wall; Front: the quote resting before it on that side.
 public sealed record WallView(int Side, decimal Price, decimal Quote, decimal Peak, long FirstMs, decimal Remaining, decimal EatRate,
-    int Level, int Touches, decimal[] Departures);
+    int Level, int Touches, decimal[] Departures, long Ticks = 0, decimal Front = 0);
 // LastTrade: the latest trade price and its time; a trade after the last book snapshot shows the price moved since.
 public sealed record CoinView(string Symbol, long BookMs, decimal Bid, decimal Ask, decimal? TypicalPct, decimal MedianLevel, decimal Volume,
     WallView[] Walls, decimal[] CoinDepartures, decimal LastTrade = 0, long LastTradeMs = 0);
@@ -75,6 +76,7 @@ public sealed class SignalDetector
         public bool Touching, Touched; public decimal MaxAway; public int Touches;
         public readonly List<decimal> Departures = [];
         public int Level;
+        public long Ticks; public decimal Front;
     }
     private sealed class State(decimal volume)
     {
@@ -82,6 +84,8 @@ public sealed class SignalDetector
         public readonly List<Wall> Walls = [];
         public readonly Queue<(long Ms, decimal Pct)> Departures = new();
         public decimal MedianLevel;
+        // The coin's price step when known (from the exchange rules), otherwise estimated from the book.
+        public decimal TickSize;
         public long Snapshots, Above4, Above10; public decimal SpreadSum;
         // Rolling windows kept as running sums: the last 10 s, the 15 min before them, and prices of the last 30 s.
         public readonly Queue<(long Ms, decimal Price, decimal Quote, bool Buy)> Recent = new(), Older = new();
@@ -111,12 +115,27 @@ public sealed class SignalDetector
         levels = new LevelScanner(new ScanSettings(), quoteVolumes, liquidations);
     }
 
+    // A coin added while the stream runs (the live bot watches coins the screener points to): a "watch" event with its
+    // 24-hour volume and price step. The level scanner does not follow such coins.
+    public void Watch(string symbol, decimal volume, decimal tickSize)
+    {
+        if (!states.TryGetValue(symbol, out var state)) states[symbol] = state = new State(volume);
+        if (tickSize > 0) state.TickSize = tickSize;
+    }
+
     public void Process(CaptureEvent item)
     {
         LastSymbol = null;
         var known = levels.Candidates.Count;
         levels.Process(item);
         if (item.Kind == "history") { History(item.Payload); return; }
+        if (item.Kind == "watch")
+        {
+            using var watch = JsonDocument.Parse(item.Payload);
+            Watch(watch.RootElement.GetProperty("symbol").GetString()!, watch.RootElement.GetProperty("volume").GetDecimal(),
+                watch.RootElement.TryGetProperty("tickSize", out var t) ? t.GetDecimal() : 0);
+            return;
+        }
         if (item.Kind != "market") return;
         using var doc = JsonDocument.Parse(item.Payload);
         var data = doc.RootElement.GetProperty("data");
@@ -304,6 +323,15 @@ public sealed class SignalDetector
             {
                 Level = levels.Where(x => x.Side == l.Side).Count(x => l.Side == 1 ? x.Price > l.Price : x.Price < l.Price)
             });
+        // Steps and the queue before each wall: what the price has to go through to reach it.
+        var tick = state.TickSize > 0 ? state.TickSize : levels.Select(l => l.Price).Distinct().Order().Zip(levels.Select(l => l.Price).Distinct().Order().Skip(1))
+            .Select(x => x.Second - x.First).Where(d => d > 0).DefaultIfEmpty(0).Min();
+        foreach (var wall in state.Walls)
+        {
+            var best = wall.Side == 1 ? state.Bid : state.Ask;
+            wall.Ticks = tick > 0 ? (long)Math.Round(Math.Abs(best - wall.Price) / tick) : 0;
+            wall.Front = levels.Where(l => l.Side == wall.Side && (wall.Side == 1 ? l.Price > wall.Price : l.Price < wall.Price)).Sum(l => l.Quote);
+        }
         foreach (var wall in state.Walls)
         {
             var away = Math.Abs(wall.Price / mid - 1);
@@ -343,7 +371,7 @@ public sealed class SignalDetector
         return new(symbol, state.BookMs, state.Bid, state.Ask, ranges.Count >= 30 ? Math.Round(ranges.Average() * 100, 4) : null,
             state.MedianLevel, state.Volume,
             state.Walls.Select(w => new WallView(w.Side, w.Price, w.Quote, w.Peak, w.FirstMs, Math.Max(0, w.Quote - w.Eaten),
-                w.Eats.Sum(x => x.Quote) / 3, w.Level, w.Touches, w.Departures.ToArray())).ToArray(),
+                w.Eats.Sum(x => x.Quote) / 3, w.Level, w.Touches, w.Departures.ToArray(), w.Ticks, w.Front)).ToArray(),
             state.Departures.Select(d => d.Pct).ToArray(), state.LastPrice, state.LastPriceMs);
     }
 

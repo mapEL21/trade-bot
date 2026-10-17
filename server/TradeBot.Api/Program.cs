@@ -31,6 +31,9 @@ builder.Services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(sto
 builder.Services.AddSingleton(_ => new PaperRunStore(storagePath));
 builder.Services.AddSingleton<SignalBots>();
 builder.Services.AddSingleton<IDepthSource, BinanceDepthSource>();
+builder.Services.AddSingleton<ILiveFeed, BinanceLiveFeed>();
+builder.Services.AddSingleton<LiveBots>();
+builder.Services.AddHostedService(services => services.GetRequiredService<LiveBots>());
 builder.Services.AddSingleton<DensityScreener>();
 builder.Services.AddHostedService(services => services.GetRequiredService<DensityScreener>());
 builder.Services.AddRateLimiter(options =>
@@ -145,10 +148,12 @@ api.MapGet("/workspace", async (IWorkspaceStore store, PaperRunStore runs, Signa
         Bots = workspace.Bots.Where(b => catalog.Validate(b).Count == 0).Select(b =>
         {
             var own = signalRuns.GetValueOrDefault(b.Id) ?? [];
+            var results = own.Select(signals.Result).ToList();
             return b with
             {
                 Status = own.Any(r => r.ToMs is null) ? "running" : own.Length > 0 ? "stopped" : "draft",
-                Trades = own.SelectMany(r => signals.Result(r).Trades).OrderBy(t => t.At, StringComparer.Ordinal).TakeLast(10000).ToArray()
+                Trades = results.SelectMany(r => r.Trades).OrderBy(t => t.At, StringComparer.Ordinal).TakeLast(10000).ToArray(),
+                Unrealized = results.Where(r => r.Unrealized is not null).Select(r => r.Unrealized).FirstOrDefault()
             };
         }).ToArray()
     });

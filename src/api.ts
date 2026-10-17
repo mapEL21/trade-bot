@@ -273,6 +273,22 @@ export interface SignalRun {
   budget: number;
   lossLimit: number;
   parameters: SignalParameters;
+  // A density run started "from now" trades the live stream of the coins the screener points to.
+  live?: boolean;
+}
+// What a live run watches now and the positions it holds (mark: the exit-side best price).
+export interface LiveView {
+  watching: { symbol: string; side: number; wall: number; distancePct: number }[];
+  open: {
+    symbol: string;
+    side: 'long' | 'short';
+    openedMs: number;
+    entry: number;
+    mark: number;
+    fraction: number;
+    entryReason: string;
+  }[];
+  segment: string | null;
 }
 export interface SignalRunView {
   run: SignalRun;
@@ -288,5 +304,7 @@ export interface SignalRunView {
     entriesBlocked: string | null;
     // Recordings still being computed in the background.
     pending: number;
+    unrealized: number | null;
   };
+  live: LiveView | null;
 }

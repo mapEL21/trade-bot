@@ -118,6 +118,7 @@ public sealed class DensityScreenerTests : IDisposable
         public int UsedWeight => 0;
         public Task<ScreenerMarket[]> MarketsAsync(CancellationToken ct) => Task.FromResult(markets);
         public Task<DepthBook> DepthAsync(string symbol, CancellationToken ct) => Task.FromResult(Book(100, new() { [99.80m] = 300 }));
+        public Task<string> KlinesAsync(string symbol, CancellationToken ct) => Task.FromResult("{}");
     }
 
     public void Dispose() { if (Directory.Exists(root)) Directory.Delete(root, true); }

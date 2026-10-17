@@ -135,20 +135,23 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
   }
   const current = runs?.[0];
   const result = current?.result;
+  const density = bot.signal?.signal === 'Плотность';
+  const live = current?.state === 'running' && current.run.live;
   const skipped = Object.entries(result?.skipped ?? {}).sort((a, b) => b[1] - a[1]);
   return (
     <section className="panel paper-run signal-run" aria-labelledby="signal-run-title">
       <div className="section-line">
-        <h2 id="signal-run-title">Работа по записям данных</h2>
+        <h2 id="signal-run-title">{live ? 'Живой режим' : 'Работа бота'}</h2>
         <span className={`research-status ${running ? 'is-live' : ''}`} role="status">
           <span className={`live-dot ${running ? 'on' : ''}`} aria-hidden="true" />
           {running ? 'Работает' : 'Не запущен'}
         </span>
       </div>
       <p className="field-hint">
-        Бот проходит каждую завершённую запись рынка: новые сделки появляются после её окончания,
-        примерно раз в час. С датой в прошлом он сначала пройдёт записи с этого момента, около
-        минуты на час записи.
+        {density
+          ? 'С этого момента бот работает вживую: монеты, у которых скринер нашёл плотность ближе 1,5% к цене, подключаются к потоку сделок и стакана, и бот решает по каждой сделке. С датой в прошлом он проходит прошлые записи данных.'
+          : 'Бот проходит каждую завершённую запись рынка: новые сделки появляются после её окончания, примерно раз в час. С датой в прошлом он сначала пройдёт записи с этого момента.'}{' '}
+        Сделки виртуальные: заявки на биржу не отправляются.
       </p>
       <div className="paper-controls">
         {running ? (
@@ -195,6 +198,44 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
             {result.incomplete > 0 && ` · не закрыты к концу записи: ${result.incomplete}`} ·
             депозит {formatMoney(result.deposit)} USDT
           </p>
+          {live && current?.live === null && (
+            <p className="field-hint negative">
+              Живой режим выключен на этом компьютере: запустите приложение через «Запустить Trade
+              Bot.cmd».
+            </p>
+          )}
+          {live && current?.live && (
+            <div className="live-watch">
+              <strong>
+                Следит за монетами: {current.live.watching.length}
+                {current.live.watching.length === 0 &&
+                  ' — ждёт, пока скринер найдёт плотность у цены'}
+              </strong>
+              {current.live.watching.length > 0 && (
+                <ul>
+                  {current.live.watching.map((w) => (
+                    <li key={w.symbol}>
+                      {w.symbol} — плотность на {w.side > 0 ? 'покупку' : 'продажу'} {w.wall}, цена
+                      в {num(w.distancePct)}%
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {current.live.open.length > 0 && (
+                <>
+                  <strong>Открытые позиции</strong>
+                  <ul>
+                    {current.live.open.map((p) => (
+                      <li key={p.symbol}>
+                        {p.symbol} {p.side === 'long' ? 'лонг' : 'шорт'} от {p.entry}, сейчас{' '}
+                        {p.mark} — {p.entryReason}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+          )}
           {result.pending > 0 && (
             <p className="field-hint" role="status">
               Считаются записи: {result.pending}. Сделки по ним появятся, когда расчёт закончится.

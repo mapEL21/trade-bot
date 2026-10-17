@@ -261,3 +261,67 @@ test('the demo space is gone: ?demo=1 opens the server workspace', async ({ page
   await expect(page.getByRole('heading', { name: 'Вынос цены · 5 мин' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Вынос цены · 5 мин/ }).first()).toBeVisible();
 });
+
+test('a live run shows the coins the bot watches and the positions it holds', async ({ page }) => {
+  const bots = await server(page);
+  bots[0].status = 'running';
+  await page.route('**/api/v1/bots/*/signal', (route) =>
+    route.fulfill({
+      json: [
+        {
+          run: {
+            id: 'r',
+            botId: bots[0].id,
+            fromMs: Date.now() - 3600000,
+            toMs: null,
+            startedUtc: new Date().toISOString(),
+            budget: 20,
+            lossLimit: 2,
+            parameters: bots[0].signal,
+            live: true,
+          },
+          state: 'running',
+          result: {
+            trades: [],
+            skipped: {},
+            signals: 1,
+            incomplete: 0,
+            deposit: 20,
+            recordings: 1,
+            lastDataMs: Date.now(),
+            entriesBlocked: null,
+            pending: 0,
+            unrealized: 0.12,
+          },
+          live: {
+            watching: [{ symbol: 'KAVAUSDT', side: 1, wall: 0.068, distancePct: 0.42 }],
+            open: [
+              {
+                symbol: 'KAVAUSDT',
+                side: 'long',
+                openedMs: Date.now() - 60000,
+                entry: 0.0681,
+                mark: 0.0684,
+                fraction: 5,
+                entryReason: 'отскок от плотности 308 тыс. $ на 0,068',
+              },
+            ],
+            segment: '20261018T100000Z',
+          },
+        },
+      ],
+    }),
+  );
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Боты/ }).first().click();
+  await page
+    .getByRole('button', { name: /Вынос цены · 5 мин/ })
+    .first()
+    .click();
+  const panel = page.locator('.signal-run');
+  await expect(panel.getByRole('heading', { name: 'Живой режим' })).toBeVisible();
+  await expect(panel).toContainText('Следит за монетами: 1');
+  await expect(panel).toContainText('KAVAUSDT — плотность на покупку 0.068, цена в 0,42%');
+  await expect(panel).toContainText('KAVAUSDT лонг от 0.0681, сейчас 0.0684 — отскок от плотности');
+  expect((await new AxeBuilder({ page }).include('.signal-run').analyze()).violations).toEqual([]);
+});

@@ -14,6 +14,9 @@ public interface IDepthSource
 {
     Task<ScreenerMarket[]> MarketsAsync(CancellationToken ct);
     Task<DepthBook> DepthAsync(string symbol, CancellationToken ct);
+    // The last hour of 1-minute candles of a coin as a history event payload ({"symbol", "interval", "klines"}), the form
+    // the data recording keeps: a live bot needs the coin's typical candle from its first minute.
+    Task<string> KlinesAsync(string symbol, CancellationToken ct);
     // Request weight used in the current minute as the exchange reports it; the screener slows down near the limit.
     int UsedWeight { get; }
 }
@@ -57,6 +60,7 @@ public sealed class DensityScreener(IDepthSource source, IConfiguration configur
     private Task? task;
     private string state = "idle", explanation = "Скринер не запущен.";
     private int markets, rounds;
+    private Dictionary<string, ScreenerMarket> known = new(StringComparer.Ordinal);
     private long? roundMs, lastMs;
     private double? roundSeconds;
 
@@ -77,6 +81,9 @@ public sealed class DensityScreener(IDepthSource source, IConfiguration configur
                     lives.Count == 0 ? null : Math.Round(lives[lives.Count / 2], 1)));
         }
     }
+
+    // A coin's volume and price step from the latest list of markets.
+    public ScreenerMarket? Market(string symbol) { lock (gate) return known.GetValueOrDefault(symbol); }
 
     public bool Start()
     {
@@ -109,7 +116,11 @@ public sealed class DensityScreener(IDepthSource source, IConfiguration configur
             try
             {
                 var list = await source.MarketsAsync(ct);
-                lock (gate) { markets = list.Length; state = "running"; explanation = $"Обходим стаканы {list.Length} фьючерсов."; }
+                lock (gate)
+                {
+                    markets = list.Length; state = "running"; explanation = $"Обходим стаканы {list.Length} фьючерсов.";
+                    known = list.GroupBy(m => m.Symbol).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+                }
                 var started = DateTimeOffset.UtcNow;
                 foreach (var market in list.OrderByDescending(m => m.QuoteVolume))
                 {
@@ -186,6 +197,7 @@ public sealed class DensityScreener(IDepthSource source, IConfiguration configur
         var perMinute = market.QuoteVolume / 1440;
         lock (gate)
         {
+            known[market.Symbol] = market;
             var before = walls.GetValueOrDefault(market.Symbol) ?? [];
             var waiting = candidates.GetValueOrDefault(market.Symbol) ?? [];
             var next = new List<ScreenerWall>();
@@ -269,7 +281,7 @@ public sealed class DensityScreener(IDepthSource source, IConfiguration configur
     public async Task StopAsync(CancellationToken ct)
     {
         Task? running;
-        lock (gate) { stop?.Cancel(); running = task; }
+        lock (gate) { Cancellation.Cancel(stop); running = task; }
         if (running is not null) try { await running.WaitAsync(ct); } catch (OperationCanceledException) { }
     }
 
@@ -314,6 +326,12 @@ public sealed class BinanceDepthSource : IDepthSource, IDisposable
                 Range: x.TryGetProperty("highPrice", out var h) && x.TryGetProperty("lowPrice", out var l) ? Dec(h) - Dec(l) : 0))
             .Where(x => ticks.ContainsKey(x.Symbol) && x.Last > 0)
             .Select(x => new ScreenerMarket(x.Symbol, ticks[x.Symbol], x.Volume, x.Last, Math.Round(x.Range / x.Last * 100, 2))).ToArray();
+    }
+
+    public async Task<string> KlinesAsync(string symbol, CancellationToken ct)
+    {
+        var klines = await Get($"https://fapi.binance.com/fapi/v1/klines?symbol={Uri.EscapeDataString(symbol)}&interval=1m&limit=62", ct);
+        return JsonSerializer.Serialize(new { symbol, interval = "1m", klines = JsonSerializer.Deserialize<JsonElement>(klines) });
     }
 
     public async Task<DepthBook> DepthAsync(string symbol, CancellationToken ct) =>

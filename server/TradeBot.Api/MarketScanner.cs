@@ -79,7 +79,7 @@ public sealed class ScanSession(string id, ScanStart request, int segment = 1) :
     }
 
     public void Fail(string message) { lock (gate) { state = "failed"; explanation = message; } }
-    public void RequestStop() => stop.Cancel();
+    public void RequestStop() => Cancellation.Cancel(stop);
 
     public ScanSnapshot Snapshot()
     {
@@ -205,7 +205,7 @@ public sealed class MarketScanner(IScanRunner runner, IConfiguration configurati
     {
         Task? running;
         lock (gate) { shuttingDown = true; stopLoop = true; current?.RequestStop(); running = task; }
-        shutdown.Cancel();
+        Cancellation.Cancel(shutdown);
         if (running is not null) await running.WaitAsync(ct);
     }
     public void Dispose()
@@ -213,5 +213,15 @@ public sealed class MarketScanner(IScanRunner runner, IConfiguration configurati
         lock (gate) { if (task is null || task.IsCompleted) current?.Dispose(); }
         loopStop.Dispose();
         shutdown.Dispose();
+    }
+}
+
+// A stop or a dispose may come after the other (the host stops and disposes services in its own order): cancelling a
+// source that is already disposed is not an error then.
+public static class Cancellation
+{
+    public static void Cancel(CancellationTokenSource? source)
+    {
+        try { source?.Cancel(); } catch (ObjectDisposedException) { }
     }
 }

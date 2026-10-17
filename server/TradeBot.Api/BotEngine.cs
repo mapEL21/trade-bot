@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using TradeBot.Recorder;
 
 namespace TradeBot.Api;
@@ -9,6 +10,10 @@ public sealed record EngineTrade(string Symbol, string Side, long OpenedMs, long
     string EntryReason, string ExitReason, decimal BestBps, decimal WorstBps);
 public sealed record EngineResult(int Version, string Recording, long FirstMs, long LastMs, EngineTrade[] Trades, Dictionary<string, int> Skipped,
     int Signals, int Incomplete);
+// A position held right now, for the live view: the move so far is at the exit-side best price, before fees.
+public sealed record EnginePosition(string Symbol, string Side, long OpenedMs, decimal Entry, decimal Mark, decimal Fraction, string EntryReason);
+// A wall the screener confirmed (a "screener" event in the stream): the density bot trades only these when it has them.
+public sealed record ScreenedWall(string Symbol, int Side, decimal Price);
 
 // What a strategy decides: entries on its signals or on what it sees in the book, and exits by its own logic. Rules are in
 // docs/BOT_LOGIC.md; the numbers there are fixed before any run on data.
@@ -17,6 +22,7 @@ public interface IBotStrategy
     void OnSignal(BotEngine bot, LabEvent e);
     void Manage(BotEngine bot, BotEngine.Position position, CoinView view, long ms);
     void Scan(BotEngine bot, CoinView view, long ms);
+    void OnScreener(BotEngine bot, IReadOnlyList<ScreenedWall> walls) { }
 }
 
 // The bot over the raw market stream of a recording: the lab's detector keeps the market state (book, trades, walls,
@@ -25,7 +31,8 @@ public interface IBotStrategy
 // broken in between gives a worse fill. The same code runs a finished recording now and the live stream later.
 public sealed class BotEngine
 {
-    public const int Version = 1;
+    // 2: density bounce entry by price steps and the queue before the wall (user's rule of 18.10.2026), screener walls.
+    public const int Version = 2;
     public const long Latency = 250, BookAge = 2_000;
 
     public sealed class Position(string symbol, int side, decimal fraction, string entryReason, object? context)
@@ -61,6 +68,18 @@ public sealed class BotEngine
 
     public void Process(CaptureEvent item)
     {
+        if (item.Kind == "screener")
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(item.Payload);
+                strategy.OnScreener(this, doc.RootElement.GetProperty("walls").EnumerateArray()
+                    .Select(w => new ScreenedWall(w.GetProperty("symbol").GetString()!, w.GetProperty("side").GetInt32(), w.GetProperty("price").GetDecimal()))
+                    .ToList());
+            }
+            catch (Exception e) when (e is JsonException or KeyNotFoundException or InvalidOperationException) { }
+            return;
+        }
         detector.Feed(item);
         if (detector.LastSymbol is { } symbol) Update(symbol, detector.LastMs);
     }
@@ -137,6 +156,17 @@ public sealed class BotEngine
         orders.Add(new(position.Symbol, -position.Side, ms, true, reason, 0, null));
     }
 
+    // The result so far while the stream runs: open positions are neither trades nor incomplete yet.
+    public EngineResult Current(string recording) =>
+        new(Version, recording, firstMs == long.MaxValue ? 0 : firstMs, lastMs, trades.ToArray(), new(skipped), signals, incomplete);
+
+    public EnginePosition[] Open() => positions.Values.Select(p =>
+    {
+        var view = detector.View(p.Symbol);
+        var mark = view is null ? p.Entry : p.Side > 0 ? view.Bid : view.Ask;
+        return new EnginePosition(p.Symbol, p.Side > 0 ? "long" : "short", p.OpenedMs, p.Entry, mark, p.Fraction, p.EntryReason);
+    }).ToArray();
+
     // The end of the recording: what is still open has no known result and is not counted as a trade.
     public EngineResult Finish(string recording)
     {
@@ -194,11 +224,19 @@ public sealed class DensityStrategy : IBotStrategy
 {
     private sealed record Bounce(int WallSide, decimal Wall, decimal Target, decimal TypicalPct);
     private sealed record Break(int WallSide, decimal Wall, decimal TypicalPct);
-    public const decimal MinLevels = 10, MinVolumeShare = .0002m, MaxDistancePct = .15m, EatenShare = .5m, EatSeconds = 1.5m,
-        SlippagePct = .05m, MinTargetFees = 3;
-    public const int MaxLevel = 2, MinCoinDepartures = 3;
+    // Entry (user's rule of 18.10.2026): the price is at most 5 steps from the wall and the quote resting before it is less
+    // than a quarter of the wall — the price has almost reached it.
+    public const decimal MinLevels = 10, MinVolumeShare = .0002m, EatenShare = .5m, EatSeconds = 1.5m, SlippagePct = .05m,
+        MinTargetFees = 3, MaxFrontShare = .25m;
+    public const int MaxTicks = 5, MinCoinDepartures = 3;
     public const long MinAgeMs = 60_000, StallMs = 30_000;
     private readonly HashSet<string> seen = [];
+    // Walls the screener confirmed; null when the stream has none (a lab recording): then every strong wall counts.
+    private HashSet<(string, int, decimal)>? screened;
+
+    public void OnScreener(BotEngine bot, IReadOnlyList<ScreenedWall> walls) =>
+        screened = walls.Select(w => (w.Symbol, w.Side, w.Price)).ToHashSet();
+    private bool Screened(string symbol, WallView w) => screened is null || screened.Contains((symbol, w.Side, w.Price));
 
     private static bool Strong(WallView w, CoinView v, long ms) =>
         w.Quote >= MinLevels * v.MedianLevel && w.Quote >= MinVolumeShare * v.Volume && ms - w.FirstMs >= MinAgeMs;
@@ -214,25 +252,30 @@ public sealed class DensityStrategy : IBotStrategy
 
     public void Scan(BotEngine bot, CoinView view, long ms)
     {
-        foreach (var w in view.Walls.Where(w => Strong(w, view, ms) && Distance(w, view) <= MaxDistancePct))
+        foreach (var w in view.Walls.Where(w => Strong(w, view, ms) && Screened(view.Symbol, w) && w.Ticks <= MaxTicks))
         {
-            // Once per approach of the price to the wall.
-            if (!seen.Add($"{view.Symbol}|{w.Side}|{w.Price}|{w.FirstMs}|{w.Touches}")) continue;
-            bot.CountSignal();
-            if (view.TypicalPct is not { } typical) { bot.Skip("мало истории монеты"); return; }
+            var key = $"{view.Symbol}|{w.Side}|{w.Price}|{w.FirstMs}|{w.Touches}";
             if (Eaten(w))
             {
-                bot.Open(view.Symbol, -w.Side, ms, Distance(w, view) + typical / 2,
-                    $"проедание плотности {Size(w)} на {N(w.Price, "0.########")}: осталось {Left(w)}", new Break(w.Side, w.Price, typical));
+                if (!seen.Add(key + "|break")) continue;
+                bot.CountSignal();
+                if (view.TypicalPct is not { } t0) { bot.Skip("мало истории монеты"); return; }
+                bot.Open(view.Symbol, -w.Side, ms, Distance(w, view) + t0 / 2,
+                    $"проедание плотности {Size(w)} на {N(w.Price, "0.########")}: осталось {Left(w)}", new Break(w.Side, w.Price, t0));
                 return;
             }
-            if (w.Level > MaxLevel) { bot.Skip("плотность дальше третьего уровня стакана"); continue; }
+            // Still a queue before the wall: wait until the price has almost reached it.
+            if (w.Front >= MaxFrontShare * w.Quote) continue;
+            // Once per approach of the price to the wall.
+            if (!seen.Add(key)) continue;
+            bot.CountSignal();
+            if (view.TypicalPct is not { } typical) { bot.Skip("мало истории монеты"); return; }
             decimal? target = w.Departures.Length > 0 ? w.Departures.Average()
                 : view.CoinDepartures.Length >= MinCoinDepartures ? Median(view.CoinDepartures) : null;
             if (target is not { } t) { bot.Skip("нет статистики отскоков"); return; }
             if (t < MinTargetFees * bot.Parameters.FeePct) { bot.Skip("средний отскок меньше трёх комиссий"); return; }
             bot.Open(view.Symbol, w.Side, ms, Distance(w, view) + SlippagePct,
-                $"отскок от плотности {Size(w)} на {N(w.Price, "0.########")} ({N(w.Quote / Math.Max(1, view.MedianLevel), "0")}× среднего уровня, стоит {(ms - w.FirstMs) / 1000} с), цель {N(t)}%",
+                $"отскок от плотности {Size(w)} на {N(w.Price, "0.########")} ({N(w.Quote / Math.Max(1, view.MedianLevel), "0")}× среднего уровня, стоит {(ms - w.FirstMs) / 1000} с, {w.Ticks} шаг. до неё), цель {N(t)}%",
                 new Bounce(w.Side, w.Price, t, typical));
             return;
         }

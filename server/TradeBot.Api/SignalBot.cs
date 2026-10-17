@@ -40,18 +40,21 @@ public sealed record SignalParameters(string Signal = SignalParameters.Density, 
 }
 
 // One run of a bot: its settings as they were at the start, from which moment it trades and, once stopped, until when.
+// Live: a density run started "from now" trades the live stream of the coins the screener points to (LiveBots); other runs
+// go through the data recordings.
 public sealed record SignalRun(string Id, string BotId, long FromMs, long? ToMs, DateTimeOffset StartedUtc, decimal Budget, decimal LossLimit,
-    SignalParameters Parameters);
+    SignalParameters Parameters, bool Live = false);
 
 // Pending: recordings of the run still being computed; their trades are not in the result yet.
+// Unrealized: open positions of a live run if closed now at the best price, after fees, USDT.
 public sealed record SignalRunResult(BotTrade[] Trades, Dictionary<string, int> Skipped, int Signals, int Incomplete, decimal Deposit,
-    int Recordings, long? LastDataMs, string? EntriesBlocked, int Pending = 0);
-public sealed record SignalRunView(SignalRun Run, SignalRunResult Result, string State);
+    int Recordings, long? LastDataMs, string? EntriesBlocked, int Pending = 0, decimal? Unrealized = null);
+public sealed record SignalRunView(SignalRun Run, SignalRunResult Result, string State, LiveView? Live = null);
 public sealed record SignalStart(long? FromMs = null);
 
 // Bot runs: the engine goes through each finished recording of the run once per settings key (the result is cached next to
 // the recording as bot-<key>.json, computed in the background), then the money pass turns the trades into USDT in time order.
-public sealed class SignalBots(PaperRunStore store, SignalLab lab, ILogger<SignalBots> logger) : IDisposable
+public sealed class SignalBots(PaperRunStore store, SignalLab lab, LiveBots live, ILogger<SignalBots> logger) : IDisposable
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private readonly object gate = new();
@@ -69,7 +72,8 @@ public sealed class SignalBots(PaperRunStore store, SignalLab lab, ILogger<Signa
         var from = request.FromMs ?? now;
         if (from < 0 || from > now) throw new ArgumentException("Начало — момент в прошлом или «сейчас».");
         if ((await store.SignalRunsAsync(bot.Id, ct)).Any(r => r.ToMs is null)) throw new InvalidOperationException("Бот уже работает.");
-        var run = new SignalRun(Guid.NewGuid().ToString(), bot.Id, from, null, DateTimeOffset.UtcNow, bot.Budget, bot.LossLimit, bot.Signal);
+        var run = new SignalRun(Guid.NewGuid().ToString(), bot.Id, from, null, DateTimeOffset.UtcNow, bot.Budget, bot.LossLimit, bot.Signal,
+            Live: request.FromMs is null && bot.Signal.Signal == SignalParameters.Density);
         await store.SaveSignalRunAsync(run, ct);
         return run;
     }
@@ -104,16 +108,37 @@ public sealed class SignalBots(PaperRunStore store, SignalLab lab, ILogger<Signa
         catch (Exception e) when (e is JsonException or IOException) { return null; }
     }
 
-    public SignalRunResult Result(SignalRun run)
+    public SignalRunResult Result(SignalRun run) => View(run).Result;
+
+    // A live run: its earlier recordings (sessions before a restart) are computed like any recording; the current one is
+    // the live engine's result so far.
+    private (SignalRunResult Result, LiveView? Live) View(SignalRun run)
     {
         var results = new List<EngineResult>();
         var pending = 0;
-        foreach (var directory in RecordingsOf(run))
+        var current = run.Live ? live.Current(run.Id) : null;
+        var directories = run.Live
+            ? (Directory.Exists(LiveBots.RunDirectory(live.Root, run.Id)) ? Directory.EnumerateDirectories(LiveBots.RunDirectory(live.Root, run.Id)).Order() : [])
+            : RecordingsOf(run);
+        foreach (var directory in directories)
         {
+            if (current is { } c && Path.GetFullPath(directory) == Path.GetFullPath(c.Directory)) { results.Add(c.Result); continue; }
             if (Cached(directory, run.Parameters) is { } r) results.Add(r);
             else { pending++; Enqueue(directory, run.Parameters); }
         }
-        return Money(run, results, pending);
+        var money = Money(run, results, pending);
+        if (current is { } now && now.View.Open.Length > 0)
+        {
+            var fee = run.Parameters.FeePct;
+            var open = now.View.Open.Sum(p =>
+            {
+                var notional = money.Deposit * p.Fraction;
+                var move = p.Side == "long" ? p.Mark / p.Entry - 1 : 1 - p.Mark / p.Entry;
+                return notional * move - notional * fee / 100;
+            });
+            money = money with { Unrealized = Math.Round(open, 4) };
+        }
+        return (money, current?.View);
     }
 
     private void Enqueue(string directory, SignalParameters p)
@@ -192,7 +217,11 @@ public sealed class SignalBots(PaperRunStore store, SignalLab lab, ILogger<Signa
     }
 
     public async Task<SignalRunView[]> RunsAsync(string botId, CancellationToken ct) =>
-        (await store.SignalRunsAsync(botId, ct)).Select(r => new SignalRunView(r, Result(r), r.ToMs is null ? "running" : "stopped")).ToArray();
+        (await store.SignalRunsAsync(botId, ct)).Select(r =>
+        {
+            var (result, view) = View(r);
+            return new SignalRunView(r, result, r.ToMs is null ? "running" : "stopped", view);
+        }).ToArray();
 
-    public void Dispose() { shutdown.Cancel(); shutdown.Dispose(); }
+    public void Dispose() { Cancellation.Cancel(shutdown); shutdown.Dispose(); }
 }
