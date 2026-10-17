@@ -2172,3 +2172,10 @@ tbody tr:hover {
     display: none;
   }
 }
+/* Entry and exit reasons are sentences: wrap them instead of stretching the table. */
+td.reason {
+  min-width: 180px;
+  max-width: 320px;
+  white-space: normal;
+  font-size: 11px;
+}

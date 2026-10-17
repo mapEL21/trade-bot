@@ -28,7 +28,7 @@ const trades: Trade[] = [1, 5, 30, 60, 100].map((hours, i) => ({
 const catalog = [
   {
     id: 'signal',
-    version: '0.1.0',
+    version: '0.2.0',
     name: 'Сигнал лаборатории',
     description: 'Торгует сигнал лаборатории.',
     implementationStatus: 'paper',
@@ -49,7 +49,7 @@ async function server(page: Page) {
       budget: 20,
       lossLimit: 2,
       strategy: 'signal',
-      strategyVersion: '0.1.0',
+      strategyVersion: '0.2.0',
       signal: defaultSignalParameters,
       createdAt: '2026-10-01T10:00:00Z',
       revision: 1,
@@ -135,7 +135,7 @@ test('overview, trade periods and bot navigation work without console errors', a
   await expect(quality.locator('tbody tr').first()).toContainText('время');
   await expect(quality.locator('tbody tr').nth(1)).toContainText('стоп');
   await expect(quality).toContainText('выводы предварительные');
-  await expect(page.locator('.bot-facts')).toContainText('Вынос цены · по движению');
+  await expect(page.locator('.bot-facts')).toContainText('Плотность · v0.2.0');
   await expect(page.locator('.bot-facts')).toContainText('1,5% депозита с комиссиями');
   await page.screenshot({ path: 'artifacts/bot-overview-desktop.png', fullPage: true });
   await page.locator('.detail-tabs').getByRole('button', { name: 'Сделки', exact: true }).click();
@@ -216,12 +216,12 @@ test('create, export, import and delete a bot on the server', async ({ page }) =
   await page.getByRole('button', { name: 'Импортировать', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Импортированный бот' })).toBeVisible();
   const imported = bots.find((b) => b.name === 'Импортированный бот')!;
-  expect(imported.signal?.signal).toBe('Вынос цены');
+  expect(imported.signal?.signal).toBe('Плотность');
   await page.getByRole('button', { name: 'Настройки', exact: true }).click();
   await page.getByRole('button', { name: 'Удалить', exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Удалить', exact: true }).click();
   await expect(
-    page.getByRole('button', { name: 'Импортированный бот Сигнал лаборатории v0.1.0' }),
+    page.getByRole('button', { name: 'Импортированный бот Сигнал лаборатории v0.2.0' }),
   ).toHaveCount(0);
   expect(bots.some((b) => b.name === 'Импортированный бот')).toBe(false);
 });

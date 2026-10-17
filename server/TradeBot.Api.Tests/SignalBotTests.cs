@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -6,181 +7,175 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using TradeBot.Api;
+using TradeBot.Recorder;
 using Xunit;
 
 namespace TradeBot.Api.Tests;
 
+// The bot on a synthetic market: one coin, a book of 20 levels 0.05 apart, a trade every second, an hour of 1% minute
+// candles before it (the coin's typical candle). Rules under test: docs/BOT_LOGIC.md.
 public sealed class SignalBotTests : IDisposable
 {
     private const long T0 = 1_760_000_000_000;
-    private readonly string root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "signal-bot-tests-" + Guid.NewGuid());
+    private readonly string root = Path.Combine(Path.GetTempPath(), "signal-bot-tests-" + Guid.NewGuid());
+    private static string S(decimal v) => v.ToString(CultureInfo.InvariantCulture);
+    private static readonly SignalParameters Density = new(SignalParameters.Density, FeePct: .02m);
 
-    // A long-side spike on a coin with a typical minute range of 0.25%: the 2× stop is 0.5% away from the 100.01 entry.
-    private static LabEvent Spike(string symbol, long at, decimal typical = .25m, int direction = 1) =>
-        new(symbol, "Вынос цены", direction, at, 100, "", 99.99m, 100.01m, null, null, typical);
-
-    // Every second the same book unless a second is given its own (bid, ask); in 0.1 bp from the entry mid 100.
-    private static LabPath Path(int index, int seconds = LabPath.Seconds, Dictionary<int, (decimal Bid, decimal Ask)>? at = null)
+    private sealed class Market
     {
-        var samples = new int[]?[LabPath.Seconds];
-        for (var k = 0; k < seconds; k++)
+        public readonly List<CaptureEvent> Events = [];
+        public Market()
         {
-            var (bid, ask) = at?.GetValueOrDefault(k) is { Bid: > 0 } own ? own : (100.19m, 100.21m);
-            int b = LabPath.Rel(bid, 100), a = LabPath.Rel(ask, 100);
-            samples[k] = [b, a, b, a];
+            var klines = string.Join(',', Enumerable.Range(0, 62).Select(i => $"[{T0 - (62 - i) * 60_000},\"100\",\"101\",\"100\",\"100\",\"1\",0,\"100\",1,\"1\",\"100\",\"0\"]"));
+            Events.Add(new(ScanRecorder.Rest, "history", "history", DateTimeOffset.UnixEpoch, 0,
+                $"{{\"symbol\":\"XUSDT\",\"interval\":\"1m\",\"klines\":[{klines}]}}"));
         }
-        return new(index, "Вынос цены", samples);
+        // Best bid B, bids B - 0.05k, asks B + 0.05 + 0.05k; walls replace a level's size (1 coin elsewhere, about 100 USDT).
+        public void Second(long second, decimal bid, Dictionary<decimal, decimal>? walls = null, decimal? trade = null)
+        {
+            var ms = T0 + second * 1000;
+            string Side(int sign) => string.Join(',', Enumerable.Range(0, 20).Select(k =>
+            {
+                var price = sign < 0 ? bid - .05m * k : bid + .05m + .05m * k;
+                return $"[\"{S(price)}\",\"{S(walls?.GetValueOrDefault(price) is > 0 and var q ? q : 1)}\"]";
+            }));
+            Events.Add(Trade(ms, trade ?? bid, 1, true));
+            Events.Add(new(ScanRecorder.Public, "c", "market", DateTimeOffset.UnixEpoch, ms + 1,
+                $"{{\"stream\":\"xusdt@depth20@500ms\",\"data\":{{\"e\":\"depthUpdate\",\"E\":{ms + 1},\"T\":{ms + 1},\"s\":\"XUSDT\",\"b\":[{Side(-1)}],\"a\":[{Side(1)}]}}}}"));
+        }
+        public static CaptureEvent Trade(long ms, decimal price, decimal quantity, bool buy) => new(ScanRecorder.Market, "c", "market", DateTimeOffset.UnixEpoch, ms,
+            $"{{\"stream\":\"xusdt@aggTrade\",\"data\":{{\"e\":\"aggTrade\",\"s\":\"XUSDT\",\"p\":\"{S(price)}\",\"q\":\"{S(quantity)}\",\"T\":{ms},\"m\":{(!buy).ToString().ToLowerInvariant()}}}}}");
+        public EngineResult Run(SignalParameters p)
+        {
+            var engine = new BotEngine(p, new Dictionary<string, decimal> { ["XUSDT"] = 10_000_000 }, liquidations: true);
+            foreach (var e in Events) engine.Process(e);
+            return engine.Finish("test");
+        }
     }
 
-    private static SignalRun Run(SignalParameters? p = null, decimal budget = 100, decimal loss = 30, long from = 0, long? to = null) =>
-        new("run", "bot", from, to, DateTimeOffset.UnixEpoch, budget, loss, p ?? new SignalParameters());
-
-    private static (LabRecording, Dictionary<int, LabPath>) Recording(LabEvent[] events, params LabPath[] paths) =>
-        (new LabRecording(SignalDetector.Version, "r", T0 - 3_600_000, T0 + 3_600_000, 3, events), paths.ToDictionary(p => p.Index));
+    // A bid wall at 99.95 from the start; the price touches it, goes up 0.575% and comes back: one known bounce.
+    private static Market BounceSetup(out Dictionary<decimal, decimal> wall)
+    {
+        var w = new Dictionary<decimal, decimal> { [99.95m] = 100 };
+        wall = w;
+        var m = new Market();
+        for (var t = 0; t < 100; t++) m.Second(t, 100, w);
+        for (var t = 100; t < 120; t++) m.Second(t, 100.5m, w);
+        return m;
+    }
 
     [Fact]
-    public void StopLosesTheChosenRiskOfTheDepositIncludingFees()
+    public void BounceOffAWallEntersOnTheReturnAndExitsAtTheAverageBounce()
     {
-        // Stop 0.5% below the 100.01 ask (99.51); the bid drops to 99.50 in the third second and the stop fills there.
-        var path = Path(0, at: new() { [2] = (99.50m, 99.52m) });
-        var result = SignalEngine.Run(Run(), [Recording([Spike("AUSDT", T0)], path)]);
+        var m = BounceSetup(out var wall);
+        for (var t = 120; t < 140; t++) m.Second(t, 100, wall);
+        for (var t = 140; t < 150; t++) m.Second(t, 100.55m, wall);
+        var result = m.Run(Density);
         var trade = Assert.Single(result.Trades);
-        // Size from the risk: 1.5 USDT ÷ (0.5% stop + 0.1% fees) = 250 USDT, 2.5× the 100 USDT deposit.
-        Assert.Equal((250m, "long", "стоп", 3d), (trade.Notional!.Value, trade.Side, trade.ExitReason, trade.HoldSeconds!.Value));
-        // 1.5 USDT, and a cent more for the fill a little below the stop.
-        Assert.InRange(trade.Gross - trade.Fee, -1.53m, -1.5m);
-        Assert.Equal(100 + trade.Gross - trade.Fee, result.Deposit, 3);
+        Assert.Equal("long", trade.Side);
+        Assert.Equal((100.05m, 100.55m), (trade.Entry, trade.Exit));
+        Assert.StartsWith("отскок от плотности 10 тыс. $ на 99,95", trade.EntryReason);
+        Assert.Contains("цель 0,57%", trade.EntryReason);
+        Assert.Equal("цена отошла от плотности на средний отскок 0,57%", trade.ExitReason);
+        // The first touch had no bounce statistics yet: no trade then.
+        Assert.Equal(1, result.Skipped["нет статистики отскоков"]);
+        // Size from the risk: 1.5% ÷ (0.075% from the mid to the wall + 0.05% slippage + 0.02% fees) ≈ 10.3× the deposit.
+        Assert.Equal(10.3462m, trade.Fraction);
     }
 
     [Fact]
-    public void TimeExitAtTheHoldingTimeAndAMissingSecondMovesItToTheNextBook()
+    public void AWallEatenFastByTheTapeIsLeftBeforeItBreaksAndTheTradeTurnsIntoTheBreak()
     {
-        var hold = new SignalParameters(HoldSeconds: 60);
-        var trade = Assert.Single(SignalEngine.Run(Run(hold), [Recording([Spike("AUSDT", T0)], Path(0))]).Trades);
-        Assert.Equal(("время", 60d, 100.19m), (trade.ExitReason, trade.HoldSeconds!.Value, trade.Exit));
-        Assert.Equal(T0 + 250 + 60_000, DateTimeOffset.Parse(trade.At).ToUnixTimeMilliseconds());
-        // No fresh book in the 60th second: the exit waits for the next one instead of taking a price that was not there.
-        var gap = Path(0);
-        gap.Samples[59] = null;
-        var late = Assert.Single(SignalEngine.Run(Run(hold), [Recording([Spike("AUSDT", T0)], gap)]).Trades);
-        Assert.Equal(("время (стакан обновился позже)", 61d), (late.ExitReason, late.HoldSeconds!.Value));
-    }
-
-    [Fact]
-    public void ShortSideFadeAndAPositionCutByTheEndOfTheRecordingIsIncompleteNotClosed()
-    {
-        var fade = new SignalParameters(Mode: "fade", HoldSeconds: 5);
-        var trade = Assert.Single(SignalEngine.Run(Run(fade), [Recording([Spike("AUSDT", T0)], Path(0))]).Trades);
-        // Against an upward spike: a short sold at the 99.99 bid, bought back at the 100.21 ask.
-        Assert.Equal(("short", 99.99m, 100.21m), (trade.Side, trade.Entry, trade.Exit));
-        Assert.True(trade.Gross < 0);
-        var cut = SignalEngine.Run(Run(fade), [Recording([Spike("AUSDT", T0)], Path(0, seconds: 3))]);
-        Assert.Empty(cut.Trades);
-        Assert.Equal((1, 100m), (cut.Incomplete, cut.Deposit));
-    }
-
-    [Fact]
-    public void TradesAreSkippedWhenFeesWouldEatTheRiskOrLimitsAreReached()
-    {
-        // BTC-like: a 0.03% typical minute range makes a 0.06% stop; 0.1% fees would be 62% of the risk.
-        var calm = SignalEngine.Run(Run(), [Recording([Spike("BTCUSDT", T0, typical: .03m)], Path(0))]);
-        Assert.Empty(calm.Trades);
-        Assert.Equal(1, calm.Skipped["комиссия заняла бы слишком большую часть риска"]);
-
-        // Four coins at once with three positions allowed; a second signal on a coin already in a trade; one before the start.
-        LabEvent[] events = [Spike("AUSDT", T0), Spike("BUSDT", T0 + 1000), Spike("CUSDT", T0 + 2000), Spike("DUSDT", T0 + 3000),
-            Spike("AUSDT", T0 + 4000), Spike("EUSDT", T0 - 1000)];
-        var result = SignalEngine.Run(Run(from: T0), [Recording(events, Enumerable.Range(0, events.Length).Select(i => Path(i)).ToArray())]);
-        Assert.Equal(3, result.Trades.Length);
-        Assert.Equal(5, result.Signals);
-        Assert.Equal(1, result.Skipped["достигнут предел одновременных сделок"]);
-        Assert.Equal(1, result.Skipped["уже в сделке по этой монете"]);
-        // The leverage limit caps the size: with 1× the three positions share the 100 USDT deposit.
-        var capped = SignalEngine.Run(Run(new SignalParameters(MaxLeverage: 1), from: T0),
-            [Recording(events, Enumerable.Range(0, events.Length).Select(i => Path(i)).ToArray())]);
-        Assert.Equal(100m, Assert.Single(capped.Trades).Notional!.Value);
-        Assert.Equal(3, capped.Skipped["не хватает депозита с учётом плеча"]);
-    }
-
-    [Fact]
-    public void ABotLimitedToSessionsSkipsSignalsOutsideThem()
-    {
-        // T0 is 09:06 UTC (Europe); a signal 6 hours later is in the US session.
-        Assert.Equal("europe", TradingSessions.Of(T0));
-        LabEvent[] events = [Spike("AUSDT", T0), Spike("BUSDT", T0 + 6 * 3_600_000)];
-        var only = new SignalParameters(Sessions: ["us"]);
-        Assert.Empty(only.Validate());
-        Assert.NotEmpty(new SignalParameters(Sessions: ["mars"]).Validate());
-        var result = SignalEngine.Run(Run(only), [Recording(events, Path(0), Path(1))]);
-        Assert.Equal("BUSDT", Assert.Single(result.Trades).Symbol);
-        Assert.Equal(1, result.Skipped["вне выбранных торговых сессий"]);
-    }
-
-    [Fact]
-    public void LossLimitStopsNewEntriesAndTheDepositCarriesToTheNextRecording()
-    {
-        // Each trade is stopped out for 1.5% of the current deposit; with a 2 USDT limit the third signal is not traded.
-        var stop = new Dictionary<int, (decimal, decimal)> { [0] = (99.50m, 99.52m) };
-        var first = Recording([Spike("AUSDT", T0), Spike("BUSDT", T0 + 60_000)], Path(0, at: stop), Path(1, at: stop));
-        var second = Recording([Spike("CUSDT", T0 + 7_200_000)], Path(0, at: stop));
-        var result = SignalEngine.Run(Run(loss: 2), [first, second]);
+        var m = BounceSetup(out var wall);
+        for (var t = 120; t < 125; t++) m.Second(t, 100, wall);
+        // Large sells hit the wall between snapshots: 60 of its 100 coins are gone.
+        m.Events.Add(Market.Trade(T0 + 125_300, 99.95m, 60, false));
+        // The next snapshot: the wall is gone and the price is through it, then it falls and stalls.
+        for (var t = 126; t < 130; t++) m.Second(t, 99.85m);
+        for (var t = 130; t < 175; t++) m.Second(t, 99.5m);
+        var result = m.Run(Density);
         Assert.Equal(2, result.Trades.Length);
-        // The second trade is sized from the deposit left after the first.
-        Assert.True(result.Trades[1].Notional < result.Trades[0].Notional);
-        Assert.Equal(1, result.Skipped["лимит убытка"]);
-        Assert.NotNull(result.EntriesBlocked);
+        var bounce = result.Trades[0];
+        Assert.Equal(("long", "плотность проедают: осталось 40% — выход до пробоя"), (bounce.Side, bounce.ExitReason));
+        // The exit order went out at the first sign and was filled 250 ms later, already through the wall: a loss.
+        Assert.Equal(99.85m, bounce.Exit);
+        var flip = result.Trades[1];
+        Assert.Equal("short", flip.Side);
+        Assert.StartsWith("переворот в проедание плотности", flip.EntryReason);
+        Assert.Equal("импульс после проедания выдохся: 30 с без нового экстремума", flip.ExitReason);
+        Assert.True(flip.Exit < flip.Entry);
     }
 
     [Fact]
-    public void DetectorKeepsThePriceAfterTheEntryAndTheCoinsTypicalRange()
+    public void APulledWallEndsTheBounce()
     {
-        var events = SignalLabTestsRecording();
-        var detector = new SignalDetector(new Dictionary<string, decimal> { ["XUSDT"] = 300_000_000 }, liquidations: true);
-        foreach (var e in events) detector.Process(e);
-        var result = detector.Result("x");
-        var burst = result.Events.Select((e, i) => (e, i)).Single(x => x.e.Type == "Всплеск объёма");
-        var path = Assert.Single(detector.Paths(), p => p.Index == burst.i);
-        // After the burst the book sits at 100.19/100.21; the entry mid was 100.
-        var mid = (burst.e.EntryAsk!.Value + burst.e.EntryBid!.Value) / 2;
-        Assert.Equal(100.19m, Math.Round(LabPath.Abs(path.Samples[10]![0], mid), 2));
-        Assert.Equal(100.21m, Math.Round(LabPath.Abs(path.Samples[10]![1], mid), 2));
-        // Ranges of the flat minutes before are zero: known but no stop can come from them.
-        Assert.NotNull(burst.e.TypicalPct);
+        var m = BounceSetup(out var wall);
+        for (var t = 120; t < 125; t++) m.Second(t, 100, wall);
+        for (var t = 125; t < 130; t++) m.Second(t, 100);
+        var trade = Assert.Single(m.Run(Density).Trades);
+        Assert.Equal("плотность сняли", trade.ExitReason);
     }
 
-    // The same recording as SignalLabTests: a flat market, then a burst of buys lifting the price.
-    private static List<TradeBot.Recorder.CaptureEvent> SignalLabTestsRecording()
+    [Fact]
+    public void BouncesSmallerThanThreeFeesAreNotTraded()
     {
-        const long burst = T0 + 2_000_000;
-        static string S(decimal v) => v.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        TradeBot.Recorder.CaptureEvent Trade(long ms, decimal price, decimal q, bool buy) => new(TradeBot.Recorder.ScanRecorder.Market, "c", "market", DateTimeOffset.UnixEpoch, ms,
-            $"{{\"stream\":\"xusdt@aggTrade\",\"data\":{{\"e\":\"aggTrade\",\"s\":\"XUSDT\",\"p\":\"{S(price)}\",\"q\":\"{S(q)}\",\"T\":{ms},\"m\":{(!buy).ToString().ToLowerInvariant()}}}}}");
-        TradeBot.Recorder.CaptureEvent Book(long ms, decimal bid, decimal ask) => new(TradeBot.Recorder.ScanRecorder.Public, "c", "market", DateTimeOffset.UnixEpoch, ms,
-            $"{{\"stream\":\"xusdt@depth20@500ms\",\"data\":{{\"e\":\"depthUpdate\",\"E\":{ms},\"T\":{ms},\"s\":\"XUSDT\",\"b\":[[\"{S(bid)}\",\"10\"]],\"a\":[[\"{S(ask)}\",\"10\"]]}}}}");
-        var events = new List<TradeBot.Recorder.CaptureEvent>();
-        for (var ms = T0; ms < burst + 400_000; ms += 500)
+        var m = BounceSetup(out var wall);
+        for (var t = 120; t < 140; t++) m.Second(t, 100, wall);
+        var result = m.Run(Density with { FeePct = .2m });
+        Assert.Empty(result.Trades);
+        Assert.Equal(1, result.Skipped["средний отскок меньше трёх комиссий"]);
+    }
+
+    [Fact]
+    public void APriceSpikeIsFollowedUntilTheMoveStallsOrIsAbsorbed()
+    {
+        static Market Spike(decimal after)
         {
-            var after = ms >= burst + 500;
-            events.Add(Book(ms, after ? 100.19m : 99.99m, after ? 100.21m : 100.01m));
-            if (ms % 1000 == 0 && (ms < burst || ms >= burst + 2000)) events.Add(Trade(ms, ms < burst ? 100 : 100.2m, 1, ms % 2000 == 0));
+            var m = new Market();
+            for (var t = 0; t < 400; t++) m.Second(t, 100);
+            // 4% in ten seconds: four typical 1% candles.
+            for (var t = 400; t < 410; t++) m.Second(t, 100 + .4m * (t - 399));
+            for (var t = 410; t < 480; t++) m.Second(t, after);
+            return m;
         }
-        for (var k = 0; k < 20; k++) events.Add(Trade(burst + k * 100, 100.1m + .005m * k, 50, true));
-        return events.OrderBy(e => e.ReceivedTicks).ToList();
+        var stalled = Assert.Single(Spike(104).Run(new SignalParameters(SignalParameters.Spike)).Trades);
+        Assert.Equal("long", stalled.Side);
+        Assert.StartsWith("вынос цены: Ход за 30 с", stalled.EntryReason);
+        Assert.Equal("движение выдохлось: 60 с без нового экстремума", stalled.ExitReason);
+        // Back to the middle of the 100 → 103 spike: the impulse was absorbed.
+        var absorbed = Assert.Single(Spike(101).Run(new SignalParameters(SignalParameters.Spike)).Trades);
+        Assert.Equal("импульс поглощён: цена вернулась к середине выноса", absorbed.ExitReason);
     }
 
     [Fact]
-    public async Task SignalBotIsCreatedStartedFromAPastMomentShowsItsTradesAndStops()
+    public void MoneyPassSizesFromTheDepositAtEntryAndStopsAtTheLossLimit()
     {
-        var scans = System.IO.Path.Combine(root, "scans");
-        var dir = System.IO.Path.Combine(scans, "20261016T000000Z-55555555555555555555555555555555");
+        var run = new SignalRun("r", "b", T0, null, DateTimeOffset.UnixEpoch, 100, 1.5m, new SignalParameters(FeePct: 0));
+        EngineTrade Loss(long at) => new("XUSDT", "long", at, at + 1000, 100, 99, 1, "вход", "выход", 0, -100);
+        var result = SignalBots.Money(run, [new EngineResult(BotEngine.Version, "x", T0, T0 + 10_000, [Loss(T0), Loss(T0 + 2000), Loss(T0 + 4000)], [], 3, 0)]);
+        // 1% loss on a notional equal to the deposit: 100 → 99 → 98.01, then the 1.5 USDT limit stops new trades.
+        Assert.Equal(2, result.Trades.Length);
+        Assert.Equal(99m, result.Trades[1].Notional);
+        Assert.Equal(98.01m, result.Deposit);
+        Assert.Equal(1, result.Skipped["лимит убытка"]);
+        Assert.Equal(("вход", "выход"), (result.Trades[0].EntryReason, result.Trades[0].ExitReason));
+        // Trades before the run's start are not the run's.
+        Assert.Empty(SignalBots.Money(run with { FromMs = T0 + 5000 }, [new EngineResult(BotEngine.Version, "x", T0, T0 + 10_000, [Loss(T0)], [], 1, 0)]).Trades);
+    }
+
+    [Fact]
+    public async Task ABotStartedFromAPastMomentComputesItsRecordingsInTheBackgroundAndShowsTheTrades()
+    {
+        var scans = Path.Combine(root, "scans");
+        var dir = Path.Combine(scans, $"{DateTimeOffset.FromUnixTimeMilliseconds(T0):yyyyMMdd'T'HHmmss'Z'}-77777777777777777777777777777777");
         Directory.CreateDirectory(dir);
-        File.WriteAllText(System.IO.Path.Combine(dir, "summary.json"), "{}");
-        File.WriteAllText(System.IO.Path.Combine(dir, "manifest.json"), "{}");
-        var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
-        var (recording, paths) = Recording([Spike("AUSDT", T0)], Path(0));
-        File.WriteAllLines(System.IO.Path.Combine(dir, SignalLab.PathFile), paths.Values.Select(p => JsonSerializer.Serialize(p, json)));
-        File.WriteAllText(System.IO.Path.Combine(dir, SignalLab.File), JsonSerializer.Serialize(recording, json));
-        var db = System.IO.Path.Combine(root, "workspace.db");
+        var m = BounceSetup(out var wall);
+        for (var t = 120; t < 140; t++) m.Second(t, 100, wall);
+        for (var t = 140; t < 150; t++) m.Second(t, 100.55m, wall);
+        File.WriteAllLines(Path.Combine(dir, StorageHousekeeper.Events), m.Events.Select(e => JsonSerializer.Serialize(e)));
+        File.WriteAllText(Path.Combine(dir, "manifest.json"), JsonSerializer.Serialize(new { liquidations = true, symbols = new[] { new ScanSymbol("XUSDT", 10_000_000, 100) } }));
+        File.WriteAllText(Path.Combine(dir, "summary.json"), "{}");
+        var db = Path.Combine(root, "workspace.db");
         using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("Scanner:Path", scans);
@@ -189,40 +184,33 @@ public sealed class SignalBotTests : IDisposable
                 // Never let a test open the real workspace database.
                 services.RemoveAll<IWorkspaceStore>(); services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(db));
                 services.RemoveAll<PaperRunStore>(); services.AddSingleton(_ => new PaperRunStore(db));
-
             });
         });
         using var client = factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-TradeBot-Client", "web");
+        var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         try
         {
-            var config = new BotConfig("Рывок", "Binance", "*", 100, 30, StrategyCatalog.SignalId, StrategyCatalog.SignalVersion,
-                Signal: new SignalParameters(HoldSeconds: 60));
-            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", config with { Signal = new(RiskPct: 9) })).StatusCode);
-            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", config with { Symbol = "ARBUSDT" })).StatusCode);
-            var created = await client.PostAsJsonAsync("/api/v1/bots", config);
-            Assert.Equal(HttpStatusCode.Created, created.StatusCode);
-            var bot = (await created.Content.ReadFromJsonAsync<Bot>(json))!;
-            Assert.Equal(60, bot.Signal!.HoldSeconds);
-            // Only the signal bot is left in the catalog.
-            var strategies = (await client.GetFromJsonAsync<StrategyDefinition[]>("/api/v1/strategies", json))!;
-            Assert.Equal(StrategyCatalog.SignalId, Assert.Single(strategies).Id);
-
-            var start = await client.PostAsJsonAsync($"/api/v1/bots/{bot.Id}/signal/start", new SignalStart(T0 - 1000));
-            Assert.Equal(HttpStatusCode.Accepted, start.StatusCode);
-            Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync($"/api/v1/bots/{bot.Id}/signal/start", new SignalStart())).StatusCode);
+            var config = new BotConfig("Плотность", "Binance", "*", 100, 30, StrategyCatalog.SignalId, StrategyCatalog.SignalVersion, Density);
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", config with { Signal = Density with { Signal = "Перекос стакана" } })).StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", config with { StrategyVersion = "0.1.0" })).StatusCode);
+            var bot = (await (await client.PostAsJsonAsync("/api/v1/bots", config)).Content.ReadFromJsonAsync<Bot>(json))!;
+            Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsJsonAsync($"/api/v1/bots/{bot.Id}/signal/start", new SignalStart(T0 - 1000))).StatusCode);
+            using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            SignalRunView run;
+            do
+            {
+                run = (await client.GetFromJsonAsync<SignalRunView[]>($"/api/v1/bots/{bot.Id}/signal", json, wait.Token))!.Single();
+                if (run.Result.Pending > 0) await Task.Delay(100, wait.Token);
+            } while (run.Result.Pending > 0);
+            Assert.Equal(1, run.Result.Recordings);
+            Assert.True(File.Exists(Path.Combine(dir, SignalBots.FileName(Density))));
             var listed = (await client.GetFromJsonAsync<Workspace>("/api/v1/workspace", json))!.Bots.Single();
             Assert.Equal("running", listed.Status);
             var trade = Assert.Single(listed.Trades);
-            Assert.Equal(("AUSDT", "время"), (trade.Symbol, trade.ExitReason));
-            var runs = (await client.GetFromJsonAsync<SignalRunView[]>($"/api/v1/bots/{bot.Id}/signal", json))!;
-            Assert.Equal((1, 1), (runs.Single().Result.Signals, runs.Single().Result.Recordings));
-
+            Assert.Equal("цена отошла от плотности на средний отскок 0,57%", trade.ExitReason);
+            Assert.StartsWith("отскок от плотности", trade.EntryReason);
             Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/api/v1/bots/{bot.Id}/signal/stop", null)).StatusCode);
-            Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsync($"/api/v1/bots/{bot.Id}/signal/stop", null)).StatusCode);
-            listed = (await client.GetFromJsonAsync<Workspace>("/api/v1/workspace", json))!.Bots.Single();
-            Assert.Equal("stopped", listed.Status);
-            Assert.Single(listed.Trades);
         }
         finally
         {

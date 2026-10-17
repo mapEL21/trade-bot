@@ -1,17 +1,12 @@
 export type Exchange = 'Binance' | 'Bybit' | 'OKX' | 'Hyperliquid';
 export type Status = 'running' | 'draft' | 'stopped';
 export const maxLeverage = 125;
-// A bot that trades one signal of the lab on every coin of the data recording (SignalParameters on the server).
-// riskPct: the share of the deposit lost at the stop, fees included; the size follows from it and the stop distance.
+// A bot's strategy and money management (SignalParameters on the server). Entries and exits are the strategy's own logic
+// (docs/BOT_LOGIC.md), never a stop or a target set here. riskPct: the share of the deposit lost, fees included, when the
+// strategy's cancel level is reached; it sets the size.
 export interface SignalParameters {
   signal: string;
-  mode: 'follow' | 'fade';
-  holdSeconds: number;
   riskPct: number;
-  // The stop is this many typical 1-minute ranges of the coin away from the entry.
-  stopRanges: number;
-  // A trade is skipped when the round-trip fees would be more than this share of its risk.
-  maxFeeShare: number;
   feePct: number;
   maxLeverage: number;
   maxPositions: number;
@@ -19,27 +14,21 @@ export interface SignalParameters {
   sessions?: string[];
 }
 export const sessionIds = ['asia', 'europe', 'us', 'late'];
-export const signalTypes = [
-  'Вынос цены',
-  'Каскад ликвидаций',
-  'Всплеск объёма',
-  'Перекос агрессора',
-  'Перекос стакана',
-  'Пробой уровня',
-  'Подход к плотности',
-  'Проедание плотности',
-  'Снятие плотности',
-  'Переставление плотности',
+export const strategies: { id: string; description: string }[] = [
+  {
+    id: 'Плотность',
+    description:
+      'Отскок от крупной заявки в стакане, пока её не проедают; выход до проедания с переворотом в пробой.',
+  },
+  {
+    id: 'Вынос цены',
+    description: 'Резкий принудительный ход цены: держим, пока движение не выдохлось.',
+  },
 ];
-export const signalVersion = '0.1.0';
-// The hypothesis under check: follow a forced price jerk for 5 minutes, risking 1.5% of the deposit with fees.
+export const signalVersion = '0.2.0';
 export const defaultSignalParameters: SignalParameters = {
-  signal: 'Вынос цены',
-  mode: 'follow',
-  holdSeconds: 300,
+  signal: 'Плотность',
   riskPct: 1.5,
-  stopRanges: 2,
-  maxFeeShare: 0.3,
   feePct: 0.1,
   maxLeverage: 20,
   maxPositions: 3,
@@ -77,6 +66,8 @@ export interface Trade {
   // Best and worst price move in the trade's direction while it was open, before fees, b.p.
   maxFavorableBps?: number;
   maxAdverseBps?: number;
+  // Why the strategy entered, in words; exitReason says why it left.
+  entryReason?: string;
 }
 export interface Bot extends BotConfig {
   revision?: number;
@@ -243,15 +234,9 @@ function validateSignalBot(v: Record<string, unknown>): BotConfig {
   const s = v.signal as Record<string, unknown> | undefined;
   if (!s || typeof s !== 'object') throw new Error('Укажите настройки сигнала.');
   const p = { ...defaultSignalParameters, ...s } as SignalParameters;
-  if (!signalTypes.includes(p.signal)) throw new Error('Выберите сигнал из лаборатории.');
-  if (p.mode !== 'follow' && p.mode !== 'fade')
-    throw new Error('Направление — по движению или против.');
-  if (!inRange(p.holdSeconds, 5, 300) || !Number.isInteger(p.holdSeconds))
-    throw new Error('Удержание — целое число секунд от 5 до 300.');
+  if (!strategies.some((x) => x.id === p.signal))
+    throw new Error('Выберите стратегию: плотность или вынос цены.');
   if (!inRange(p.riskPct, 0.1, 5)) throw new Error('Риск на сделку — от 0,1 до 5% депозита.');
-  if (!inRange(p.stopRanges, 0.5, 20))
-    throw new Error('Стоп — от 0,5 до 20 обычных минутных свечей.');
-  if (!inRange(p.maxFeeShare, 0.05, 0.9)) throw new Error('Доля комиссии в риске — от 5 до 90%.');
   if (!inRange(p.feePct, 0, 1)) throw new Error('Комиссии круга — от 0 до 1%.');
   if (!inRange(p.maxLeverage, 1, maxLeverage) || !Number.isInteger(p.maxLeverage))
     throw new Error(`Плечо — целое число от 1 до ${maxLeverage}.`);
@@ -274,11 +259,7 @@ function validateSignalBot(v: Record<string, unknown>): BotConfig {
     strategyVersion: v.strategyVersion,
     signal: {
       signal: p.signal,
-      mode: p.mode,
-      holdSeconds: p.holdSeconds,
       riskPct: p.riskPct,
-      stopRanges: p.stopRanges,
-      maxFeeShare: p.maxFeeShare,
       feePct: p.feePct,
       maxLeverage: p.maxLeverage,
       maxPositions: p.maxPositions,
@@ -371,7 +352,7 @@ export function parseWorkspace(text: string): Workspace {
         t.entry <= 0 ||
         t.exit <= 0 ||
         t.quantity <= 0 ||
-        [t.symbol, t.exchange, t.exitReason].some(
+        [t.symbol, t.exchange, t.exitReason, t.entryReason].some(
           (s) => s != null && typeof s !== 'string',
         ) ||
         (t.openedAt != null && !Number.isFinite(Date.parse(t.openedAt))) ||

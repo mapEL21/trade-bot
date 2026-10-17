@@ -41,8 +41,6 @@ public sealed record HypothesisCheck(string Statement, long FromMs, decimal FeeP
 public sealed class SignalLab(IConfiguration configuration, IHostEnvironment environment, ILogger<SignalLab> logger) : IHostedService, IDisposable
 {
     public const string File = "signal-lab-v1.json";
-    // One LabPath per line, written before File: a recording with File always has its paths.
-    public const string PathFile = "signal-path-v1.ndjson";
     public const int MinCount = 100;
     // Events of one type and direction starting within this time of each other, on any coins, are one market moment.
     public const long EpisodeMs = 10_000;
@@ -72,7 +70,7 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
     public LabStatus Status { get { lock (gate) return status; } }
 
     // Finished recordings only: summary.json is written after the last event.
-    private IEnumerable<string> Recordings() => !Directory.Exists(Root) ? []
+    public IEnumerable<string> Recordings() => !Directory.Exists(Root) ? []
         : Directory.EnumerateDirectories(Root).Where(d => Regex.IsMatch(Path.GetFileName(d), "\\A[0-9]{8}T[0-9]{6}Z-[a-f0-9]{32}\\z")
             && System.IO.File.Exists(Path.Combine(d, "summary.json")) && System.IO.File.Exists(Path.Combine(d, "manifest.json"))).Order();
 
@@ -144,10 +142,7 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
             lock (gate) status = status with { Current = name, Lines = 0 };
             try
             {
-                var (result, paths) = SignalDetector.RunFull(directory, shutdown.Token, lines => { lock (gate) status = status with { Lines = lines }; });
-                var pathTemporary = Path.Combine(directory, PathFile + ".tmp");
-                System.IO.File.WriteAllLines(pathTemporary, paths.Select(p => JsonSerializer.Serialize(p, Json)));
-                System.IO.File.Move(pathTemporary, Path.Combine(directory, PathFile), true);
+                var result = SignalDetector.Run(directory, shutdown.Token, lines => { lock (gate) status = status with { Lines = lines }; });
                 var temporary = Path.Combine(directory, File + ".tmp");
                 System.IO.File.WriteAllText(temporary, JsonSerializer.Serialize(result, Json));
                 System.IO.File.Move(temporary, Path.Combine(directory, File), true);
@@ -171,26 +166,6 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
     }
 
     private List<LabRecording> Load() => Recordings().Select(Cached).OfType<LabRecording>().ToList();
-
-    // Processed recordings with the paths of one event type, oldest first, for the bot: only recordings that may hold events
-    // from fromMs on are read, and only path lines of that type are parsed.
-    public List<(LabRecording Recording, Dictionary<int, LabPath> Paths)> WithPaths(string type, long fromMs, long? toMs)
-    {
-        var result = new List<(LabRecording, Dictionary<int, LabPath>)>();
-        var marker = JsonSerializer.Serialize(type, Json);
-        foreach (var directory in Recordings())
-        {
-            if (Cached(directory) is not { } recording || recording.LastMs < fromMs || (toMs is { } to && recording.FirstMs >= to)) continue;
-            var file = Path.Combine(directory, PathFile);
-            var paths = new Dictionary<int, LabPath>();
-            if (System.IO.File.Exists(file))
-                foreach (var line in System.IO.File.ReadLines(file))
-                    if (line.Contains(marker, StringComparison.Ordinal) && JsonSerializer.Deserialize<LabPath>(line, Json) is { } path && path.Type == type)
-                        paths[path.Index] = path;
-            result.Add((recording, paths));
-        }
-        return result.OrderBy(x => x.Item1.FirstMs).ToList();
-    }
 
     // fromMs: only events from this moment on, so a hypothesis chosen earlier is checked on data it was not chosen on.
     public LabReport Report(decimal feePct, long? fromMs = null, string? session = null)

@@ -5,19 +5,12 @@ import { SelectField } from './components';
 import {
   formatMoney,
   maxLeverage,
-  signalTypes,
+  strategies,
   type Bot,
   type BotConfig,
   type SignalParameters,
 } from './model';
 
-const holds: [number, string][] = [
-  [5, '5 с'],
-  [15, '15 с'],
-  [60, '1 мин'],
-  [120, '2 мин'],
-  [300, '5 мин'],
-];
 const num = (n: number, digits = 2) => n.toLocaleString('ru-RU', { maximumFractionDigits: digits });
 const moscow = (ms: number) =>
   new Date(ms).toLocaleString('ru-RU', {
@@ -28,23 +21,7 @@ const moscow = (ms: number) =>
     minute: '2-digit',
   });
 
-// How a trade of the bot is sized, on an example coin, so the numbers behind the settings are visible before saving.
-export function sizingExample(p: SignalParameters, deposit: number, typicalPct = 0.3) {
-  const stop = p.stopRanges * typicalPct;
-  const feeShare = p.feePct / (stop + p.feePct);
-  const risk = (deposit * p.riskPct) / 100;
-  const notional = Math.min(risk / ((stop + p.feePct) / 100), deposit * p.maxLeverage);
-  return {
-    stop,
-    feeShare,
-    risk,
-    notional,
-    leverage: notional / deposit,
-    skipped: feeShare > p.maxFeeShare,
-  };
-}
-
-// Settings of a signal bot in the bot form.
+// Settings of a bot in the bot form: the strategy and money management. Entries and exits are the strategy's own logic.
 export function SignalFields({
   form,
   setForm,
@@ -61,7 +38,6 @@ export function SignalFields({
     min: number,
     max: number,
     step: number,
-    scale = 1,
   ) => (
     <label className="field">
       <span>{label}</span>
@@ -70,49 +46,30 @@ export function SignalFields({
         min={min}
         max={max}
         step={step}
-        value={
-          Number.isNaN(p[key] as number) ? '' : Math.round((p[key] as number) * scale * 1e6) / 1e6
-        }
-        onChange={(e) => set({ [key]: e.target.valueAsNumber / scale })}
+        value={Number.isNaN(p[key] as number) ? '' : (p[key] as number)}
+        onChange={(e) => set({ [key]: e.target.valueAsNumber })}
         required
       />
     </label>
   );
-  const example = sizingExample(p, form.budget || 0);
   return (
     <>
       <div className="form-grid">
-        <SelectField label="Сигнал" value={p.signal} onChange={(signal) => set({ signal })}>
-          {signalTypes.map((t) => (
-            <option key={t}>{t}</option>
-          ))}
-        </SelectField>
-        <SelectField
-          label="Направление"
-          value={p.mode}
-          onChange={(mode) => set({ mode: mode as SignalParameters['mode'] })}
-        >
-          <option value="follow">По движению</option>
-          <option value="fade">Против движения</option>
-        </SelectField>
-        <SelectField
-          label="Удержание"
-          value={String(p.holdSeconds)}
-          onChange={(v) => set({ holdSeconds: Number(v) })}
-        >
-          {holds.map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
+        <SelectField label="Стратегия" value={p.signal} onChange={(signal) => set({ signal })}>
+          {strategies.map((s) => (
+            <option key={s.id}>{s.id}</option>
           ))}
         </SelectField>
         {number('Риск на сделку с комиссиями, % депозита', 'riskPct', 0.1, 5, 0.1)}
-        {number('Стоп, обычных минутных свечей', 'stopRanges', 0.5, 20, 0.5)}
         {number('Комиссии круга, %', 'feePct', 0, 1, 0.01)}
-        {number('Комиссия не больше, % риска', 'maxFeeShare', 5, 90, 1, 100)}
         {number('Плечо не больше', 'maxLeverage', 1, maxLeverage, 1)}
         {number('Сделок одновременно', 'maxPositions', 1, 20, 1)}
       </div>
+      <p className="field-hint signal-example">
+        {strategies.find((s) => s.id === p.signal)?.description} Вход и выход — по логике стратегии,
+        у каждой сделки записана причина. Риск {num(p.riskPct)}% — потеря при отмене сценария вместе
+        с комиссиями: из него считается размер позиции.
+      </p>
       <fieldset className="signal-sessions">
         <legend>Торговые сессии (ни одной — все часы)</legend>
         {tradingSessions.map((s) => (
@@ -129,15 +86,6 @@ export function SignalFields({
           </label>
         ))}
       </fieldset>
-      <p className="field-hint signal-example">
-        Пример: монета с обычной минутной свечой 0,3% — стоп {num(example.stop)}% от входа, комиссия{' '}
-        {num(example.feeShare * 100, 0)}% риска
-        {example.skipped
-          ? ' — больше допустимого, сделка будет пропущена.'
-          : `. При стопе бот теряет ${formatMoney(example.risk)} USDT (${num(p.riskPct)}% депозита) вместе с комиссиями, поэтому позиция ${formatMoney(example.notional)} USDT, плечо ${num(example.leverage, 1)}x.`}{' '}
-        Чем меньше обычный ход монеты, тем ближе стоп, больше позиция и плечо — и тем большую часть
-        риска съедает комиссия.
-      </p>
     </>
   );
 }
@@ -163,7 +111,7 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
       } catch (e) {
         if (!stopped) setError((e as Error).message);
       }
-      if (!stopped && running) timer = setTimeout(load, 30000);
+      if (!stopped && running) timer = setTimeout(load, 5000);
     }
     void load();
     return () => {
@@ -191,15 +139,16 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
   return (
     <section className="panel paper-run signal-run" aria-labelledby="signal-run-title">
       <div className="section-line">
-        <h2 id="signal-run-title">Симуляция по записям данных</h2>
+        <h2 id="signal-run-title">Работа по записям данных</h2>
         <span className={`research-status ${running ? 'is-live' : ''}`} role="status">
           <span className={`live-dot ${running ? 'on' : ''}`} aria-hidden="true" />
           {running ? 'Работает' : 'Не запущен'}
         </span>
       </div>
       <p className="field-hint">
-        Сделки появляются после обработки каждой записи, примерно раз в час. С датой в прошлом бот
-        сначала пройдёт записи с этого момента.
+        Бот проходит каждую завершённую запись рынка: новые сделки появляются после её окончания,
+        примерно раз в час. С датой в прошлом он сначала пройдёт записи с этого момента, около
+        минуты на час записи.
       </p>
       <div className="paper-controls">
         {running ? (
@@ -246,6 +195,11 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
             {result.incomplete > 0 && ` · не закрыты к концу записи: ${result.incomplete}`} ·
             депозит {formatMoney(result.deposit)} USDT
           </p>
+          {result.pending > 0 && (
+            <p className="field-hint" role="status">
+              Считаются записи: {result.pending}. Сделки по ним появятся, когда расчёт закончится.
+            </p>
+          )}
           {result.entriesBlocked && <p className="field-hint negative">{result.entriesBlocked}</p>}
           {skipped.length > 0 && (
             <div className="signal-skipped">

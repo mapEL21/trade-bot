@@ -255,5 +255,7 @@ export interface SignalRunView {
     recordings: number;
     lastDataMs: number | null;
     entriesBlocked: string | null;
+    // Recordings still being computed in the background.
+    pending: number;
   };
 }

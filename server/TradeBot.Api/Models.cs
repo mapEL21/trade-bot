@@ -21,7 +21,7 @@ public sealed record Bot(string Id, string Name, string Exchange, string Symbol,
 public sealed record BotTrade(string Id, string At, string Side, decimal Gross, decimal Fee, decimal Entry, decimal Exit,
     decimal Quantity, string RunId, bool Simulated = true, string? Symbol = null, string? Exchange = null,
     string? OpenedAt = null, double? HoldSeconds = null, decimal? Notional = null,
-    string? ExitReason = null, decimal? MaxFavorableBps = null, decimal? MaxAdverseBps = null);
+    string? ExitReason = null, decimal? MaxFavorableBps = null, decimal? MaxAdverseBps = null, string? EntryReason = null);
 
 public sealed record WorkspaceEvent(string Id, string At, string BotId, string BotName, string Text);
 public sealed record Workspace(int SchemaVersion, Bot[] Bots, WorkspaceEvent[] Events);
@@ -32,11 +32,12 @@ public sealed record StrategyDefinition(string Id, string Version, string Name, 
 // but are neither shown nor accepted.
 public sealed class StrategyCatalog
 {
-    public const string SignalId = "signal", SignalVersion = "0.1.0";
+    // 0.2.0: entries and exits by the strategy's own logic (docs/BOT_LOGIC.md); 0.1.0 had a stop and a holding time in the form.
+    public const string SignalId = "signal", SignalVersion = "0.2.0";
     public IReadOnlyList<StrategyDefinition> Items { get; } =
     [
         new(SignalId, SignalVersion, "Сигнал лаборатории",
-            "Торгует выбранный сигнал лаборатории на всех монетах записи данных. Размер позиции — от риска на сделку с учётом комиссий.",
+            "Торгует плотности или вынос цены на всех монетах записи данных: вход и выход по логике стратегии, размер — от риска на сделку с учётом комиссий.",
             "paper", true, true, ["Binance"]),
     ];
 

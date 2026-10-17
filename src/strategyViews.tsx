@@ -20,22 +20,11 @@ const signal: StrategyView = {
     const p = bot.signal!;
     const pct = (n: number) => `${n.toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%`;
     return [
-      { label: 'Стратегия', value: `Сигнал лаборатории · v${bot.strategyVersion}` },
-      {
-        label: 'Сигнал',
-        value: `${p.signal} · ${p.mode === 'follow' ? 'по движению' : 'против движения'}`,
-      },
-      {
-        label: 'Удержание',
-        value: p.holdSeconds >= 60 ? `${p.holdSeconds / 60} мин` : `${p.holdSeconds} с`,
-      },
+      { label: 'Стратегия', value: `${p.signal} · v${bot.strategyVersion}` },
+      { label: 'Вход и выход', value: 'по логике стратегии' },
       { label: 'Депозит', value: `${formatMoney(bot.budget)} USDT` },
       { label: 'Риск на сделку', value: `${pct(p.riskPct)} депозита с комиссиями` },
-      { label: 'Стоп', value: `${p.stopRanges} обычных минутных свечи` },
-      {
-        label: 'Комиссии круга',
-        value: `${pct(p.feePct)} · не больше ${pct(p.maxFeeShare * 100)} риска`,
-      },
+      { label: 'Комиссии круга', value: pct(p.feePct) },
       { label: 'Плечо · сделок одновременно', value: `до ${p.maxLeverage}x · ${p.maxPositions}` },
       {
         label: 'Сессии',
@@ -49,7 +38,7 @@ const signal: StrategyView = {
       { label: 'Лимит убытка', value: `${formatMoney(bot.lossLimit)} USDT` },
     ];
   },
-  note: 'Сделки виртуальные: вход и выход по лучшим ценам стакана из записи, проскальзывание глубже и funding не учтены.',
+  note: 'Сделки виртуальные: исполнение по лучшим ценам стакана из записи через 0,25 с после решения; проскальзывание глубже и funding не учтены.',
 };
 
 export const strategyViews: Record<Bot['strategy'], StrategyView> = { signal };

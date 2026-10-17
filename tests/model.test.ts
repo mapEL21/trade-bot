@@ -23,7 +23,7 @@ const signalConfig = {
   budget: 10,
   lossLimit: 1,
   strategy: 'signal' as const,
-  strategyVersion: '0.1.0',
+  strategyVersion: '0.2.0',
   signal: defaultSignalParameters,
 };
 const trade = (at: string, gross: number, fee = 0.01): Trade => ({
@@ -168,7 +168,7 @@ test('signal bot settings: every coin of the recording, risk and limits checked,
     budget: 100,
     lossLimit: 30,
     strategy: 'signal' as const,
-    strategyVersion: '0.1.0',
+    strategyVersion: '0.2.0',
     signal: defaultSignalParameters,
   };
   assert.deepEqual(validateConfig(config), config);
@@ -180,7 +180,7 @@ test('signal bot settings: every coin of the recording, risk and limits checked,
   );
   assert.throws(
     () => validateConfig({ ...config, signal: { ...defaultSignalParameters, signal: 'Луна' } }),
-    /сигнал/,
+    /стратегию/,
   );
   const bot = {
     ...config,

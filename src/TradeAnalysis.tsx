@@ -340,6 +340,7 @@ export function TradesTable({
         'Количество',
         'Комиссия USDT',
         'Чистый PnL USDT',
+        'Причина входа',
         'Причина выхода',
       ],
       ...sorted.map((t) => [
@@ -357,6 +358,7 @@ export function TradesTable({
         t.quantity,
         t.fee,
         net(t),
+        t.entryReason ?? '',
         t.exitReason ?? '',
       ]),
     ];
@@ -403,7 +405,8 @@ export function TradesTable({
                 <th>Размер, USDT</th>
                 <th>Комиссия</th>
                 <th>Чистый PnL</th>
-                <th>Причина выхода</th>
+                <th>Почему вошёл</th>
+                <th>Почему вышел</th>
               </tr>
             </thead>
             <tbody>
@@ -446,7 +449,8 @@ export function TradesTable({
                     <td className={net(t) >= 0 ? 'positive' : 'negative'}>
                       {formatMoney(net(t), true)}
                     </td>
-                    <td className="muted">{t.exitReason ?? '—'}</td>
+                    <td className="muted reason">{t.entryReason ?? '—'}</td>
+                    <td className="muted reason">{t.exitReason ?? '—'}</td>
                   </tr>
                 );
               })}

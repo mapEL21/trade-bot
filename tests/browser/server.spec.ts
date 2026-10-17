@@ -10,7 +10,7 @@ const signalBot = {
   budget: 10,
   lossLimit: 1,
   strategy: 'signal' as const,
-  strategyVersion: '0.1.0',
+  strategyVersion: '0.2.0',
   signal: defaultSignalParameters,
   status: 'draft' as const,
   trades: [],
@@ -34,7 +34,9 @@ test('catalog creates a server instance that survives a new browser, edits, expo
     const dialog = page.getByRole('dialog');
     // Only the signal bot is left: no choice of strategy.
     await expect(dialog.getByRole('radio')).toHaveCount(0);
-    await expect(dialog.getByText(/Пример: монета с обычной минутной свечой 0,3%/)).toBeVisible();
+    await expect(dialog.getByText(/Вход и выход — по логике стратегии/)).toBeVisible();
+    // No stop, target or holding time in the form: exits are the strategy's logic.
+    await expect(dialog.getByLabel(/Стоп|Удержание|Направление/)).toHaveCount(0);
     await page.getByLabel('Название бота').fill(name);
     const responsePromise = page.waitForResponse(
       (response) =>
@@ -63,7 +65,7 @@ test('catalog creates a server instance that survives a new browser, edits, expo
     await second.goto('http://127.0.0.1:5175/');
     await expect(second.getByText('Данные загружены с сервера')).toBeVisible();
     await second.getByRole('button', { name: /^Боты/ }).first().click();
-    await second.getByRole('button', { name: `${name} Сигнал лаборатории v0.1.0` }).click();
+    await second.getByRole('button', { name: `${name} Сигнал лаборатории v0.2.0` }).click();
     await expect(second.getByRole('heading', { name })).toBeVisible();
     await second.getByRole('button', { name: 'Настройки', exact: true }).click();
     await second.getByLabel('Название бота').fill(`${name} v2`);
@@ -83,7 +85,7 @@ test('catalog creates a server instance that survives a new browser, edits, expo
     await page.getByRole('button', { name: 'Удалить', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Удалить', exact: true }).click();
     await expect(
-      page.getByRole('button', { name: `${name} v2 Сигнал лаборатории v0.1.0` }),
+      page.getByRole('button', { name: `${name} v2 Сигнал лаборатории v0.2.0` }),
     ).toHaveCount(0);
   } finally {
     if (id) {

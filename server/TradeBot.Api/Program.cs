@@ -132,8 +132,8 @@ api.MapGet("/workspace", async (IWorkspaceStore store, PaperRunStore runs, Signa
     var signalRuns = (await runs.SignalRunsAsync(null, ct)).GroupBy(r => r.BotId).ToDictionary(g => g.Key, g => g.ToArray());
     return Results.Ok(workspace with
     {
-        // Bots of strategies removed from the application stay in the database but are not shown.
-        Bots = workspace.Bots.Where(b => catalog.Known(b.Strategy)).Select(b =>
+        // Bots that are no longer valid (removed strategies, an older version of the signal bot) stay in the database but are not shown.
+        Bots = workspace.Bots.Where(b => catalog.Validate(b).Count == 0).Select(b =>
         {
             var own = signalRuns.GetValueOrDefault(b.Id) ?? [];
             return b with
