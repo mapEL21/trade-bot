@@ -164,6 +164,15 @@ public sealed class ExchangeTests : IDisposable
     }
 
     [Fact]
+    public async Task TheBalanceIsReadFromTheUsdtAsset()
+    {
+        var client = new BinanceFuturesClient(new HttpClient(new FakeBinance()), "https://testnet.example", "key", "secret");
+        Assert.Equal(new ExchangeBalance(5010.5m, 5000.5m, 1.25m), await client.BalanceAsync(CancellationToken.None));
+        // The test network is Binance's Demo Trading now.
+        Assert.Equal("https://demo-fapi.binance.com", ExchangeModes.BaseUrl(new ConfigurationBuilder().Build(), ExchangeModes.Testnet));
+    }
+
+    [Fact]
     public void KeysAreKeptEncryptedAndNeverStoredInTheClear()
     {
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Exchange:KeysPath"] = Path.Combine(root, "keys.json") }).Build();

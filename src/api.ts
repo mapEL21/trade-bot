@@ -273,6 +273,7 @@ export const api = {
     }),
   deleteExchangeKeys: (mode: string) =>
     request<void>(`/exchange/keys/${mode}`, { method: 'DELETE' }),
+  exchangeBalance: (mode = 'testnet') => request<ExchangeBalance>(`/exchange/balance/${mode}`),
   exchangeLog: (bot: Bot) => request<ExchangeLogEntry[]>(`/bots/${bot.id}/exchange`),
   stopSignal: (bot: Bot) => request<void>(`/bots/${bot.id}/signal/stop`, { method: 'POST' }),
 };
@@ -294,6 +295,12 @@ export interface SignalRun {
 export interface ExchangeKeys {
   testnet: { mode: string; configured: boolean; keyEnd: string | null; savedUtc: string | null };
   liveAllowed: boolean;
+}
+export interface ExchangeBalance {
+  wallet: number;
+  available: number;
+  unrealized: number;
+  atMs: number;
 }
 export interface ExchangeLogEntry {
   runId: string;

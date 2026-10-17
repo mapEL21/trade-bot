@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { ExchangeBalanceCard } from './ExchangePanel';
 import {
   Activity,
   ArrowLeft,
@@ -400,8 +401,7 @@ export default function App() {
                     <h1>{bot.name}</h1>
                     <p>
                       {marketLabel(bot)} <span className="dot-separator">·</span> USDT Perpetual{' '}
-                      <span className="dot-separator">·</span>{' '}
-                      {bot.exchange}
+                      <span className="dot-separator">·</span> {bot.exchange}
                     </p>
                   </div>
                 </div>
@@ -521,6 +521,7 @@ export default function App() {
                     {period}
                   </div>
                   <Stats stat={stat} budget={budget} balance={balance} unrealized={unrealized} />
+                  <ExchangeBalanceCard />
                   <div className="overview-grid">
                     <Performance trades={trades} pnl={stat.pnl} />
                     <div className="panel workspace-health">

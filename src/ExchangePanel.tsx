@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { KeyRound } from 'lucide-react';
-import { api, type ExchangeKeys, type ExchangeLogEntry } from './api';
+import { KeyRound, RefreshCw } from 'lucide-react';
+import { api, type ExchangeBalance, type ExchangeKeys, type ExchangeLogEntry } from './api';
 import { type Bot } from './model';
 
 const time = (ms: number) =>
@@ -12,6 +12,66 @@ const time = (ms: number) =>
     minute: '2-digit',
     second: '2-digit',
   });
+
+const usdt = (n: number) =>
+  `${n.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT`;
+
+// The test account's balance as the exchange reports it now, asked again by the button. Shown only when keys are saved.
+export function ExchangeBalanceCard({ refresh = 0 }: { refresh?: number }) {
+  const [keys, setKeys] = useState<ExchangeKeys | null>(null);
+  const [balance, setBalance] = useState<ExchangeBalance | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function load() {
+    setBusy(true);
+    try {
+      const k = await api.exchangeKeys();
+      setKeys(k);
+      if (!k.testnet.configured) return;
+      setBalance(await api.exchangeBalance('testnet'));
+      setError('');
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  useEffect(() => {
+    void load();
+  }, [refresh]);
+  if (!keys?.testnet.configured) return null;
+  return (
+    <section className="panel exchange-balance" aria-labelledby="exchange-balance-title">
+      <div className="section-line">
+        <h3 id="exchange-balance-title">Тестовая сеть Binance</h3>
+        <button type="button" className="text-button" disabled={busy} onClick={() => void load()}>
+          <RefreshCw size={14} aria-hidden="true" /> Обновить
+        </button>
+      </div>
+      {balance && (
+        <dl className="exchange-balance-facts">
+          <div>
+            <dt>Баланс</dt>
+            <dd className="mono">{usdt(balance.wallet)}</dd>
+          </div>
+          <div>
+            <dt>Доступно</dt>
+            <dd className="mono">{usdt(balance.available)}</dd>
+          </div>
+          <div>
+            <dt>Открытые позиции</dt>
+            <dd
+              className={`mono ${balance.unrealized < 0 ? 'negative' : balance.unrealized > 0 ? 'positive' : ''}`}
+            >
+              {usdt(balance.unrealized)}
+            </dd>
+          </div>
+        </dl>
+      )}
+      {error && <p role="alert">{error}</p>}
+    </section>
+  );
+}
 
 // API keys of Binance's futures test network. They are entered here by the user, checked by asking the exchange for the
 // balance, kept encrypted on this computer only and never shown again. A real account is not available yet.
@@ -74,10 +134,11 @@ export function ExchangeKeysPanel({ onChanged }: { onChanged?: (keys: ExchangeKe
         {status?.configured ? `ключи сохранены (…${status.keyEnd})` : 'ключей нет'}
       </summary>
       <p className="field-hint">
-        Тестовая сеть — биржа Binance с ненастоящими деньгами: на ней проверяется, как бот
-        отправляет заявки, ставит защитный стоп и сверяется с биржей. Ключи создаются на
-        testnet.binancefuture.com (не на основном сайте). Они хранятся только на этом компьютере в
-        зашифрованном виде и в интерфейс больше не возвращаются. Реальный счёт пока не подключается.
+        Тестовая сеть — демо-торговля Binance с ненастоящими деньгами: на ней проверяется, как бот
+        отправляет заявки, ставит защитный стоп и сверяется с биржей. Ключи создаются в Demo Trading
+        на demo.binance.com (раздел API Management), а не в обычном аккаунте. Они хранятся только на
+        этом компьютере в зашифрованном виде и в интерфейс больше не возвращаются. Реальный счёт
+        пока не подключается.
       </p>
       <form className="scanner-form" onSubmit={save}>
         <label className="field">

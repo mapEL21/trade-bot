@@ -33,7 +33,7 @@ internal sealed class FakeBinance : HttpMessageHandler
         {
             ("GET", "/fapi/v1/time") => $"{{\"serverTime\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}}}",
             ("GET", "/fapi/v1/exchangeInfo") => """{"symbols":[{"symbol":"XUSDT","filters":[{"filterType":"PRICE_FILTER","tickSize":"0.05"},{"filterType":"LOT_SIZE","stepSize":"0.001","minQty":"0.001"},{"filterType":"MARKET_LOT_SIZE","stepSize":"0.001","minQty":"0.001"},{"filterType":"MIN_NOTIONAL","notional":"5"}]}]}""",
-            ("GET", "/fapi/v2/balance") => """[{"asset":"USDT","availableBalance":"5000.5"}]""",
+            ("GET", "/fapi/v2/balance") => """[{"asset":"USDT","balance":"5010.5","availableBalance":"5000.5","crossUnPnl":"1.25"}]""",
             ("POST", "/fapi/v1/marginType") or ("POST", "/fapi/v1/leverage") => "{}",
             ("POST", "/fapi/v1/order") when q["type"] == "STOP_MARKET" => RefuseStop ? null : Orders[q["newClientOrderId"]] = Order(q["newClientOrderId"], "NEW", 0, 0, q["side"], "STOP_MARKET"),
             ("POST", "/fapi/v1/order") => Market(q, Order),

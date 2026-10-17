@@ -13,7 +13,8 @@ public static class ExchangeModes
     public const string Testnet = "testnet", Live = "live";
     public static string BaseUrl(IConfiguration configuration, string mode) => mode == Live
         ? configuration["Exchange:LiveUrl"] ?? "https://fapi.binance.com"
-        : configuration["Exchange:TestnetUrl"] ?? "https://testnet.binancefuture.com";
+        // Binance's futures test network is now its Demo Trading (keys from demo.binance.com), docs of October 2026.
+        : configuration["Exchange:TestnetUrl"] ?? "https://demo-fapi.binance.com";
     public static bool Allowed(IConfiguration configuration, string mode) =>
         mode == Testnet || mode == Live && configuration.GetValue<bool>("Exchange:AllowLive");
 }
@@ -87,6 +88,9 @@ public sealed class ExchangeCredentials(IDataProtectionProvider protection, ICon
 public sealed record SymbolRules(string Symbol, decimal StepSize, decimal MinQty, decimal TickSize, decimal MinNotional);
 // An order as the exchange reports it.
 public sealed record ExchangeOrder(string ClientId, string Status, decimal ExecutedQty, decimal AvgPrice, string Side, string Type);
+// USDT of the futures account: Wallet — the balance with closed trades; Available — what new orders can use;
+// Unrealized — the open positions' result now.
+public sealed record ExchangeBalance(decimal Wallet, decimal Available, decimal Unrealized);
 public sealed record ExchangePosition(string Symbol, decimal Amount, decimal EntryPrice, decimal UnrealizedProfit);
 
 public sealed class ExchangeException(string message, int? code = null) : Exception(message)
@@ -142,11 +146,13 @@ public sealed class BinanceFuturesClient(HttpClient http, string baseUrl, string
     private static decimal Dec(JsonElement e) => e.ValueKind == JsonValueKind.Number ? e.GetDecimal()
         : decimal.Parse(e.GetString()!, NumberStyles.Float, CultureInfo.InvariantCulture);
 
-    public async Task<decimal> BalanceAsync(CancellationToken ct)
+    public async Task<ExchangeBalance> BalanceAsync(CancellationToken ct)
     {
         using var doc = JsonDocument.Parse(await Send(HttpMethod.Get, "/fapi/v2/balance", null, true, ct));
+        decimal Field(JsonElement a, string name) => a.TryGetProperty(name, out var v) ? Dec(v) : 0;
         return doc.RootElement.EnumerateArray().Where(a => a.GetProperty("asset").GetString() == "USDT")
-            .Select(a => Dec(a.GetProperty("availableBalance"))).FirstOrDefault();
+            .Select(a => new ExchangeBalance(Field(a, "balance"), Field(a, "availableBalance"), Field(a, "crossUnPnl")))
+            .FirstOrDefault() ?? new(0, 0, 0);
     }
 
     public async Task<SymbolRules> RulesAsync(string symbol, CancellationToken ct)

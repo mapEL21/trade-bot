@@ -2200,3 +2200,22 @@ td.reason {
   gap: 8px;
   font-weight: 600;
 }
+
+.exchange-balance {
+  margin-top: 16px;
+}
+.exchange-balance-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin: 8px 0 0;
+}
+.exchange-balance-facts dt {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.exchange-balance-facts dd {
+  margin: 2px 0 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+}

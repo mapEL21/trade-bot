@@ -351,6 +351,11 @@ test('testnet keys are entered in a panel and a testnet run shows its orders on 
       },
     });
   });
+  await page.route('**/api/v1/exchange/balance/testnet', (route) =>
+    route.fulfill({
+      json: { wallet: 5010.5, available: 5000.5, unrealized: -1.25, atMs: Date.now() },
+    }),
+  );
   await page.route('**/api/v1/bots/*/exchange', (route) =>
     route.fulfill({
       json: [
@@ -446,6 +451,10 @@ test('testnet keys are entered in a panel and a testnet run shows its orders on 
   await keys.getByRole('button', { name: 'Сохранить и проверить' }).click();
   await expect(keys.getByRole('status')).toContainText('Баланс тестового счёта: 5');
   await expect(keys).toContainText('ключи сохранены (…WXYZ)');
+  // With the keys saved the test account's balance is on the page.
+  const balance = page.getByRole('region', { name: 'Тестовая сеть Binance' });
+  await expect(balance).toContainText('5 010,50 USDT');
+  await expect(balance).toContainText('-1,25 USDT');
   expect(saved).toEqual({ mode: 'testnet', apiKey: 'test-key-WXYZ', apiSecret: 'test-secret' });
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });

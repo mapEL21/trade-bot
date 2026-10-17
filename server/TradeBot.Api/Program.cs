@@ -131,10 +131,25 @@ api.MapPost("/exchange/keys", async (ExchangeKeysInput input, ExchangeCredential
         await client.SyncTimeAsync(ct);
         var balance = await client.BalanceAsync(ct);
         credentials.Save(input.Mode, input.ApiKey, input.ApiSecret);
-        return Results.Ok(new { status = credentials.Status(input.Mode), balance });
+        return Results.Ok(new { status = credentials.Status(input.Mode), balance = balance.Wallet, available = balance.Available });
     }
     catch (ExchangeException e) { return Results.Problem(statusCode: 400, title: $"Ключи не подошли: {e.Message}"); }
     catch (Exception e) when (e is HttpRequestException or TaskCanceledException) { return Results.Problem(statusCode: 503, title: "Биржа не отвечает. Ключи не сохранены."); }
+});
+// The account balance as the exchange reports it now; asked when the page shows it, never stored.
+api.MapGet("/exchange/balance/{mode}", async (string mode, ExchangeCredentials credentials, ExchangeHttp http, IConfiguration configuration, CancellationToken ct) =>
+{
+    if (!ExchangeModes.Allowed(configuration, mode)) return Results.Problem(statusCode: 400, title: "Этот режим не разрешён.");
+    if (credentials.Load(mode) is not { } keys) return Results.Problem(statusCode: 404, title: "Ключей нет.");
+    try
+    {
+        var client = new BinanceFuturesClient(http.Client, ExchangeModes.BaseUrl(configuration, mode), keys.Key, keys.Secret);
+        await client.SyncTimeAsync(ct);
+        var b = await client.BalanceAsync(ct);
+        return Results.Ok(new { wallet = b.Wallet, available = b.Available, unrealized = b.Unrealized, atMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
+    }
+    catch (ExchangeException e) { return Results.Problem(statusCode: 400, title: $"Биржа отказала: {e.Message}"); }
+    catch (Exception e) when (e is HttpRequestException or TaskCanceledException) { return Results.Problem(statusCode: 503, title: "Биржа не отвечает."); }
 });
 api.MapDelete("/exchange/keys/{mode}", (string mode, ExchangeCredentials credentials) =>
     credentials.Delete(mode) ? Results.NoContent() : Results.Problem(statusCode: 404, title: "Ключей нет."));

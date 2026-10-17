@@ -1,7 +1,7 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
 import { Play, Square } from 'lucide-react';
 import { api, tradingSessions, type ExchangeKeys, type SignalRunView } from './api';
-import { ExchangeKeysPanel, ExchangeLog } from './ExchangePanel';
+import { ExchangeBalanceCard, ExchangeKeysPanel, ExchangeLog } from './ExchangePanel';
 import { SelectField } from './components';
 import {
   formatMoney,
@@ -316,6 +316,13 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
       {runs && runs.length === 0 && <p className="muted">Бот ещё не запускался.</p>}
       {current?.run.execution === 'testnet' && (
         <ExchangeLog bot={bot} refresh={bot.trades.length + (runs?.length ?? 0)} />
+      )}
+      {density && (
+        <ExchangeBalanceCard
+          refresh={
+            bot.trades.length * 10 + (runs?.length ?? 0) * 2 + (keys?.testnet.configured ? 1 : 0)
+          }
+        />
       )}
       {density && <ExchangeKeysPanel onChanged={setKeys} />}
     </section>
