@@ -1,41 +1,5 @@
 export type Exchange = 'Binance' | 'Bybit' | 'OKX' | 'Hyperliquid';
-export type Status =
-  'running' | 'paused' | 'draft' | 'stopped' | 'calibrating' | 'stopping' | 'interrupted';
-// Settings of the leader-lag strategy, the same fields as the recording check (ReplaySettings on the server).
-export interface LeaderLagSettings {
-  calibrationSeconds: number;
-  impulseBps: number;
-  windowMs: number;
-  maxAgeMs: number;
-  feeBps: number;
-  slippageBps: number;
-  minEdgeBps: number;
-  stopLossBps: number;
-  maxHoldMs: number;
-  leaderAdvantageBps: number;
-  // How far the leader must move back against the position to exit; the server treats a missing value as impulseBps.
-  reversalBps: number;
-  orderNotional: number;
-  priceLimitBps: number;
-  makerFeeBps: number;
-  makerWaitMs: number;
-  executionModel: 'depth' | 'bbo';
-  entryOrder: 'taker' | 'maker';
-  // A fixed size in coins; null means the size is orderNotional in USDT.
-  orderQuantity: number | null;
-  // source: the signal exchange leads, as set by the user; auto: the recording check picks the leader from the start
-  // of the data. Bots always use source.
-  leader: 'auto' | 'source';
-}
-// The bot trades (virtually) on its own exchange and follows the signal exchange, which the user sets as the leader.
-export interface LeaderLagParameters {
-  signalExchange: Exchange;
-  settings: LeaderLagSettings;
-  delayMs: number;
-  counter: boolean;
-  // Margin is nominal / leverage; the order nominal may be up to balance x leverage.
-  leverage: number;
-}
+export type Status = 'running' | 'draft' | 'stopped';
 export const maxLeverage = 125;
 // A bot that trades one signal of the lab on every coin of the data recording (SignalParameters on the server).
 // riskPct: the share of the deposit lost at the stop, fees included; the size follows from it and the stop distance.
@@ -86,9 +50,8 @@ export interface BotConfig {
   symbol: string;
   budget: number;
   lossLimit: number;
-  strategy: 'impulse' | 'leader-lag' | 'signal';
+  strategy: 'signal';
   strategyVersion: string;
-  parameters?: LeaderLagParameters;
   signal?: SignalParameters;
 }
 export interface Trade {
@@ -100,7 +63,7 @@ export interface Trade {
   entry: number;
   exit: number;
   quantity: number;
-  // Set by the server for trades of a live paper run: simulated, never a real execution.
+  // Set by the server: simulated trades of a bot run, never a real execution.
   runId?: string;
   simulated?: boolean;
   // Common to every strategy, taken from the run that made the trade rather than the bot's current settings.
@@ -114,8 +77,6 @@ export interface Trade {
   // Best and worst price move in the trade's direction while it was open, before fees, b.p.
   maxFavorableBps?: number;
   maxAdverseBps?: number;
-  // Strategy-specific: the exchange that gave the signal in leader-lag.
-  leader?: string;
 }
 export interface Bot extends BotConfig {
   revision?: number;
@@ -123,7 +84,7 @@ export interface Bot extends BotConfig {
   status: Status;
   trades: Trade[];
   createdAt: string;
-  // Result of the open simulated position if closed now, after fees; set by the server while a run holds one.
+  // Result of an open position if closed now, after fees; set by the server while a run holds one.
   unrealized?: number | null;
 }
 export interface Event {
@@ -138,120 +99,11 @@ export interface Workspace {
   bots: Bot[];
   events: Event[];
 }
-export const exchanges: Exchange[] = ['Binance', 'Bybit', 'OKX'];
-// Exchanges the leader-lag research and simulation support; Hyperliquid is one of them, with no fixed role.
-export const paperExchanges: Exchange[] = ['Binance', 'Bybit', 'OKX', 'Hyperliquid'];
 export const statusLabels: Record<Status, string> = {
-  running: 'Симуляция идёт',
-  paused: 'На паузе',
-  draft: 'Черновик',
+  running: 'Работает',
+  draft: 'Не запускался',
   stopped: 'Остановлен',
-  calibrating: 'Калибровка',
-  stopping: 'Останавливается',
-  interrupted: 'Прерван',
 };
-export const defaultLeaderLagSettings: LeaderLagSettings = {
-  calibrationSeconds: 120,
-  impulseBps: 3,
-  windowMs: 250,
-  maxAgeMs: 500,
-  feeBps: 5,
-  slippageBps: 1,
-  minEdgeBps: 2,
-  stopLossBps: 20,
-  maxHoldMs: 2000,
-  leaderAdvantageBps: 0.5,
-  reversalBps: 3,
-  orderNotional: 10,
-  priceLimitBps: 5,
-  makerFeeBps: 2,
-  makerWaitMs: 1000,
-  executionModel: 'depth',
-  entryOrder: 'taker',
-  orderQuantity: null,
-  leader: 'source',
-};
-const settingKeys = Object.keys(defaultLeaderLagSettings) as (keyof LeaderLagSettings)[];
-// Shape and obvious limits only; the server applies the full strategy validation.
-function validateParameters(
-  value: unknown,
-  exchange: Exchange,
-  budget: number,
-): LeaderLagParameters {
-  if (!value || typeof value !== 'object' || Array.isArray(value))
-    throw new Error('Укажите параметры стратегии.');
-  const p = value as Record<string, unknown>;
-  if (
-    Object.keys(p).some(
-      (k) => !['signalExchange', 'settings', 'delayMs', 'counter', 'leverage'].includes(k),
-    )
-  )
-    throw new Error('В параметрах стратегии есть неизвестные поля.');
-  if (!paperExchanges.includes(p.signalExchange as Exchange) || p.signalExchange === exchange)
-    throw new Error('Биржа сигнала должна отличаться от биржи бота.');
-  if (
-    typeof p.delayMs !== 'number' ||
-    !Number.isInteger(p.delayMs) ||
-    p.delayMs < 1 ||
-    p.delayMs > 1000
-  )
-    throw new Error('Задержка заявки — целое число от 1 до 1000 мс.');
-  if (typeof p.counter !== 'boolean') throw new Error('Укажите направление входа.');
-  // Bots saved before leverage existed trade at 1x.
-  const leverage = p.leverage ?? 1;
-  if (
-    typeof leverage !== 'number' ||
-    !Number.isInteger(leverage) ||
-    leverage < 1 ||
-    leverage > maxLeverage
-  )
-    throw new Error(`Плечо — целое число от 1 до ${maxLeverage}.`);
-  const s = p.settings as Record<string, unknown> | null;
-  if (
-    !s ||
-    typeof s !== 'object' ||
-    Array.isArray(s) ||
-    Object.keys(s).some((k) => !settingKeys.includes(k as keyof LeaderLagSettings))
-  )
-    throw new Error('Проверьте настройки стратегии.');
-  const settings = { ...defaultLeaderLagSettings };
-  for (const key of settingKeys) {
-    const v = s[key];
-    if (key === 'executionModel') {
-      if (v !== 'depth' && v !== 'bbo') throw new Error('Модель исполнения: стакан или BBO.');
-      settings.executionModel = v;
-    } else if (key === 'entryOrder') {
-      if (v !== 'taker' && v !== 'maker') throw new Error('Вход: taker или maker.');
-      settings.entryOrder = v;
-    } else if (key === 'leader') {
-      // Saved before the leader was a setting, or picked automatically: a bot always follows its signal exchange.
-      if (v !== undefined && v !== 'auto' && v !== 'source')
-        throw new Error('Поводырь: auto или source.');
-      settings.leader = 'source';
-    } else if (key === 'reversalBps' && (v === null || v === undefined)) {
-      // Saved before the reversal had its own threshold: it was the entry impulse, filled in after the loop.
-      settings.reversalBps = NaN;
-    } else if (key === 'orderQuantity') {
-      if (v !== null && v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v <= 0))
-        throw new Error('Размер заявки в монетах должен быть больше нуля.');
-      settings.orderQuantity = (v as number | null | undefined) ?? null;
-    } else {
-      if (typeof v !== 'number' || !Number.isFinite(v))
-        throw new Error('Все настройки стратегии должны быть числами.');
-      settings[key] = v;
-    }
-  }
-  if (Number.isNaN(settings.reversalBps)) settings.reversalBps = settings.impulseBps;
-  if (settings.orderQuantity === null && settings.orderNotional > budget * leverage)
-    throw new Error('Номинал заявки не может превышать выделенный баланс, умноженный на плечо.');
-  return {
-    signalExchange: p.signalExchange as Exchange,
-    settings,
-    delayMs: p.delayMs,
-    counter: p.counter,
-    leverage,
-  };
-}
 export const formatMoney = (n: number, signed = false) =>
   `${signed && n > 0 ? '+' : ''}${n.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 export const net = (t: Trade) => t.gross - t.fee;
@@ -362,7 +214,6 @@ export function validateConfig(value: unknown): BotConfig {
     'lossLimit',
     'strategy',
     'strategyVersion',
-    'parameters',
     'signal',
   ];
   if (Object.keys(v).some((k) => !allowed.includes(k)))
@@ -371,67 +222,9 @@ export function validateConfig(value: unknown): BotConfig {
     );
   if (typeof v.name !== 'string' || !v.name.trim() || v.name.trim().length > 40)
     throw new Error('Название должно содержать от 1 до 40 символов.');
-  if (v.strategy === 'signal') return validateSignalBot(v);
-  const leaderLag = v.strategy === 'leader-lag';
-  if (!(leaderLag ? paperExchanges : exchanges).includes(v.exchange as Exchange))
-    throw new Error(
-      leaderLag
-        ? 'Выберите Binance, Bybit, OKX или Hyperliquid.'
-        : 'Выберите Binance, Bybit или OKX.',
-    );
-  if (
-    typeof v.symbol !== 'string' ||
-    v.symbol !== v.symbol.trim() ||
-    // The same tickers the common pair list offers (1-20 characters, e.g. W or T), so every listed pair can be saved.
-    !/^[A-Z0-9]{1,20}USDT$/.test(v.symbol)
-  )
-    throw new Error('Укажите символ USDT-фьючерса, например ARBUSDT.');
-  if (
-    typeof v.budget !== 'number' ||
-    !Number.isFinite(v.budget) ||
-    v.budget < 1 ||
-    v.budget > 1000000
-  )
-    throw new Error('Выделенный баланс должен быть от 1 до 1 000 000 USDT.');
-  if (
-    typeof v.lossLimit !== 'number' ||
-    !Number.isFinite(v.lossLimit) ||
-    v.lossLimit <= 0 ||
-    v.lossLimit > v.budget
-  )
-    throw new Error('Лимит убытка должен быть больше нуля и не больше баланса.');
-  if (leaderLag) {
-    if (
-      typeof v.strategyVersion !== 'string' ||
-      !/^\d{1,4}\.\d{1,5}\.\d{1,6}$/.test(v.strategyVersion)
-    )
-      throw new Error('Неизвестная версия стратегии «Поводырь».');
-    return {
-      name: v.name.trim(),
-      exchange: v.exchange as Exchange,
-      symbol: v.symbol,
-      budget: v.budget,
-      lossLimit: v.lossLimit,
-      strategy: 'leader-lag',
-      strategyVersion: v.strategyVersion,
-      parameters: validateParameters(v.parameters, v.exchange as Exchange, v.budget),
-    };
-  }
-  if (
-    v.strategy !== 'impulse' ||
-    v.strategyVersion !== '0.1.0' ||
-    (v.parameters !== undefined && v.parameters !== null)
-  )
-    throw new Error('Эта версия интерфейса поддерживает шаблоны «Импульс» 0.1.0 и «Поводырь».');
-  return {
-    name: v.name.trim(),
-    exchange: v.exchange as Exchange,
-    symbol: v.symbol,
-    budget: v.budget,
-    lossLimit: v.lossLimit,
-    strategy: 'impulse',
-    strategyVersion: '0.1.0',
-  };
+  if (v.strategy !== 'signal')
+    throw new Error('Поддерживается только бот «Сигнал лаборатории»: старые стратегии удалены.');
+  return validateSignalBot(v);
 }
 const inRange = (n: unknown, min: number, max: number) =>
   typeof n === 'number' && Number.isFinite(n) && n >= min && n <= max;
@@ -494,17 +287,7 @@ function validateSignalBot(v: Record<string, unknown>): BotConfig {
   };
 }
 export function exportConfig(bot: Bot): string {
-  const {
-    name,
-    exchange,
-    symbol,
-    budget,
-    lossLimit,
-    strategy,
-    strategyVersion,
-    parameters,
-    signal,
-  } = bot;
+  const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion, signal } = bot;
   return JSON.stringify(
     {
       schemaVersion: 1,
@@ -516,7 +299,6 @@ export function exportConfig(bot: Bot): string {
         lossLimit,
         strategy,
         strategyVersion,
-        ...(parameters ? { parameters } : {}),
         ...(signal ? { signal } : {}),
       },
     },
@@ -553,17 +335,7 @@ export function parseWorkspace(text: string): Workspace {
   const ids = new Set<string>();
   for (const bot of v.bots) {
     if (!bot || typeof bot !== 'object') throw new Error('Invalid bot');
-    const {
-      name,
-      exchange,
-      symbol,
-      budget,
-      lossLimit,
-      strategy,
-      strategyVersion,
-      parameters,
-      signal,
-    } = bot;
+    const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion, signal } = bot;
     const checked = validateConfig({
       name,
       exchange,
@@ -572,12 +344,9 @@ export function parseWorkspace(text: string): Workspace {
       lossLimit,
       strategy,
       strategyVersion,
-      ...(parameters ? { parameters } : {}),
       ...(signal ? { signal } : {}),
     });
     if (checked.signal) bot.signal = checked.signal;
-    // Older records lack later settings (leverage, reversal threshold): use the filled-in values.
-    if (checked.parameters) bot.parameters = checked.parameters;
     if (
       typeof bot.id !== 'string' ||
       (bot.unrealized != null &&
@@ -602,7 +371,7 @@ export function parseWorkspace(text: string): Workspace {
         t.entry <= 0 ||
         t.exit <= 0 ||
         t.quantity <= 0 ||
-        [t.symbol, t.exchange, t.leader, t.exitReason].some(
+        [t.symbol, t.exchange, t.exitReason].some(
           (s) => s != null && typeof s !== 'string',
         ) ||
         (t.openedAt != null && !Number.isFinite(Date.parse(t.openedAt))) ||

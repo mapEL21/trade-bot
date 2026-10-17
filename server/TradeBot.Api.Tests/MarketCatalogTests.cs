@@ -41,24 +41,11 @@ public class MarketCatalogTests
         Assert.Empty(MarketCatalog.CommonMarkets(target, Metadata(target), Metadata(source).Replace("ARB", "OTHER"), source));
         Assert.Equal(options.Feeds.Length, options.Feeds.Select(f => f.Name).Distinct().Count());
         Assert.All(options.Feeds, feed => Assert.Contains(feed.Name.Split('-')[0], new[] { source, target }));
-        using var session = new ResearchSession("pair", options);
-        session.Started("unused");
         foreach (var exchange in new[] { source, target })
         {
             var id = RecorderOptions.QuoteFeedId(exchange);
-            var raw = QuotePayload(exchange);
-            // Give the source a higher mid to verify the direction of the comparison.
-            if (exchange == source) raw = raw.Replace("1.00", "1.10").Replace("1.02", "1.12");
-            Assert.Equal("market", MarketWire.Classify(id, raw, "ARB", options.SymbolForFeed(id)));
-            var item = new CaptureEvent(id, "c1", "connected", DateTimeOffset.UtcNow, Stopwatch.GetTimestamp(), "");
-            session.Recorded(item, 1, 1);
-            session.Recorded(item with { Kind = "market", Payload = raw }, 2, 2);
+            Assert.Equal("market", MarketWire.Classify(id, QuotePayload(exchange), "ARB", options.SymbolForFeed(id)));
         }
-        var snapshot = session.Snapshot();
-        Assert.Equal(source, snapshot.SourceExchange);
-        Assert.Equal(target, snapshot.Exchange);
-        Assert.Equal(MarketCatalog.Symbol(source, "ARB"), snapshot.SourceSymbol);
-        Assert.True(snapshot.RawDifferencePercent > 0);
         if (source == "okx" || target == "okx")
         {
             var message = MarketWire.SubscriptionMessages(options.Feeds.First(f => f.Name == "okx-public"), options).Single();
@@ -89,31 +76,6 @@ public class MarketCatalogTests
         Assert.Empty(MarketCatalog.CommonMarkets(exchange, metadata.Replace("ARBUSDT", "1000ARBUSDT").Replace("ARB-USDT-SWAP", "1000ARB-USDT-SWAP"), Hl));
     }
 
-    [Theory]
-    [InlineData("bybit", BybitQuote)]
-    [InlineData("okx", OkxQuote)]
-    public void QuotesAreParsedAndWrongSymbolsOrDepthCannotBecomeBbo(string exchange, string raw)
-    {
-        var symbol = MarketCatalog.Symbol(exchange, "ARB");
-        var options = RecorderOptions.Parse(["--exchange", exchange, "--coin", "ARB", "--symbol", symbol]);
-        Assert.Equal(exchange + "-public", options.Feeds[1].Name);
-        Assert.Equal("market", MarketWire.Classify(exchange + "-public", raw, "ARB", symbol));
-        Assert.Throws<InvalidDataException>(() => MarketWire.Classify(exchange + "-public", raw.Replace("ARB", "SOL"), "ARB", symbol));
-        var item = new CaptureEvent(exchange + "-public", "c1", "market", DateTimeOffset.UtcNow, Stopwatch.GetTimestamp(), raw);
-        Assert.True(MarketQuote.TryRead(item, out var quote));
-        Assert.Equal(1.01m, quote!.Mid);
-        Assert.Equal(10m, quote.BidSize);
-        Assert.False(MarketQuote.TryRead(item with { Payload = raw.Replace("orderbook.1.", "orderbook.50.").Replace("bbo-tbt", "books5") }, out _));
-        Assert.True(MarketQuote.TryRead(item with { Payload = raw.Replace("\"1.00\"", "\"2.00\"") }, out var crossed));
-        Assert.Null(crossed);
-        using var session = new ResearchSession("test", options);
-        session.Started("unused");
-        session.Recorded(item with { Kind = "connected", Payload = "" }, 1, 1);
-        session.Recorded(item, 2, 2);
-        Assert.Equal(exchange, session.Snapshot().Exchange);
-        Assert.Equal("1.00", session.Snapshot().Feeds[1].Quote!.Bid);
-    }
-
     [Fact]
     public void ControlMessagesAndUnknownExchangeAreHandledExplicitly()
     {
@@ -122,25 +84,6 @@ public class MarketCatalogTests
         Assert.Equal("control", MarketWire.Classify("okx-public", "pong", "ARB", "ARB-USDT-SWAP"));
         Assert.Throws<InvalidDataException>(() => MarketWire.Classify("okx-public", """{"event":"error"}""", "ARB", "ARB-USDT-SWAP"));
         Assert.Throws<ArgumentException>(() => MarketCatalog.Symbol("https://localhost", "ARB"));
-    }
-
-    [Fact]
-    public async Task ConcurrentRequestsReuseCatalogAndFailedRefreshCanBeRetried()
-    {
-        var fail = true;
-        var requests = 0;
-        using var service = new ResearchMarkets(new HttpClient(new Handler(request =>
-        {
-            Interlocked.Increment(ref requests);
-            if (fail) return new(HttpStatusCode.ServiceUnavailable);
-            return new(HttpStatusCode.OK) { Content = new StringContent(request.Method == HttpMethod.Post ? Hl : Binance) };
-        })));
-        await Assert.ThrowsAsync<HttpRequestException>(() => service.GetAsync("binance", CancellationToken.None));
-        fail = false;
-        var before = requests;
-        var results = await Task.WhenAll(Enumerable.Range(0, 3).Select(_ => service.GetAsync("binance", CancellationToken.None)));
-        Assert.Equal(2, requests - before);
-        Assert.All(results, result => Assert.Single(result.Instruments));
     }
 
     [Fact]

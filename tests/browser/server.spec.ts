@@ -1,16 +1,17 @@
 import { expect, test } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { exportConfig } from '../../src/model';
+import { defaultSignalParameters, exportConfig } from '../../src/model';
 
-const impulseBot = {
+const signalBot = {
   id: 'local',
-  name: 'Импульс · ARB',
+  name: 'Вынос цены · 5 мин',
   exchange: 'Binance' as const,
-  symbol: 'ARBUSDT',
+  symbol: '*',
   budget: 10,
   lossLimit: 1,
-  strategy: 'impulse' as const,
+  strategy: 'signal' as const,
   strategyVersion: '0.1.0',
+  signal: defaultSignalParameters,
   status: 'draft' as const,
   trades: [],
   createdAt: '2026-10-01T00:00:00Z',
@@ -31,9 +32,8 @@ test('catalog creates a server instance that survives a new browser, edits, expo
     ).toEqual([]);
     await page.getByRole('button', { name: 'Создать бота' }).first().click();
     const dialog = page.getByRole('dialog');
-    await expect(dialog.getByRole('radio', { name: /Сигнал лаборатории/ })).toBeChecked();
-    // Strategies that do not work are no longer offered for new bots.
-    await expect(dialog.getByRole('radio', { name: /Импульс|Поводырь/ })).toHaveCount(0);
+    // Only the signal bot is left: no choice of strategy.
+    await expect(dialog.getByRole('radio')).toHaveCount(0);
     await expect(dialog.getByText(/Пример: монета с обычной минутной свечой 0,3%/)).toBeVisible();
     await page.getByLabel('Название бота').fill(name);
     const responsePromise = page.waitForResponse(
@@ -120,7 +120,7 @@ test('server failure is explicit and does not claim success', async ({ page }) =
   await page.getByRole('button', { name: 'Импорт бота', exact: true }).click();
   await page
     .getByLabel('Или вставьте содержимое JSON')
-    .fill(exportConfig({ ...impulseBot, name: 'Не должен сохраниться' }));
+    .fill(exportConfig({ ...signalBot, name: 'Не должен сохраниться' }));
   await page.getByRole('button', { name: 'Импортировать', exact: true }).click();
   await expect(page.getByRole('dialog').getByRole('alert')).toContainText(
     'База временно недоступна',

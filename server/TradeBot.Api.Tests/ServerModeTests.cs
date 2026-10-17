@@ -29,7 +29,7 @@ public sealed class ServerModeTests : IDisposable
                 var db = Path.Combine(root, "workspace.db");
                 services.RemoveAll<IWorkspaceStore>(); services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(db));
                 services.RemoveAll<PaperRunStore>(); services.AddSingleton(_ => new PaperRunStore(db));
-                services.RemoveAll<BotTemplateStore>(); services.AddSingleton(_ => new BotTemplateStore(db));
+
                 if (runner is not null) { services.RemoveAll<IScanRunner>(); services.AddSingleton(runner); }
             }));
 

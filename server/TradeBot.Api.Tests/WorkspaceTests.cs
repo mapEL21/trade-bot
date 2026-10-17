@@ -13,7 +13,7 @@ public sealed class WorkspaceTests : IDisposable
 {
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "trade-bot-tests-" + Guid.NewGuid());
     private string Database => Path.Combine(_directory, "workspace.db");
-    private static BotConfig Valid => new("Мой бот", "Binance", "ARBUSDT", 10m, 1m, "impulse", "0.1.0");
+    private static BotConfig Valid => new("Мой бот", "Binance", "*", 10m, 1m, StrategyCatalog.SignalId, StrategyCatalog.SignalVersion, new SignalParameters());
 
     private WebApplicationFactory<Program> Factory() => new WebApplicationFactory<Program>()
         .WithWebHostBuilder(builder => builder.ConfigureServices(services =>
@@ -23,8 +23,6 @@ public sealed class WorkspaceTests : IDisposable
             // Never let a test open the real workspace database.
             services.RemoveAll<PaperRunStore>();
             services.AddSingleton(_ => new PaperRunStore(Database));
-            services.RemoveAll<BotTemplateStore>();
-            services.AddSingleton(_ => new BotTemplateStore(Database));
         }));
 
     private static HttpClient Client(WebApplicationFactory<Program> factory)
@@ -35,30 +33,6 @@ public sealed class WorkspaceTests : IDisposable
     }
 
     [Fact]
-    public async Task TemplatesAreSavedByNameValidatedAndDeleted()
-    {
-        using var factory = Factory();
-        using var client = Client(factory);
-        var settings = new ReplaySettings(OrderNotional: 200, Leader: "source", ReversalBps: 4);
-        var input = new BotTemplateInput("Сбор статистики", "leader-lag", 100, 10, 2, 50, false, settings);
-        var saved = (await (await client.PostAsJsonAsync("/api/v1/templates", input)).Content.ReadFromJsonAsync<BotTemplate>())!;
-        Assert.Equal((200m, 2, 4m), (saved.Settings.OrderNotional, saved.Leverage, saved.Settings.ReversalBps!.Value));
-        // The same name replaces the template instead of adding a second one.
-        var replaced = (await (await client.PostAsJsonAsync("/api/v1/templates", input with { Name = " Сбор статистики ", Leverage = 4 }))
-            .Content.ReadFromJsonAsync<BotTemplate>())!;
-        Assert.Equal((saved.Id, 4), (replaced.Id, replaced.Leverage));
-        // 200 USDT at 1x does not fit a 100 USDT balance; a template with no name is refused too.
-        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/templates", input with { Name = "Другой", Leverage = 1 })).StatusCode);
-        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/templates", input with { Name = " " })).StatusCode);
-        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/templates", input with { Strategy = "impulse" })).StatusCode);
-        var list = (await client.GetFromJsonAsync<BotTemplate[]>("/api/v1/templates"))!;
-        Assert.Equal(saved.Id, Assert.Single(list).Id);
-        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/v1/templates/{saved.Id}")).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await client.DeleteAsync($"/api/v1/templates/{saved.Id}")).StatusCode);
-        Assert.Empty((await client.GetFromJsonAsync<BotTemplate[]>("/api/v1/templates"))!);
-    }
-
-    [Fact]
     public async Task Create_PersistsAcrossServerRestart_WithEmptyTradesAndRegisteredStrategy()
     {
         string id;
@@ -66,9 +40,7 @@ public sealed class WorkspaceTests : IDisposable
         using (var client = Client(factory))
         {
             var strategies = await client.GetFromJsonAsync<StrategyDefinition[]>("/api/v1/strategies");
-            Assert.False(strategies!.Single(x => x.Id == "impulse").CanRun);
-            var leaderLag = strategies!.Single(x => x.Id == "leader-lag");
-            Assert.Equal(("paper", true, StrategyReplay.Version), (leaderLag.ImplementationStatus, leaderLag.CanRun, leaderLag.Version));
+            Assert.Equal(StrategyCatalog.SignalId, Assert.Single(strategies!).Id);
             var response = await client.PostAsJsonAsync("/api/v1/bots", Valid);
             Assert.Equal(HttpStatusCode.Created, response.StatusCode);
             var bot = (await response.Content.ReadFromJsonAsync<Bot>())!;
@@ -109,7 +81,7 @@ public sealed class WorkspaceTests : IDisposable
     }
 
     [Theory]
-    [InlineData("{\"name\":\"x\",\"exchange\":\"Binance\",\"symbol\":\"ARBUSDT\",\"budget\":10,\"lossLimit\":1,\"strategy\":\"impulse\",\"strategyVersion\":\"0.1.0\",\"apiKey\":\"secret\"}")]
+    [InlineData("{\"name\":\"x\",\"exchange\":\"Binance\",\"symbol\":\"*\",\"budget\":10,\"lossLimit\":1,\"strategy\":\"signal\",\"strategyVersion\":\"0.1.0\",\"signal\":{},\"apiKey\":\"secret\"}")]
     [InlineData("{broken")]
     [InlineData("{\"name\":null}")]
     public async Task Create_RejectsInvalidJsonAndUnrecognizedFields(string json)
@@ -122,12 +94,13 @@ public sealed class WorkspaceTests : IDisposable
     }
 
     [Theory]
-    [InlineData("other", "0.1.0", "Binance", "ARBUSDT", 10, 1)]
-    [InlineData("impulse", "9.0.0", "Binance", "ARBUSDT", 10, 1)]
-    [InlineData("impulse", "0.1.0", "Unknown", "ARBUSDT", 10, 1)]
-    [InlineData("impulse", "0.1.0", "Binance", "ARBUSDT\n", 10, 1)]
-    [InlineData("impulse", "0.1.0", "Binance", "ARBUSDT", 0, 1)]
-    [InlineData("impulse", "0.1.0", "Binance", "ARBUSDT", 10, 11)]
+    [InlineData("leader-lag", "0.3.2", "Binance", "*", 10, 1)]
+    [InlineData("impulse", "0.1.0", "Binance", "*", 10, 1)]
+    [InlineData("signal", "9.0.0", "Binance", "*", 10, 1)]
+    [InlineData("signal", "0.1.0", "Bybit", "*", 10, 1)]
+    [InlineData("signal", "0.1.0", "Binance", "ARBUSDT", 10, 1)]
+    [InlineData("signal", "0.1.0", "Binance", "*", 0, 1)]
+    [InlineData("signal", "0.1.0", "Binance", "*", 10, 11)]
     public async Task Create_ValidatesStrategyMarketAndRiskOnServer(string strategy, string version, string exchange, string symbol, int budget, int loss)
     {
         using var factory = Factory();
@@ -137,16 +110,32 @@ public sealed class WorkspaceTests : IDisposable
     }
 
     [Fact]
-    public async Task Start_IsRejectedForPlannedAlgorithm_AndNoStatusOrTradesAreFabricated()
+    public async Task BotsOfRemovedStrategiesStayInTheDatabaseButAreNotShown()
+    {
+        // A leader-lag bot saved by an older version of the application.
+        using (var store = new SqliteWorkspaceStore(Database))
+            await store.CreateAsync(new BotConfig("Старый поводырь", "Binance", "ARBUSDT", 100, 10, "leader-lag", "0.3.2"), CancellationToken.None);
+        using var factory = Factory();
+        using var client = Client(factory);
+        await client.PostAsJsonAsync("/api/v1/bots", Valid);
+        var workspace = (await client.GetFromJsonAsync<Workspace>("/api/v1/workspace"))!;
+        Assert.Equal("Мой бот", Assert.Single(workspace.Bots).Name);
+    }
+
+    [Fact]
+    public async Task ARunningBotCannotBeChangedOrDeleted()
     {
         using var factory = Factory();
         using var client = Client(factory);
-        var created = await client.PostAsJsonAsync("/api/v1/bots", Valid);
-        var bot = (await created.Content.ReadFromJsonAsync<Bot>())!;
-        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsync($"/api/v1/bots/{bot.Id}/start", null)).StatusCode);
-        var stored = (await client.GetFromJsonAsync<Workspace>("/api/v1/workspace"))!.Bots.Single();
-        Assert.Equal("draft", stored.Status);
-        Assert.Empty(stored.Trades);
+        var bot = (await (await client.PostAsJsonAsync("/api/v1/bots", Valid)).Content.ReadFromJsonAsync<Bot>())!;
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsJsonAsync($"/api/v1/bots/{bot.Id}/signal/start", new SignalStart())).StatusCode);
+        client.DefaultRequestHeaders.Add("If-Match", "\"1\"");
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync($"/api/v1/bots/{bot.Id}", Valid with { Name = "Другое" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.DeleteAsync($"/api/v1/bots/{bot.Id}")).StatusCode);
+        // The removed paper simulation endpoints are gone.
+        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsync($"/api/v1/bots/{bot.Id}/start", null)).StatusCode);
+        await client.PostAsync($"/api/v1/bots/{bot.Id}/signal/stop", null);
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/v1/bots/{bot.Id}")).StatusCode);
     }
 
     [Fact]

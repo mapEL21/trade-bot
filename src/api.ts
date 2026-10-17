@@ -2,28 +2,10 @@ import {
   parseWorkspace,
   type Bot,
   type BotConfig,
-  type LeaderLagSettings,
   type SignalParameters,
   type Trade,
   type Workspace,
 } from './model';
-
-// Bot settings saved for reuse, without the bot's name, exchanges or pair. Built-in templates live in the UI
-// (strategySettings.ts) and have builtIn set; the user's own are kept on the server.
-export interface BotTemplate {
-  id: string;
-  name: string;
-  strategy: 'leader-lag';
-  budget: number;
-  lossLimit: number;
-  leverage: number;
-  delayMs: number;
-  counter: boolean;
-  settings: LeaderLagSettings;
-  savedAt?: string;
-  builtIn?: boolean;
-  description?: string;
-}
 
 export interface StrategyDefinition {
   id: string;
@@ -34,31 +16,6 @@ export interface StrategyDefinition {
   canCreate: boolean;
   canRun: boolean;
   exchanges: string[];
-  // Kept for existing bots, no longer offered for new ones.
-  retired?: boolean;
-}
-
-export interface ResearchMarketList {
-  exchange: string;
-  sourceExchange?: string;
-  updatedUtc: string;
-  instruments: { coin: string; symbol: string }[];
-}
-
-// Order size rules of a perpetual in coins, with the last price for converting sizes (not a trading quote).
-export interface InstrumentInfo {
-  exchange: string;
-  coin: string;
-  quantityStep: number;
-  minimumQuantity: number;
-  minimumNotional: number;
-  maximumQuantity: number | null;
-  lastPrice: number | null;
-  minimumOrderNotional: number | null;
-  quoteCurrency: string;
-  ruleSource: string;
-  // Top leverage the exchange publishes for the instrument; Binance only to signed requests.
-  maxLeverage?: number | null;
 }
 
 export class ApiError extends Error {
@@ -248,22 +205,6 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ continuous }),
     }),
-  researchMarkets: (exchange: string, sourceExchange: string, signal: AbortSignal) =>
-    request<ResearchMarketList>(
-      `/research/markets?exchange=${encodeURIComponent(exchange)}&sourceExchange=${encodeURIComponent(sourceExchange)}`,
-      {
-        signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]),
-      },
-    ),
-  instrument: (exchange: string, coin: string, signal: AbortSignal) =>
-    request<InstrumentInfo>(
-      `/research/instrument?exchange=${encodeURIComponent(exchange)}&coin=${encodeURIComponent(coin)}`,
-      { signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]) },
-    ),
-  templates: (signal?: AbortSignal) => request<BotTemplate[]>('/templates', { signal }),
-  saveTemplate: (template: Omit<BotTemplate, 'id' | 'savedAt' | 'builtIn' | 'description'>) =>
-    request<BotTemplate>('/templates', { method: 'POST', body: JSON.stringify(template) }),
-  deleteTemplate: (id: string) => request<void>(`/templates/${id}`, { method: 'DELETE' }),
   workspace: async (): Promise<Workspace> =>
     parseWorkspace(JSON.stringify(await request('/workspace'))),
   strategies: () => request<StrategyDefinition[]>('/strategies'),
@@ -280,23 +221,6 @@ export const api = {
       method: 'DELETE',
       headers: { 'If-Match': `"${bot.revision}"` },
     }),
-  // Live paper simulation of a leader-lag bot: nothing is sent to an exchange.
-  startPaper: (bot: Bot, seconds: number) =>
-    request<{ id: string }>(`/bots/${bot.id}/start`, {
-      method: 'POST',
-      body: JSON.stringify({ seconds }),
-    }),
-  pausePaper: (bot: Bot, paused: boolean) =>
-    request<void>(`/bots/${bot.id}/${paused ? 'pause' : 'resume'}`, { method: 'POST' }),
-  // wait: close by the strategy rules, then stop; close: exit now through the book, then stop; force: stop at once,
-  // leaving anything open unresolved.
-  stopPaper: (bot: Bot, mode: 'wait' | 'close' | 'force') =>
-    request<void>(`/bots/${bot.id}/stop?mode=${mode}`, { method: 'POST' }),
-  // The bot's latest session, also after it ended; several bots can run their simulations at once.
-  paper: (bot: Bot, signal?: AbortSignal) =>
-    request<PaperSnapshot>(`/bots/${bot.id}/paper`, { signal }),
-  paperRuns: (bot: Bot, signal?: AbortSignal) =>
-    request<PaperRunRecord[]>(`/bots/${bot.id}/runs`, { signal }),
   signalRuns: (bot: Bot, signal?: AbortSignal) =>
     request<SignalRunView[]>(`/bots/${bot.id}/signal`, { signal }),
   // fromMs: also replay the recordings since that moment; without it the bot trades from now on.
@@ -332,89 +256,4 @@ export interface SignalRunView {
     lastDataMs: number | null;
     entriesBlocked: string | null;
   };
-}
-
-export interface PaperDecision {
-  seconds: number;
-  action: string;
-  reason: string;
-  side: string | null;
-  price: number | null;
-  netBps: number | null;
-  quantity?: number | null;
-}
-export interface PaperTrade {
-  entrySeconds: number;
-  exitSeconds: number;
-  side: string;
-  entryPrice: number;
-  exitPrice: number;
-  netBps: number;
-  exitReason: string;
-  quantity?: number | null;
-  netQuote?: number | null;
-  feesQuote?: number | null;
-}
-export interface PaperSnapshot {
-  id: string | null;
-  state: string;
-  explanation: string;
-  coin: string | null;
-  sourceExchange: string | null;
-  exchange: string | null;
-  settings: { calibrationSeconds: number; executionModel: string; entryOrder?: string } | null;
-  delayMs: number;
-  counter: boolean;
-  sessionSeconds: number;
-  leader: string | null;
-  executionExchange: string | null;
-  normalBasisBps: number | null;
-  decisions: PaperDecision[];
-  trades: PaperTrade[];
-  decided: number;
-  sumNetBps: number;
-  closedNetQuote: number | null;
-  lateEvents: number;
-  result: { unresolvedPositions: number; trades: number } | null;
-  version: string;
-  executionEnabled: boolean;
-  botId: string | null;
-  paused: boolean;
-  stopping: boolean;
-  entriesBlocked: string | null;
-  positionOpen: boolean;
-  position: OpenPosition | null;
-  closing: boolean;
-}
-// The open simulated position and what closing it now would give after both fees.
-export interface OpenPosition {
-  side: string;
-  sinceSeconds: number;
-  entryPrice: number;
-  quantity: number;
-  markPrice: number;
-  markNetBps: number;
-  markNetQuote: number | null;
-}
-export interface PaperRunRecord {
-  id: string;
-  version: string;
-  startedUtc: string;
-  endedUtc: string | null;
-  state: string;
-  explanation: string;
-  coin: string;
-  signalExchange: string;
-  exchange: string;
-  delayMs: number;
-  counter: boolean;
-  leader: string | null;
-  executionExchange: string | null;
-  trades: number;
-  sumNetBps: number;
-  closedNetQuote: number | null;
-  unresolved: number;
-  lateEvents: number;
-  tradeLog: PaperTrade[];
-  journal: PaperDecision[];
 }

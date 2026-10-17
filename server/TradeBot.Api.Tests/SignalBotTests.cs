@@ -189,7 +189,7 @@ public sealed class SignalBotTests : IDisposable
                 // Never let a test open the real workspace database.
                 services.RemoveAll<IWorkspaceStore>(); services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(db));
                 services.RemoveAll<PaperRunStore>(); services.AddSingleton(_ => new PaperRunStore(db));
-                services.RemoveAll<BotTemplateStore>(); services.AddSingleton(_ => new BotTemplateStore(db));
+
             });
         });
         using var client = factory.CreateClient();
@@ -204,9 +204,9 @@ public sealed class SignalBotTests : IDisposable
             Assert.Equal(HttpStatusCode.Created, created.StatusCode);
             var bot = (await created.Content.ReadFromJsonAsync<Bot>(json))!;
             Assert.Equal(60, bot.Signal!.HoldSeconds);
-            // Retired strategies stay valid for old bots but are marked so the interface does not offer them.
+            // Only the signal bot is left in the catalog.
             var strategies = (await client.GetFromJsonAsync<StrategyDefinition[]>("/api/v1/strategies", json))!;
-            Assert.Equal(["impulse", "leader-lag"], strategies.Where(s => s.Retired).Select(s => s.Id));
+            Assert.Equal(StrategyCatalog.SignalId, Assert.Single(strategies).Id);
 
             var start = await client.PostAsJsonAsync($"/api/v1/bots/{bot.Id}/signal/start", new SignalStart(T0 - 1000));
             Assert.Equal(HttpStatusCode.Accepted, start.StatusCode);

@@ -1,20 +1,19 @@
 import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { defaultLeaderLagSettings, exportConfig, type Bot, type Trade } from '../../src/model';
+import { defaultSignalParameters, exportConfig, type Bot, type Trade } from '../../src/model';
 
 const hour = 3600000;
 // Closed simulated trades as the server returns them inside a bot: two within 24 hours, five within 7 days.
-// They were made on another instrument than the bot's current one: history keeps its own instrument.
+// Each keeps the coin it was made on: a signal bot trades every coin of the recording.
 const trades: Trade[] = [1, 5, 30, 60, 100].map((hours, i) => ({
   id: `run-1-${i}`,
   at: new Date(Date.now() - hours * hour).toISOString(),
   openedAt: new Date(Date.now() - hours * hour - 274).toISOString(),
   holdSeconds: 0.274,
   symbol: 'STRKUSDT',
-  exchange: 'OKX',
-  leader: 'Binance',
+  exchange: 'Binance',
   notional: 10.2,
-  exitReason: i === 4 ? 'Повтор выхода: Ограничение убытка' : 'Поводырь развернулся',
+  exitReason: i === 4 ? 'стоп' : 'время',
   maxFavorableBps: 130,
   maxAdverseBps: -5,
   side: i % 2 ? 'short' : 'long',
@@ -28,24 +27,14 @@ const trades: Trade[] = [1, 5, 30, 60, 100].map((hours, i) => ({
 }));
 const catalog = [
   {
-    id: 'impulse',
+    id: 'signal',
     version: '0.1.0',
-    name: 'Импульс',
-    description: 'Шаблон.',
-    implementationStatus: 'planned',
-    canCreate: true,
-    canRun: false,
-    exchanges: ['Binance', 'Bybit', 'OKX'],
-  },
-  {
-    id: 'leader-lag',
-    version: '0.3.2',
-    name: 'Поводырь → отстающая биржа',
-    description: 'Живая симуляция.',
+    name: 'Сигнал лаборатории',
+    description: 'Торгует сигнал лаборатории.',
     implementationStatus: 'paper',
     canCreate: true,
     canRun: true,
-    exchanges: ['Binance', 'Bybit', 'OKX', 'Hyperliquid'],
+    exchanges: ['Binance'],
   },
 ];
 
@@ -54,19 +43,14 @@ async function server(page: Page) {
   const bots: (Bot & { revision: number })[] = [
     {
       id: '11111111-1111-1111-1111-111111111111',
-      name: 'Поводырь · MAGIC',
-      exchange: 'OKX',
-      symbol: 'MAGICUSDT',
+      name: 'Вынос цены · 5 мин',
+      exchange: 'Binance',
+      symbol: '*',
       budget: 20,
       lossLimit: 2,
-      strategy: 'leader-lag',
-      strategyVersion: '0.3.2',
-      parameters: {
-        signalExchange: 'Binance',
-        settings: defaultLeaderLagSettings,
-        delayMs: 50,
-        counter: false,
-      },
+      strategy: 'signal',
+      strategyVersion: '0.1.0',
+      signal: defaultSignalParameters,
       createdAt: '2026-10-01T10:00:00Z',
       revision: 1,
       status: 'stopped',
@@ -96,7 +80,7 @@ async function server(page: Page) {
       trades: [],
     };
     bots.push(bot);
-    log(bot, 'Создан экземпляр стратегии.');
+    log(bot, 'Бот создан.');
     return route.fulfill({ status: 201, json: bot });
   });
   await page.route('**/api/v1/bots/*', (route) => {
@@ -111,13 +95,10 @@ async function server(page: Page) {
       ...route.request().postDataJSON(),
       revision: bots[index].revision + 1,
     };
-    log(bots[index], 'Настройки экземпляра обновлены.');
+    log(bots[index], 'Настройки бота обновлены.');
     return route.fulfill({ json: bots[index] });
   });
-  await page.route('**/api/v1/bots/*/runs', (route) => route.fulfill({ json: [] }));
-  await page.route('**/api/v1/bots/*/paper', (route) =>
-    route.fulfill({ json: { id: null, state: 'idle', botId: null } }),
-  );
+  await page.route('**/api/v1/bots/*/signal', (route) => route.fulfill({ json: [] }));
   return bots;
 }
 
@@ -146,16 +127,16 @@ test('overview, trade periods and bot navigation work without console errors', a
   ).toBeVisible();
   await page.locator('.performance').getByRole('button', { name: 'Линия', exact: true }).click();
   await page.getByRole('button', { name: 'Статистика' }).click();
-  await expect(page.getByRole('heading', { name: 'Поводырь · MAGIC' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Вынос цены · 5 мин' })).toBeVisible();
   // The common trade quality block groups exit reasons; a retried exit counts under its original reason.
   const quality = page.locator('.quality-panel');
   await expect(quality.getByRole('heading', { name: 'Качество сделок' })).toBeVisible();
   await expect(quality.locator('tbody tr')).toHaveCount(2);
-  await expect(quality.locator('tbody tr').first()).toContainText('Поводырь развернулся');
-  await expect(quality.locator('tbody tr').nth(1)).toContainText('Ограничение убытка');
+  await expect(quality.locator('tbody tr').first()).toContainText('время');
+  await expect(quality.locator('tbody tr').nth(1)).toContainText('стоп');
   await expect(quality).toContainText('выводы предварительные');
-  // A bot saved before leverage existed shows 1x.
-  await expect(page.locator('.bot-facts')).toContainText('1x · маржа 10,00 USDT');
+  await expect(page.locator('.bot-facts')).toContainText('Вынос цены · по движению');
+  await expect(page.locator('.bot-facts')).toContainText('1,5% депозита с комиссиями');
   await page.screenshot({ path: 'artifacts/bot-overview-desktop.png', fullPage: true });
   await page.locator('.detail-tabs').getByRole('button', { name: 'Сделки', exact: true }).click();
   await expect(page.locator('.trades-panel tbody tr')).toHaveCount(5);
@@ -163,17 +144,18 @@ test('overview, trade periods and bot navigation work without console errors', a
   await expect(page.locator('.trades-panel tbody tr')).toHaveCount(2);
   await expect(page.locator('.trades-panel')).toContainText('SIM');
   const row = page.locator('.trades-panel tbody tr').first();
-  for (const text of ['STRKUSDT', 'OKX', 'Binance', '0,27 с', '10,20', 'Поводырь развернулся'])
+  for (const text of ['STRKUSDT', 'Binance', '0,27 с', '10,20', 'время'])
     await expect(row).toContainText(text);
-  await expect(row).not.toContainText('MAGIC');
   // Small moves on cheap coins stay visible: 0.4 → 0.405 is +1.25%.
   await expect(row).toContainText('+1,25%');
   await page.getByRole('button', { name: 'Настройки', exact: true }).click();
-  await page.getByLabel('Название бота').fill('Мой поводырь');
+  await page.getByLabel('Название бота').fill('Мой бот');
   await page.getByRole('button', { name: 'Сохранить изменения' }).click();
-  await expect(page.getByRole('heading', { name: 'Мой поводырь' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Мой бот' })).toBeVisible();
   await page.locator('.detail-tabs').getByRole('button', { name: 'Журнал', exact: true }).click();
-  await expect(page.getByText('Настройки экземпляра обновлены.')).toBeVisible();
+  await expect(page.getByText('Настройки бота обновлены.')).toBeVisible();
+  // The workspace-wide journal page is gone from the menu.
+  await expect(page.getByRole('navigation').getByRole('button', { name: /Журнал/ })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
@@ -216,20 +198,16 @@ test('create, export, import and delete a bot on the server', async ({ page }) =
   const bots = await server(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'Создать бота', exact: true }).first().click();
-  await page
-    .getByRole('dialog')
-    .getByRole('radio', { name: /Импульс/ })
-    .check();
   await page.getByLabel('Название бота').fill('Тестовый бот');
   await page.getByRole('dialog').getByRole('button', { name: 'Создать бота', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Тестовый бот' })).toBeVisible();
-  await expect(page.getByText('Черновик', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Не запускался', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('Здесь появится кривая результата')).toBeVisible();
-  expect(bots.some((b) => b.name === 'Тестовый бот' && b.strategy === 'impulse')).toBe(true);
+  expect(bots.some((b) => b.name === 'Тестовый бот' && b.strategy === 'signal')).toBe(true);
   await page.getByRole('button', { name: 'Настройки', exact: true }).click();
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Экспорт', exact: true }).click();
-  expect((await downloadPromise).suggestedFilename()).toBe('arbusdt-bot.json');
+  expect((await downloadPromise).suggestedFilename()).toBe('signal-bot.json');
   await page.getByRole('button', { name: 'Все боты', exact: true }).click();
   await page.getByRole('button', { name: 'Импорт бота', exact: true }).click();
   await page
@@ -238,12 +216,12 @@ test('create, export, import and delete a bot on the server', async ({ page }) =
   await page.getByRole('button', { name: 'Импортировать', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Импортированный бот' })).toBeVisible();
   const imported = bots.find((b) => b.name === 'Импортированный бот')!;
-  expect(imported.parameters?.signalExchange).toBe('Binance');
+  expect(imported.signal?.signal).toBe('Вынос цены');
   await page.getByRole('button', { name: 'Настройки', exact: true }).click();
   await page.getByRole('button', { name: 'Удалить', exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Удалить', exact: true }).click();
   await expect(
-    page.getByRole('button', { name: 'Импортированный бот Поводырь v0.3.2' }),
+    page.getByRole('button', { name: 'Импортированный бот Сигнал лаборатории v0.1.0' }),
   ).toHaveCount(0);
   expect(bots.some((b) => b.name === 'Импортированный бот')).toBe(false);
 });
@@ -280,6 +258,6 @@ test('the demo space is gone: ?demo=1 opens the server workspace', async ({ page
   await page.goto('/?demo=1');
   await expect(page.getByText('Данные загружены с сервера')).toBeVisible();
   await expect(page.getByText(/Демонстрационный режим|демопример/)).toHaveCount(0);
-  await expect(page.getByRole('heading', { name: 'Поводырь · MAGIC' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: /Поводырь · MAGIC/ }).first()).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Вынос цены · 5 мин' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Вынос цены · 5 мин/ }).first()).toBeVisible();
 });

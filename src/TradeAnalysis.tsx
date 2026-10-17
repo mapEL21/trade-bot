@@ -13,7 +13,7 @@ import {
 } from './model';
 
 // The analysis every strategy gets for free from its closed trades: result, balance, curve, trade quality and history.
-// Strategy-specific views (for example the leader analysis of leader-lag) live next to their strategy, see strategyViews.tsx.
+// Strategy-specific views live next to their strategy, see strategyViews.tsx.
 // Realized: closed trades of the chosen period. Unrealized: open positions right now, if closed through the book after
 // both fees; null when nothing is open. The balance counts closed trades only, with the open result shown beside it.
 export function Stats({
@@ -311,7 +311,6 @@ export function TradeQuality({ trades }: { trades: Trade[] }) {
   );
 }
 // Trade history shared by every strategy: instrument and exchange of each trade come from the run that made it.
-// The leader column appears only when some trade has one (a strategy-specific field).
 export function TradesTable({
   trades,
   botName,
@@ -324,7 +323,6 @@ export function TradesTable({
   note?: string;
 }) {
   const sorted = [...trades].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
-  const withLeader = trades.some((t) => t.leader);
   function csv() {
     const rows = [
       [
@@ -333,7 +331,6 @@ export function TradesTable({
         'Бот',
         'Пара',
         'Биржа',
-        'Поводырь',
         'Сторона',
         'Вход',
         'Выход',
@@ -351,7 +348,6 @@ export function TradesTable({
         t.botName ?? botName ?? '',
         t.symbol ?? '',
         t.exchange ?? '',
-        t.leader ?? '',
         t.side,
         t.entry,
         t.exit,
@@ -401,7 +397,6 @@ export function TradesTable({
                 {showBot && <th>Бот</th>}
                 <th>Инструмент</th>
                 <th>Биржа</th>
-                {withLeader && <th>Поводырь</th>}
                 <th>Сторона</th>
                 <th>Вход → выход</th>
                 <th>В сделке</th>
@@ -430,7 +425,6 @@ export function TradesTable({
                       )}
                     </td>
                     <td>{t.exchange ?? '—'}</td>
-                    {withLeader && <td>{t.leader ?? '—'}</td>}
                     <td>
                       <span className={`side ${t.side}`}>
                         {t.side === 'long' ? 'Лонг' : 'Шорт'}

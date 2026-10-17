@@ -178,7 +178,7 @@ public class LevelScannerTests
                 var db = Path.Combine(directory, "workspace.db");
                 services.RemoveAll<IWorkspaceStore>(); services.AddSingleton<IWorkspaceStore>(_ => new SqliteWorkspaceStore(db));
                 services.RemoveAll<PaperRunStore>(); services.AddSingleton(_ => new PaperRunStore(db));
-                services.RemoveAll<BotTemplateStore>(); services.AddSingleton(_ => new BotTemplateStore(db));
+
             });
         });
         using var client = factory.CreateClient();

@@ -47,7 +47,7 @@
 - `POST /api/v1/bots/{id}/signal/start` — `{}` (с этого момента) или `{ "fromMs": … }` (с даты в прошлом); 409, если бот уже работает.
 - `POST /api/v1/bots/{id}/signal/stop` — остановить; 409, если не работает.
 
-Бот создаётся как обычный (`POST /api/v1/bots`): `strategy: "signal"`, `symbol: "*"`, `exchange: "Binance"`, настройки в `signal`. Запуски хранятся в таблице `signal_runs` той же базы, что и запуски симуляции (`PaperRunStore`).
+Бот создаётся как обычный (`POST /api/v1/bots`): `strategy: "signal"`, `symbol: "*"`, `exchange: "Binance"`, настройки в `signal`. Запуски хранятся в таблице `signal_runs` рабочей базы (класс `PaperRunStore`; имя осталось от удалённой симуляции «Поводыря»).
 
 ## Чего бот не делает
 

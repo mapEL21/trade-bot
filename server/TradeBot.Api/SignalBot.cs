@@ -11,6 +11,7 @@ public sealed record SignalParameters(string Signal = "Вынос цены", str
     // Sessions: the trading sessions (TradingSessions ids) the bot opens trades in; null or empty means all of them.
     public bool InSession(long ms) => Sessions is not { Length: > 0 } s || s.Contains(TradingSessions.Of(ms));
     public const decimal MinNotional = 5;
+    public const int MaxLeverageLimit = 125;
 
     public Dictionary<string, string[]> Validate()
     {
@@ -22,7 +23,7 @@ public sealed record SignalParameters(string Signal = "Вынос цены", str
         if (StopRanges is < .5m or > 20) errors["stopRanges"] = ["Стоп — от 0,5 до 20 обычных минутных свечей."];
         if (MaxFeeShare is < .05m or > .9m) errors["maxFeeShare"] = ["Доля комиссии в риске — от 5 до 90%."];
         if (FeePct is < 0 or > 1) errors["feePct"] = ["Комиссии круга — от 0 до 1%."];
-        if (MaxLeverage is < 1 or > LeaderLagParameters.MaxLeverage) errors["maxLeverage"] = [$"Плечо — от 1 до {LeaderLagParameters.MaxLeverage}."];
+        if (MaxLeverage is < 1 or > MaxLeverageLimit) errors["maxLeverage"] = [$"Плечо — от 1 до {MaxLeverageLimit}."];
         if (MaxPositions is < 1 or > 20) errors["maxPositions"] = ["Одновременных сделок — от 1 до 20."];
         if (Sessions is { } list && (list.Length > TradingSessions.All.Length || list.Distinct().Count() != list.Length || list.Any(x => !TradingSessions.Valid(x) || x is null)))
             errors["sessions"] = ["Неизвестная торговая сессия."];
@@ -163,6 +164,9 @@ public sealed class SignalBots(PaperRunStore store, SignalLab lab)
         await store.SaveSignalRunAsync(run, ct);
         return run;
     }
+
+    public async Task<bool> IsRunningAsync(string botId, CancellationToken ct) =>
+        (await store.SignalRunsAsync(botId, ct)).Any(r => r.ToMs is null);
 
     public async Task<bool> StopAsync(string botId, CancellationToken ct)
     {

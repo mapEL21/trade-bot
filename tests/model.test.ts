@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   csvCell,
-  defaultLeaderLagSettings,
   defaultSignalParameters,
   exportConfig,
   importConfig,
@@ -17,14 +16,15 @@ import {
   type Workspace,
 } from '../src/model.ts';
 
-const impulseConfig = {
-  name: 'Импульс · ARB',
+const signalConfig = {
+  name: 'Вынос цены · 5 мин',
   exchange: 'Binance' as const,
-  symbol: 'ARBUSDT',
+  symbol: '*',
   budget: 10,
   lossLimit: 1,
-  strategy: 'impulse' as const,
+  strategy: 'signal' as const,
   strategyVersion: '0.1.0',
+  signal: defaultSignalParameters,
 };
 const trade = (at: string, gross: number, fee = 0.01): Trade => ({
   id: at,
@@ -38,9 +38,9 @@ const trade = (at: string, gross: number, fee = 0.01): Trade => ({
   simulated: true,
 });
 const bot = (trades: Trade[] = []): Bot => ({
-  ...impulseConfig,
+  ...signalConfig,
   id: 'bot-1',
-  status: 'paused',
+  status: 'stopped',
   trades,
   createdAt: '2026-10-01T00:00:00Z',
 });
@@ -56,21 +56,19 @@ test('configuration roundtrip excludes history, IDs, and runtime status', () => 
   const source = bot([trade('2026-10-02T00:00:00Z', 0.05)]);
   const text = exportConfig(source);
   assert.equal(text.includes('trades'), false);
-  assert.equal(text.includes('paused'), false);
+  assert.equal(text.includes('stopped'), false);
   assert.equal(text.includes(source.id), false);
-  assert.deepEqual(importConfig(text), impulseConfig);
+  assert.deepEqual(importConfig(text), signalConfig);
 });
 test('rejects secrets, unknown versions, nonfinite values and invalid risk limits', () => {
   const config = importConfig(exportConfig(bot()));
   assert.throws(() => validateConfig({ ...config, apiKey: 'should-not-be-imported' }));
   assert.throws(() => validateConfig({ ...config, budget: Infinity }));
   assert.throws(() => validateConfig({ ...config, lossLimit: 11 }));
-  assert.throws(() => validateConfig({ ...config, symbol: 'ARBUSDT\n' }));
-  // Tickers from the pair list: one letter (W) up to 20 characters; longer ones are refused.
-  assert.equal(validateConfig({ ...config, symbol: 'WUSDT' }).symbol, 'WUSDT');
-  assert.doesNotThrow(() => validateConfig({ ...config, symbol: 'A'.repeat(20) + 'USDT' }));
-  assert.throws(() => validateConfig({ ...config, symbol: 'A'.repeat(21) + 'USDT' }));
-  assert.throws(() => validateConfig({ ...config, symbol: 'USDT' }));
+  // The bot trades every coin of the recording; old strategies are no longer accepted.
+  assert.throws(() => validateConfig({ ...config, symbol: 'ARBUSDT' }));
+  assert.throws(() => validateConfig({ ...config, strategy: 'leader-lag' }), /старые стратегии/);
+  assert.throws(() => validateConfig({ ...config, strategy: 'impulse' }));
   assert.throws(() => importConfig('{"schemaVersion":2}'));
   assert.throws(() => importConfig('invalid json'));
   assert.throws(() => importConfig(' '.repeat(32769)));
@@ -115,106 +113,6 @@ test('server workspace validation handles corrupted records', () => {
   assert.throws(() =>
     parseWorkspace(JSON.stringify({ ...ws, bots: [{ ...ws.bots[0], status: 'unknown' }] })),
   );
-});
-test('leader-lag configuration keeps its parameters through export and import, and stays strict', () => {
-  const config = {
-    name: 'Поводырь · MAGIC',
-    exchange: 'Binance' as const,
-    symbol: 'MAGICUSDT',
-    budget: 20,
-    lossLimit: 2,
-    strategy: 'leader-lag' as const,
-    strategyVersion: '0.3.2',
-    parameters: {
-      signalExchange: 'OKX' as const,
-      settings: { ...defaultLeaderLagSettings },
-      delayMs: 50,
-      counter: false,
-    },
-  };
-  const saved: Bot = {
-    ...validateConfig(config),
-    id: 'bot-2',
-    status: 'draft',
-    trades: [],
-    createdAt: '2026-10-01T00:00:00Z',
-  };
-  assert.deepEqual(importConfig(exportConfig(saved)), validateConfig(config));
-  assert.throws(() => validateConfig({ ...config, parameters: undefined }));
-  assert.throws(() =>
-    validateConfig({ ...config, parameters: { ...config.parameters, signalExchange: 'Binance' } }),
-  );
-  assert.throws(() =>
-    validateConfig({ ...config, parameters: { ...config.parameters, delayMs: 0 } }),
-  );
-  assert.throws(() =>
-    validateConfig({
-      ...config,
-      parameters: {
-        ...config.parameters,
-        settings: { ...defaultLeaderLagSettings, orderNotional: 50 },
-      },
-    }),
-  );
-  assert.throws(() =>
-    validateConfig({
-      ...config,
-      parameters: { ...config.parameters, settings: { ...defaultLeaderLagSettings, apiKey: 'x' } },
-    }),
-  );
-  // Leverage lets the nominal reach balance x leverage: 50 USDT on 20 USDT needs at least 3x; old bots default to 1x.
-  const sized = (leverage: number) => ({
-    ...config,
-    parameters: {
-      ...config.parameters,
-      leverage,
-      settings: { ...defaultLeaderLagSettings, orderNotional: 50 },
-    },
-  });
-  assert.equal(validateConfig(sized(3)).parameters!.leverage, 3);
-  assert.throws(() => validateConfig(sized(2)), /умноженный на плечо/);
-  assert.throws(() => validateConfig(sized(0)));
-  assert.throws(() => validateConfig(sized(126)));
-  assert.equal(validateConfig(config).parameters!.leverage, 1);
-  // A bot always follows its signal exchange: missing or automatic leader settings become 'source'.
-  const withLeader = (leader: unknown) => ({
-    ...config,
-    parameters: { ...config.parameters, settings: { ...defaultLeaderLagSettings, leader } },
-  });
-  assert.equal(validateConfig(withLeader('auto')).parameters!.settings.leader, 'source');
-  assert.equal(validateConfig(withLeader(undefined)).parameters!.settings.leader, 'source');
-  assert.throws(() => validateConfig(withLeader('okx')));
-  // Saved before the reversal threshold existed: it equals the entry impulse, as the server treats it.
-  const oldSettings: Record<string, unknown> = { ...defaultLeaderLagSettings, impulseBps: 7 };
-  delete oldSettings.reversalBps;
-  assert.equal(
-    validateConfig({ ...config, parameters: { ...config.parameters, settings: oldSettings } })
-      .parameters!.settings.reversalBps,
-    7,
-  );
-  // A size in coins is not limited by the USDT nominal check, which needs a price.
-  assert.equal(
-    validateConfig({
-      ...config,
-      parameters: {
-        ...config.parameters,
-        settings: { ...defaultLeaderLagSettings, orderNotional: 50, orderQuantity: 30 },
-      },
-    }).parameters!.settings.orderQuantity,
-    30,
-  );
-  assert.equal(
-    validateConfig({
-      ...config,
-      exchange: 'Hyperliquid',
-      parameters: { ...config.parameters, signalExchange: 'Binance' },
-    }).exchange,
-    'Hyperliquid',
-  );
-  // The impulse template keeps its three exchanges and accepts no strategy parameters.
-  assert.throws(() => validateConfig({ ...impulseConfig, exchange: 'Hyperliquid' }));
-  assert.throws(() => validateConfig({ ...impulseConfig, parameters: config.parameters }));
-  assert.doesNotThrow(() => validateConfig({ ...impulseConfig, parameters: null }));
 });
 test('trade quality separates entry and exit problems and groups exit reasons', () => {
   // 10 USDT long trades with 0.01 USDT fees (10 b.p. round trip).

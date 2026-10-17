@@ -123,33 +123,17 @@ try {
             if ($owners -notcontains $server.ProcessId -or @($owners | Where-Object { $_ -ne $server.ProcessId }).Count -gt 0) {
                 throw 'Не удалось подтвердить сервер на порту 5080. Автоматическая остановка отменена.'
             }
-            # Running simulations each have their own recording: stop them first so their results are saved.
-            # ForEach-Object unrolls the JSON array: Windows PowerShell 5.1 passes it as one object.
-            # A server started before several simulations existed has no such endpoint and is simply stopped.
-            try { $sessions = @((Request-Local "$api/paper/sessions") | ConvertFrom-Json | ForEach-Object { $_ }) } catch { $sessions = @() }
-            if ($sessions.Count -gt 0) {
-                Write-Host "Останавливаем симуляции ($($sessions.Count)) и ждём сохранения результатов..."
-                foreach ($session in $sessions) { Request-Local "$api/paper/$($session.id)/stop?mode=force" 'POST' | Out-Null }
-                $deadline = [DateTime]::UtcNow.AddSeconds(45)
-                do {
-                    Start-Sleep -Milliseconds 500
-                    $sessions = @((Request-Local "$api/paper/sessions") | ConvertFrom-Json | ForEach-Object { $_ })
-                } while ($sessions.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)
-                if ($sessions.Count -gt 0) { throw 'Симуляции ещё сохраняются. Сервер оставлен работающим; повторите остановку позже.' }
-                # The final record is written right after a session ends.
-                Start-Sleep -Seconds 1
-            }
-            # A running level scanner saves its breakout journal when it stops; older servers have no scanner.
+            # A running data recording is finished properly so its file is complete.
             try { $scan = (Request-Local "$api/scanner") | ConvertFrom-Json } catch { $scan = $null }
             if ($scan -and $scan.state -in @('starting', 'scanning')) {
-                Write-Host 'Останавливаем сканер и ждём сохранения журнала пробоев...'
+                Write-Host 'Завершаем запись данных...'
                 Request-Local "$api/scanner/$($scan.id)/stop" 'POST' | Out-Null
                 $deadline = [DateTime]::UtcNow.AddSeconds(45)
                 do {
                     Start-Sleep -Milliseconds 500
                     $scan = (Request-Local "$api/scanner") | ConvertFrom-Json
                 } while ($scan.state -in @('starting', 'scanning') -and [DateTime]::UtcNow -lt $deadline)
-                if ($scan.state -in @('starting', 'scanning')) { throw 'Сканер ещё сохраняет запись. Сервер оставлен работающим; повторите остановку позже.' }
+                if ($scan.state -in @('starting', 'scanning')) { throw 'Запись данных ещё сохраняется. Сервер оставлен работающим; повторите остановку позже.' }
             }
         }
         Stop-Owned 'web'
