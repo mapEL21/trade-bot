@@ -328,11 +328,11 @@ test('bot page starts, shows, pauses and stops a live paper run', async ({ page 
   await expect(page.getByRole('table', { name: 'История запусков' })).toContainText('Завершён');
   await expect(page.getByRole('table', { name: 'Сделки последнего запуска' })).toBeVisible();
   // The finished run's trade now counts in the bot's simulated balance, chart and history.
-  await expect(page.getByText('СТАТИСТИКА СИМУЛЯЦИИ · НЕ РЕАЛЬНАЯ ТОРГОВЛЯ')).toBeVisible();
-  await expect(page.locator('.stat', { hasText: 'Баланс · симуляция' })).toContainText('21,00');
+  await expect(page.getByText('СТАТИСТИКА', { exact: true })).toBeVisible();
+  await expect(page.locator('.stat', { hasText: /^Баланс/ })).toContainText('21,00');
   await expect(page.locator('.stat', { hasText: /^Реализованный PnL/ })).toContainText('+1,00');
   await expect(page.locator('.stat', { hasText: 'Нереализованный PnL' })).toContainText(
-    'Открытых позиций нет',
+    'открытых позиций нет',
   );
   await expect(page.getByRole('img', { name: /накопленного результата/ })).toBeVisible();
   await expect(page.locator('.trades-panel')).toContainText('SIM');

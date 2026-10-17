@@ -103,7 +103,7 @@ export function Scanner() {
       <section className="panel scanner-control" aria-labelledby="scanner-title">
         <div className="section-line">
           <h2 id="scanner-title">
-            <Database size={18} aria-hidden="true" /> Запись данных · Binance
+            <Database size={18} aria-hidden="true" /> Запись данных
           </h2>
           <span className={`research-status ${running ? 'is-live' : ''}`} role="status">
             <span className={`live-dot ${running ? 'on' : ''}`} aria-hidden="true" />
@@ -111,12 +111,17 @@ export function Scanner() {
           </span>
         </div>
         <p className="field-hint">
-          Записывает сделки, стакан (20 уровней) и ликвидации самых торгуемых фьючерсов Binance, а
-          также историю минутных свечей. Из этих записей лаборатория сигналов ищет события и
-          считает, что дала бы сделка после комиссий. Сделок нет.
+          Сделки, стакан и ликвидации самых торгуемых фьючерсов — данные для лаборатории.
         </p>
         {!running ? (
           <form className="scanner-form" onSubmit={start}>
+            {/* Only Binance is recorded for now; other exchanges will be added to this list. */}
+            <label className="field">
+              <span>Биржа</span>
+              <select value="Binance" onChange={() => {}}>
+                <option>Binance</option>
+              </select>
+            </label>
             <label className="field">
               <span>Длительность</span>
               <select value={seconds} onChange={(e) => setSeconds(Number(e.target.value))}>
@@ -232,9 +237,6 @@ export function Scanner() {
           </p>
         )}
         {error && <p role="alert">{error}</p>}
-        <p className="field-hint">
-          Час записи по 20 монетам — около 0,7 ГБ; завершённые записи сжимаются примерно в 10 раз.
-        </p>
       </section>
 
       {snapshot && snapshot.symbols.length > 0 && (

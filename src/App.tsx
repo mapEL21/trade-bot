@@ -6,7 +6,6 @@ import {
   ArrowUpRight,
   Bot as BotIcon,
   Check,
-  ChevronRight,
   Clock3,
   Copy,
   FlaskConical,
@@ -356,17 +355,8 @@ export default function App() {
           </span>
           <span>
             trade<span className="brand-light">bot</span>
-            <small>TRADING WORKSPACE</small>
           </span>
         </button>
-        <div className="workspace-switch">
-          <span className="avatar">M</span>
-          <span>
-            Моё пространство<small>{'Локальный сервер'}</small>
-          </span>
-          <span className="workspace-dot" />
-        </div>
-        <p className="nav-caption">РАБОЧЕЕ ПРОСТРАНСТВО</p>
         <nav>
           {nav.map(({ id, label, icon: Icon }) => (
             <button
@@ -389,18 +379,6 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="sidebar-bottom">
-          <div className="sandbox-card">
-            <FlaskConical size={21} />
-            <strong>Только симуляция</strong>
-            <p>Боты работают на публичных данных бирж. Реальных заявок и ключей нет.</p>
-          </div>
-          <div className="sidebar-footer">
-            <span className="tiny-dot" />
-            Серверное пространство
-            <span>v0.1</span>
-          </div>
-        </div>
       </aside>
       <div className="main-shell">
         <header className="topbar">
@@ -412,30 +390,22 @@ export default function App() {
             >
               <Menu size={20} />
             </button>
-            <span>Рабочее пространство</span>
-            <ChevronRight size={14} />
-            <strong>{bot ? bot.name : nav.find((n) => n.id === page)?.label}</strong>
+            {/* The page name is the heading below; on a phone it is shown here next to the menu button. */}
+            <strong className="topbar-title">
+              {bot ? bot.name : nav.find((n) => n.id === page)?.label}
+            </strong>
           </div>
           <div className="topbar-right">
-            <span className="mode-pill">
+            <span
+              className="mode-pill"
+              title="Реальные заявки не отправляются: боты торгуют виртуально по публичным данным"
+            >
               <FlaskConical size={13} />
               СИМУЛЯЦИЯ
-            </span>
-            <span className="topbar-divider" />
-            <span className="profile" title="Локальный сервер">
-              M
             </span>
           </div>
         </header>
         <main>
-          <div className="mode-banner">
-            <FlaskConical size={16} />
-            <span>
-              <strong>Живая симуляция.</strong> Настройки и результаты хранятся в базе локального
-              сервера. Боты работают по публичным данным бирж; реальные заявки не отправляются,
-              торговые подключения не созданы.
-            </span>
-          </div>
           {serverError && (
             <div className="error-banner" role="alert">
               {serverError}
@@ -448,24 +418,16 @@ export default function App() {
               </button>
             </div>
           )}
-          <div className="server-toolbar">
-            <span role="status">
-              {loading
-                ? 'Загрузка с сервера…'
-                : busy
-                  ? 'Сохранение…'
-                  : serverError
-                    ? 'Не удалось обновить данные'
-                    : 'Данные загружены с сервера'}
-            </span>
-            <button
-              className="text-button"
-              disabled={loading || busy}
-              onClick={() => void refreshServer().catch(() => {})}
-            >
-              Обновить данные
-            </button>
-          </div>
+          {/* For screen readers and checks only: the page itself shows data or an error. */}
+          <span className="sr-only" role="status">
+            {loading
+              ? 'Загрузка с сервера…'
+              : busy
+                ? 'Сохранение…'
+                : serverError
+                  ? 'Не удалось обновить данные'
+                  : 'Данные загружены с сервера'}
+          </span>
           {bot ? (
             <>
               <button className="back-link" onClick={() => go('bots')}>
@@ -515,7 +477,7 @@ export default function App() {
                   <div className="section-line">
                     <span className="section-kicker">
                       <span className="tiny-dot" />
-                      СТАТИСТИКА СИМУЛЯЦИИ · НЕ РЕАЛЬНАЯ ТОРГОВЛЯ
+                      СТАТИСТИКА
                     </span>
                     {period}
                   </div>
@@ -600,24 +562,7 @@ export default function App() {
           ) : (
             <>
               <div className="page-heading">
-                <div>
-                  <div className="eyebrow">ВАШ ТРЕЙДИНГ. ВАШИ ПРАВИЛА.</div>
-                  <h1>
-                    {page === 'overview'
-                      ? 'Всё под контролем'
-                      : nav.find((n) => n.id === page)?.label}
-                  </h1>
-                  <p>
-                    {
-                      {
-                        overview: 'Результат всех ботов, их сделки и статистика.',
-                        bots: 'Боты: настройки, живая симуляция и статистика.',
-                        scanner: 'Запись рынка Binance и проверка сигналов после комиссий.',
-                        events: 'Все изменения вашего рабочего пространства.',
-                      }[page]
-                    }
-                  </p>
-                </div>
+                <h1>{nav.find((n) => n.id === page)?.label}</h1>
                 <div className="heading-actions">
                   {(page === 'overview' || page === 'bots') && actions}
                 </div>
@@ -628,7 +573,7 @@ export default function App() {
                   <div className="section-line">
                     <span className="section-kicker">
                       <span className="tiny-dot" />
-                      {'СТАТИСТИКА ЭКЗЕМПЛЯРОВ'}
+                      СТАТИСТИКА ВСЕХ БОТОВ
                     </span>
                     {period}
                   </div>
@@ -637,14 +582,13 @@ export default function App() {
                     <Performance trades={trades} pnl={stat.pnl} />
                     <div className="panel workspace-health">
                       <div className="section-line">
-                        <h3>Рабочая среда</h3>
+                        <h3>Боты</h3>
                         <Radio size={18} className="muted" />
                       </div>
                       <div className="health-total">
                         <strong>{workspace.bots.length.toString().padStart(2, '0')}</strong>
                         <span>
                           ботов
-                          <br />в пространстве
                         </span>
                         <div className="orbit">
                           <BotIcon size={29} />
@@ -670,10 +614,6 @@ export default function App() {
                           ).length
                         }
                       />
-                      <div className="health-footer">
-                        <span className="tiny-dot amber" />
-                        Биржи не подключены
-                      </div>
                     </div>
                   </div>
                   <div className="section-line bots-section-heading">
@@ -710,17 +650,11 @@ export default function App() {
                       <span>
                         <Plus size={22} />
                       </span>
-                      <strong>Новая стратегия начинается здесь</strong>
-                      <p>Добавьте бота и настройте его под себя</p>
                       <span className="add-link">
                         Создать бота
                         <ArrowRight size={15} />
                       </span>
                     </button>
-                  </div>
-                  <div className="footnote">
-                    <ShieldCheck size={14} />{' '}
-                    {'Настройки и журнал сохраняются в базе локального сервера.'}
                   </div>
                   <TradeQuality trades={trades} />
                   <TradesTable trades={trades} showBot />
@@ -814,19 +748,10 @@ export default function App() {
             </>
           )}
         </main>
-        <footer className="page-footer">
-          <span>
-            tradebot <span className="muted">/ рабочее пространство</span>
-          </span>
-          <span>
-            Интерфейс v0.1 <span className="dot-separator">·</span> Реальная торговля не подключена
-          </span>
-        </footer>
       </div>
       {editor && (
         <Modal
           title={editor.id ? 'Настроить бота' : 'Создать нового бота'}
-          subtitle="Создайте экземпляр стратегии: выберите биржу, инструмент и лимиты. Код стратегии подключается отдельно."
           onClose={() => setEditor(null)}
         >
           <ConfigForm
@@ -1249,7 +1174,7 @@ function ConfigForm({
         <FlaskConical size={17} />
         <span>
           {signalBot
-            ? 'Бот торгует виртуально на всех монетах записи данных Binance; ключи не нужны, реальные заявки не отправляются. Комиссии — пример, укажите свои.'
+            ? 'Торгует виртуально все монеты записи данных. Комиссии — пример, укажите свои.'
             : leaderLag
               ? 'Бот работает только в живой симуляции: реальные заявки не отправляются, ключи не нужны. Биржа сигнала — поводырь: бот входит на своей бирже, когда она отстаёт от движения биржи сигнала. Комиссии — пример, укажите свои.'
               : 'Создаётся черновик экземпляра. Алгоритм ещё не реализован, запуск недоступен.'}{' '}

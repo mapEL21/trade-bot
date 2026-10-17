@@ -35,7 +35,7 @@ export function Stats({
         unit="USDT"
         icon={<TrendingUp size={18} />}
         accent={stat.pnl >= 0 ? 'positive' : 'negative'}
-        note={`Закрытые сделки за период, после комиссий · ${formatMoney(stat.fees)} USDT`}
+        note={`после комиссий ${formatMoney(stat.fees)} USDT`}
       />
       <Stat
         label="Нереализованный PnL"
@@ -43,21 +43,17 @@ export function Stats({
         unit={unrealized === null ? '' : 'USDT'}
         icon={<Activity size={18} />}
         accent={unrealized === null ? '' : unrealized >= 0 ? 'positive' : 'negative'}
-        note={
-          unrealized === null
-            ? 'Открытых позиций нет'
-            : 'Открытая позиция сейчас: при закрытии по стакану, после обеих комиссий'
-        }
+        note={unrealized === null ? 'открытых позиций нет' : 'если закрыть сейчас, после комиссий'}
       />
       <Stat
-        label={'Баланс · симуляция'}
+        label="Баланс"
         value={formatMoney(balance)}
         unit="USDT"
         icon={<Wallet size={18} />}
         note={
           unrealized === null
-            ? `Выделено ${formatMoney(budget)} USDT, изменение — по закрытым сделкам симуляции`
-            : `С открытой позицией ${formatMoney(balance + unrealized)} USDT · выделено ${formatMoney(budget)} USDT`
+            ? `начальный ${formatMoney(budget)} USDT`
+            : `с открытой позицией ${formatMoney(balance + unrealized)} USDT`
         }
       />
       <Stat
@@ -65,14 +61,14 @@ export function Stats({
         value={stat.winRate === null ? '—' : stat.winRate.toFixed(1).replace('.', ',')}
         unit={stat.winRate === null ? '' : '%'}
         icon={<Gauge size={18} />}
-        note={`${stat.count} закрытых ${'сделок'}`}
+        note={`из ${stat.count} сделок`}
       />
       <Stat
         label="Макс. просадка"
         value={formatMoney(stat.drawdown)}
         unit="USDT"
         icon={<ShieldCheck size={18} />}
-        note="По закрытым сделкам за период"
+        note="за период"
       />
     </div>
   );
@@ -320,7 +316,7 @@ export function TradesTable({
   trades,
   botName,
   showBot = false,
-  note = 'Сделки живой симуляции: исполнения смоделированы по публичным данным, реальных ордеров не было.',
+  note = 'Симуляция: реальных ордеров не было.',
 }: {
   trades: (Trade & { botName?: string })[];
   botName?: string;
@@ -464,7 +460,7 @@ export function TradesTable({
           </table>
         </div>
       )}
-      <div className="table-note">{note} Комиссии и результаты указаны в USDT.</div>
+      <div className="table-note">{note}</div>
     </section>
   );
 }

@@ -72,7 +72,7 @@ test('data recording starts with chosen limits and shows what arrives per coin',
     .first()
     .click();
   await page.getByRole('button', { name: 'Запись данных', exact: true }).click();
-  await expect(page.getByRole('heading', { name: /Запись данных · Binance/ })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Запись данных' })).toBeVisible();
   await page.getByLabel('Объём за 24 ч от, млн $').fill('200');
   await page.getByLabel('Монет не больше').fill('15');
   await page.getByLabel('Размах за 24 ч от, %').fill('5');

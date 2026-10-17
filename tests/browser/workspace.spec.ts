@@ -126,8 +126,9 @@ test('overview, trade periods and bot navigation work without console errors', a
   page.on('pageerror', (e) => errors.push(e.message));
   await server(page);
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'Всё под контролем' })).toBeVisible();
-  await expect(page.getByText('Живая симуляция.', { exact: false }).first()).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Обзор', level: 1 })).toBeVisible();
+  // One quiet mark instead of a banner on every page: nothing is traded for real.
+  await expect(page.getByText('СИМУЛЯЦИЯ', { exact: true })).toBeVisible();
   // The result chart: with fees (solid) and without (dashed); line or bars, the choice kept in the browser.
   const chart = page.locator('.performance');
   await expect(chart).toContainText('без комиссий');
