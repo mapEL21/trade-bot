@@ -73,7 +73,9 @@ public sealed class LiveBotsTests : IDisposable
         var run = new SignalRun("run-1", "bot-1", T0 - 1000, null, DateTimeOffset.UnixEpoch, 100, 30, parameters, Live: true);
         await store.SaveSignalRunAsync(run, CancellationToken.None);
         var feed = new FakeFeed();
-        using var live = new LiveBots(store, screener, source, feed, config, environment, NullLogger<LiveBots>.Instance);
+        using var live = new LiveBots(store, screener, source, feed, config, environment,
+            new ExchangeCredentials(new Microsoft.AspNetCore.DataProtection.EphemeralDataProtectionProvider(), config, environment),
+            new ExchangeHttp(new HttpClient()), NullLogger<LiveBots>.Instance);
         await live.StartAsync(CancellationToken.None);
         try
         {
@@ -111,6 +113,54 @@ public sealed class LiveBotsTests : IDisposable
     }
 
     [Fact]
+    public async Task ATestnetRunSendsItsDecisionsToTheExchangeAndClosesThemWhenStopped()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Live:Enabled"] = "true", ["Live:Path"] = Path.Combine(root, "live"), ["Screener:Path"] = Path.Combine(root, "screener"),
+            ["Exchange:KeysPath"] = Path.Combine(root, "keys.json"), ["Exchange:TestnetUrl"] = "https://testnet.example",
+        }).Build();
+        var environment = new Microsoft.Extensions.Hosting.Internal.HostingEnvironment { ContentRootPath = root };
+        var source = new FakeSource();
+        using var screener = new DensityScreener(source, config, environment, NullLogger<DensityScreener>.Instance);
+        screener.Scan(Market, ScreenerBook(), T0);
+        screener.Scan(Market, ScreenerBook(), T0 + 1000);
+        var store = new PaperRunStore(Path.Combine(root, "workspace.db"));
+        var credentials = new ExchangeCredentials(new Microsoft.AspNetCore.DataProtection.EphemeralDataProtectionProvider(), config, environment);
+        credentials.Save(ExchangeModes.Testnet, "key", "secret");
+        var exchange = new FakeBinance();
+        var run = new SignalRun("run-3", "bot-3", T0 - 1000, null, DateTimeOffset.UnixEpoch, 100, 30, new SignalParameters(FeePct: .02m),
+            Live: true, Execution: ExchangeModes.Testnet);
+        await store.SaveSignalRunAsync(run, CancellationToken.None);
+        var feed = new FakeFeed();
+        using var live = new LiveBots(store, screener, source, feed, config, environment, credentials, new ExchangeHttp(new HttpClient(exchange)),
+            NullLogger<LiveBots>.Instance);
+        await live.StartAsync(CancellationToken.None);
+        try
+        {
+            await live.Sync(CancellationToken.None);
+            // The bounce: an entry the moment the bot decides, before the price reaches the target.
+            for (var t = 0; t < 100; t++) foreach (var m in Second(t, 100)) feed.Send(m);
+            for (var t = 100; t < 120; t++) foreach (var m in Second(t, 100.5m)) feed.Send(m);
+            for (var t = 120; t < 130; t++) foreach (var m in Second(t, 100)) feed.Send(m);
+            using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            while (live.Current(run.Id)!.Value.View.Exchange is not { Length: 1 }) await Task.Delay(20, wait.Token);
+            Assert.True(exchange.Position > 0);
+            // Stopping the run closes the position on the exchange before the session ends.
+            await store.SaveSignalRunAsync(run with { ToMs = T0 + 200_000 }, CancellationToken.None);
+            await live.Sync(CancellationToken.None);
+            Assert.Equal(0m, exchange.Position);
+            var log = (await store.ExchangeLogAsync(run.Id, 10, CancellationToken.None)).Reverse().Select(e => e.Action).ToList();
+            Assert.Equal(["вход", "защитный стоп", "выход"], log);
+        }
+        finally
+        {
+            await live.StopAsync(CancellationToken.None);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        }
+    }
+
+    [Fact]
     public async Task WithoutLiveEnabledNoSessionIsOpened()
     {
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Live:Path"] = Path.Combine(root, "live") }).Build();
@@ -118,7 +168,9 @@ public sealed class LiveBotsTests : IDisposable
         using var screener = new DensityScreener(new FakeSource(), config, environment, NullLogger<DensityScreener>.Instance);
         var store = new PaperRunStore(Path.Combine(root, "workspace.db"));
         await store.SaveSignalRunAsync(new SignalRun("run-2", "bot", T0, null, DateTimeOffset.UnixEpoch, 100, 30, new(), Live: true), CancellationToken.None);
-        using var live = new LiveBots(store, screener, new FakeSource(), new FakeFeed(), config, environment, NullLogger<LiveBots>.Instance);
+        using var live = new LiveBots(store, screener, new FakeSource(), new FakeFeed(), config, environment,
+            new ExchangeCredentials(new Microsoft.AspNetCore.DataProtection.EphemeralDataProtectionProvider(), config, environment),
+            new ExchangeHttp(new HttpClient()), NullLogger<LiveBots>.Instance);
         await live.Sync(CancellationToken.None);
         Assert.Null(live.Current("run-2"));
         Assert.False(Directory.Exists(Path.Combine(root, "live")));

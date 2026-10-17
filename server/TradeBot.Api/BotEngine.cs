@@ -12,6 +12,10 @@ public sealed record EngineResult(int Version, string Recording, long FirstMs, l
     int Signals, int Incomplete);
 // A position held right now, for the live view: the move so far is at the exit-side best price, before fees.
 public sealed record EnginePosition(string Symbol, string Side, long OpenedMs, decimal Entry, decimal Mark, decimal Fraction, string EntryReason);
+// A decision the engine sends out as it makes it, for an executor that places real orders (the engine itself keeps
+// simulating). Price: the best price the order would take now; CancelPrice: where the strategy's scenario is cancelled,
+// for the protective stop on the exchange.
+public sealed record EngineIntent(string Kind, string Symbol, int Side, long Ms, decimal Fraction, decimal Price, decimal? CancelPrice, string Reason);
 // A wall the screener confirmed (a "screener" event in the stream): the density bot trades only these when it has them.
 public sealed record ScreenedWall(string Symbol, int Side, decimal Price);
 
@@ -62,6 +66,7 @@ public sealed class BotEngine
     }
 
     public SignalParameters Parameters => parameters;
+    public event Action<EngineIntent>? Intent;
     public Position? PositionOf(string symbol) => positions.GetValueOrDefault(symbol);
     public void CountSignal() => signals++;
     public void Skip(string reason) => skipped[reason] = skipped.GetValueOrDefault(reason) + 1;
@@ -145,7 +150,14 @@ public sealed class BotEngine
         var fraction = parameters.RiskPct / (riskPct + parameters.FeePct);
         var left = parameters.MaxLeverage - open.Sum(p => p.Fraction) - entries.Sum(o => o.Fraction);
         if (left < .05m) { Skip("достигнут предел плеча"); return false; }
-        orders.Add(new(symbol, side, ms, false, reason, Math.Round(Math.Min(fraction, left), 4), context));
+        var size = Math.Round(Math.Min(fraction, left), 4);
+        orders.Add(new(symbol, side, ms, false, reason, size, context));
+        if (Intent is { } intent && detector.View(symbol) is { } view)
+        {
+            var price = side > 0 ? view.Ask : view.Bid;
+            // The cancel level is the risk distance away from the price, against the trade.
+            intent(new("entry", symbol, side, ms, size, price, Math.Round(price * (1 - side * riskPct / 100), 10), reason));
+        }
         return true;
     }
 
@@ -154,6 +166,8 @@ public sealed class BotEngine
         if (position.Exiting) return;
         position.Exiting = true; position.ExitReason = reason;
         orders.Add(new(position.Symbol, -position.Side, ms, true, reason, 0, null));
+        if (Intent is { } intent && detector.View(position.Symbol) is { } view)
+            intent(new("exit", position.Symbol, -position.Side, ms, position.Fraction, position.Side > 0 ? view.Bid : view.Ask, null, reason));
     }
 
     // The result so far while the stream runs: open positions are neither trades nor incomplete yet.

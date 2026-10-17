@@ -255,11 +255,25 @@ export const api = {
   signalRuns: (bot: Bot, signal?: AbortSignal) =>
     request<SignalRunView[]>(`/bots/${bot.id}/signal`, { signal }),
   // fromMs: also replay the recordings since that moment; without it the bot trades from now on.
-  startSignal: (bot: Bot, fromMs: number | null) =>
+  // execution: simulation (virtual trades) or testnet (orders on Binance's test network too).
+  startSignal: (
+    bot: Bot,
+    fromMs: number | null,
+    execution: 'simulation' | 'testnet' = 'simulation',
+  ) =>
     request<SignalRun>(`/bots/${bot.id}/signal/start`, {
       method: 'POST',
-      body: JSON.stringify(fromMs === null ? {} : { fromMs }),
+      body: JSON.stringify(fromMs === null ? { execution } : { fromMs, execution }),
     }),
+  exchangeKeys: () => request<ExchangeKeys>('/exchange/keys'),
+  saveExchangeKeys: (mode: string, apiKey: string, apiSecret: string) =>
+    request<{ balance: number }>('/exchange/keys', {
+      method: 'POST',
+      body: JSON.stringify({ mode, apiKey, apiSecret }),
+    }),
+  deleteExchangeKeys: (mode: string) =>
+    request<void>(`/exchange/keys/${mode}`, { method: 'DELETE' }),
+  exchangeLog: (bot: Bot) => request<ExchangeLogEntry[]>(`/bots/${bot.id}/exchange`),
   stopSignal: (bot: Bot) => request<void>(`/bots/${bot.id}/signal/stop`, { method: 'POST' }),
 };
 
@@ -275,6 +289,23 @@ export interface SignalRun {
   parameters: SignalParameters;
   // A density run started "from now" trades the live stream of the coins the screener points to.
   live?: boolean;
+  execution?: 'simulation' | 'testnet' | 'live';
+}
+export interface ExchangeKeys {
+  testnet: { mode: string; configured: boolean; keyEnd: string | null; savedUtc: string | null };
+  liveAllowed: boolean;
+}
+export interface ExchangeLogEntry {
+  runId: string;
+  atMs: number;
+  symbol: string;
+  action: string;
+  side: string;
+  quantity: number;
+  price: number;
+  clientId: string;
+  status: string;
+  message: string;
 }
 // What a live run watches now and the positions it holds (mark: the exit-side best price).
 export interface LiveView {
@@ -289,6 +320,16 @@ export interface LiveView {
     entryReason: string;
   }[];
   segment: string | null;
+  // Testnet runs: positions on the exchange, and why orders cannot be sent when they cannot.
+  exchange?: {
+    symbol: string;
+    side: 'long' | 'short';
+    quantity: number;
+    entry: number;
+    stopPrice: number;
+    openedMs: number;
+  }[];
+  exchangeProblem?: string | null;
 }
 export interface SignalRunView {
   run: SignalRun;

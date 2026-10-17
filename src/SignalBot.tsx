@@ -1,6 +1,7 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
 import { Play, Square } from 'lucide-react';
-import { api, tradingSessions, type SignalRunView } from './api';
+import { api, tradingSessions, type ExchangeKeys, type SignalRunView } from './api';
+import { ExchangeKeysPanel, ExchangeLog } from './ExchangePanel';
 import { SelectField } from './components';
 import {
   formatMoney,
@@ -95,6 +96,8 @@ export function SignalFields({
 export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => void }) {
   const [runs, setRuns] = useState<SignalRunView[] | null>(null);
   const [from, setFrom] = useState('');
+  const [execution, setExecution] = useState<'simulation' | 'testnet'>('simulation');
+  const [keys, setKeys] = useState<ExchangeKeys | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const running = bot.status === 'running';
@@ -167,10 +170,26 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
             <button
               className="button primary"
               disabled={busy}
-              onClick={() => void act(() => api.startSignal(bot, null))}
+              onClick={() =>
+                void act(() => api.startSignal(bot, null, density ? execution : 'simulation'))
+              }
             >
               <Play size={16} /> Запустить с этого момента
             </button>
+            {density && (
+              <label className="field signal-execution">
+                <span>Исполнение</span>
+                <select
+                  value={execution}
+                  onChange={(e) => setExecution(e.target.value as 'simulation' | 'testnet')}
+                >
+                  <option value="simulation">Симуляция (без заявок)</option>
+                  <option value="testnet" disabled={!keys?.testnet.configured}>
+                    Тестовая сеть Binance{keys?.testnet.configured ? '' : ' — нужны ключи'}
+                  </option>
+                </select>
+              </label>
+            )}
             <label className="field signal-from">
               <span>Или с даты (по прошлым записям)</span>
               <input type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} />
@@ -203,6 +222,28 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
               Живой режим выключен на этом компьютере: запустите приложение через «Запустить Trade
               Bot.cmd».
             </p>
+          )}
+          {live && current?.run.execution === 'testnet' && (
+            <p className="field-hint">
+              <span className="mode-pill">ТЕСТОВАЯ СЕТЬ</span> Решения бота уходят заявками на
+              тестовую биржу Binance; у каждой позиции — защитный стоп на бирже.
+              {current.live?.exchangeProblem && (
+                <span className="negative"> {current.live.exchangeProblem}</span>
+              )}
+            </p>
+          )}
+          {live && current?.live?.exchange && current.live.exchange.length > 0 && (
+            <div className="live-watch">
+              <strong>Позиции на бирже</strong>
+              <ul>
+                {current.live.exchange.map((p) => (
+                  <li key={p.symbol}>
+                    {p.symbol} {p.side === 'long' ? 'лонг' : 'шорт'} {p.quantity} от {p.entry},
+                    защитный стоп {p.stopPrice}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
           {live && current?.live && (
             <div className="live-watch">
@@ -257,6 +298,10 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
         </>
       )}
       {runs && runs.length === 0 && <p className="muted">Бот ещё не запускался.</p>}
+      {current?.run.execution === 'testnet' && (
+        <ExchangeLog bot={bot} refresh={bot.trades.length + (runs?.length ?? 0)} />
+      )}
+      {density && <ExchangeKeysPanel onChanged={setKeys} />}
     </section>
   );
 }

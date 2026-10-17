@@ -43,18 +43,23 @@ public sealed record SignalParameters(string Signal = SignalParameters.Density, 
 // Live: a density run started "from now" trades the live stream of the coins the screener points to (LiveBots); other runs
 // go through the data recordings.
 public sealed record SignalRun(string Id, string BotId, long FromMs, long? ToMs, DateTimeOffset StartedUtc, decimal Budget, decimal LossLimit,
-    SignalParameters Parameters, bool Live = false);
+    SignalParameters Parameters, bool Live = false, string Execution = SignalRun.Simulation)
+{
+    // Execution: simulation (virtual trades only) or testnet (the decisions also go to Binance's test network as orders).
+    public const string Simulation = "simulation";
+}
 
 // Pending: recordings of the run still being computed; their trades are not in the result yet.
 // Unrealized: open positions of a live run if closed now at the best price, after fees, USDT.
 public sealed record SignalRunResult(BotTrade[] Trades, Dictionary<string, int> Skipped, int Signals, int Incomplete, decimal Deposit,
     int Recordings, long? LastDataMs, string? EntriesBlocked, int Pending = 0, decimal? Unrealized = null);
 public sealed record SignalRunView(SignalRun Run, SignalRunResult Result, string State, LiveView? Live = null);
-public sealed record SignalStart(long? FromMs = null);
+public sealed record SignalStart(long? FromMs = null, string Execution = SignalRun.Simulation);
 
 // Bot runs: the engine goes through each finished recording of the run once per settings key (the result is cached next to
 // the recording as bot-<key>.json, computed in the background), then the money pass turns the trades into USDT in time order.
-public sealed class SignalBots(PaperRunStore store, SignalLab lab, LiveBots live, ILogger<SignalBots> logger) : IDisposable
+public sealed class SignalBots(PaperRunStore store, SignalLab lab, LiveBots live, ExchangeCredentials credentials, IConfiguration configuration,
+    ILogger<SignalBots> logger) : IDisposable
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private readonly object gate = new();
@@ -72,8 +77,19 @@ public sealed class SignalBots(PaperRunStore store, SignalLab lab, LiveBots live
         var from = request.FromMs ?? now;
         if (from < 0 || from > now) throw new ArgumentException("Начало — момент в прошлом или «сейчас».");
         if ((await store.SignalRunsAsync(bot.Id, ct)).Any(r => r.ToMs is null)) throw new InvalidOperationException("Бот уже работает.");
+        var liveRun = request.FromMs is null && bot.Signal.Signal == SignalParameters.Density;
+        if (request.Execution != SignalRun.Simulation)
+        {
+            if (!ExchangeModes.Allowed(configuration, request.Execution))
+                throw new ArgumentException(request.Execution == ExchangeModes.Live
+                    ? "Реальный счёт пока не включён: сначала проверка на тестовой сети."
+                    : "Неизвестный режим исполнения.");
+            if (!liveRun) throw new ArgumentException("Заявки на биржу отправляет только живой режим: бот «Плотность», запуск с этого момента.");
+            if (!live.Enabled) throw new ArgumentException("Живой режим выключен на этом компьютере: запустите приложение через «Запустить Trade Bot.cmd».");
+            if (credentials.Load(request.Execution) is null) throw new ArgumentException("Сначала сохраните API-ключи тестовой сети Binance.");
+        }
         var run = new SignalRun(Guid.NewGuid().ToString(), bot.Id, from, null, DateTimeOffset.UtcNow, bot.Budget, bot.LossLimit, bot.Signal,
-            Live: request.FromMs is null && bot.Signal.Signal == SignalParameters.Density);
+            Live: liveRun, Execution: request.Execution);
         await store.SaveSignalRunAsync(run, ct);
         return run;
     }

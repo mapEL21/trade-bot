@@ -2189,3 +2189,14 @@ td.reason {
   padding-left: 18px;
   color: #b9c6d8;
 }
+
+.signal-execution {
+  flex: 0 1 260px;
+}
+.exchange-keys summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}

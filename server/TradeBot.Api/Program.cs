@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.DataProtection;
 using System.Text.Json.Serialization;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Diagnostics;
@@ -32,6 +33,9 @@ builder.Services.AddSingleton(_ => new PaperRunStore(storagePath));
 builder.Services.AddSingleton<SignalBots>();
 builder.Services.AddSingleton<IDepthSource, BinanceDepthSource>();
 builder.Services.AddSingleton<ILiveFeed, BinanceLiveFeed>();
+builder.Services.AddDataProtection().SetApplicationName("TradeBot");
+builder.Services.AddSingleton<ExchangeCredentials>();
+builder.Services.AddSingleton(_ => new ExchangeHttp(new HttpClient { Timeout = TimeSpan.FromSeconds(10) }));
 builder.Services.AddSingleton<LiveBots>();
 builder.Services.AddHostedService(services => services.GetRequiredService<LiveBots>());
 builder.Services.AddSingleton<DensityScreener>();
@@ -110,6 +114,35 @@ api.MapPost("/scanner/{id:guid}/continuous", (Guid id, ScanContinuous request, M
 api.MapPost("/scanner/{id:guid}/stop", (Guid id, MarketScanner scanner) => scanner.Stop(id.ToString())
     ? Results.Accepted("/api/v1/scanner", new { id = id.ToString() })
     : Results.Problem(statusCode: 409, title: "Сканер уже сменился. Обновите состояние перед остановкой."));
+// Exchange keys: entered by the user, kept encrypted on this computer, never sent back; checked by asking for the balance.
+api.MapGet("/exchange/keys", (ExchangeCredentials credentials, IConfiguration configuration) => Results.Ok(new
+{
+    testnet = credentials.Status(ExchangeModes.Testnet),
+    liveAllowed = ExchangeModes.Allowed(configuration, ExchangeModes.Live),
+}));
+api.MapPost("/exchange/keys", async (ExchangeKeysInput input, ExchangeCredentials credentials, ExchangeHttp http, IConfiguration configuration, CancellationToken ct) =>
+{
+    if (!ExchangeModes.Allowed(configuration, input.Mode)) return Results.Problem(statusCode: 400, title: "Ключи реального счёта пока не принимаются: сначала тестовая сеть.");
+    if (string.IsNullOrWhiteSpace(input.ApiKey) || string.IsNullOrWhiteSpace(input.ApiSecret) || input.ApiKey.Length > 200 || input.ApiSecret.Length > 200)
+        return Results.Problem(statusCode: 400, title: "Укажите API-ключ и секрет.");
+    try
+    {
+        var client = new BinanceFuturesClient(http.Client, ExchangeModes.BaseUrl(configuration, input.Mode), input.ApiKey.Trim(), input.ApiSecret.Trim());
+        await client.SyncTimeAsync(ct);
+        var balance = await client.BalanceAsync(ct);
+        credentials.Save(input.Mode, input.ApiKey, input.ApiSecret);
+        return Results.Ok(new { status = credentials.Status(input.Mode), balance });
+    }
+    catch (ExchangeException e) { return Results.Problem(statusCode: 400, title: $"Ключи не подошли: {e.Message}"); }
+    catch (Exception e) when (e is HttpRequestException or TaskCanceledException) { return Results.Problem(statusCode: 503, title: "Биржа не отвечает. Ключи не сохранены."); }
+});
+api.MapDelete("/exchange/keys/{mode}", (string mode, ExchangeCredentials credentials) =>
+    credentials.Delete(mode) ? Results.NoContent() : Results.Problem(statusCode: 404, title: "Ключей нет."));
+api.MapGet("/bots/{id:guid}/exchange", async (Guid id, PaperRunStore runs, CancellationToken ct) =>
+{
+    var run = (await runs.SignalRunsAsync(id.ToString(), ct)).FirstOrDefault();
+    return Results.Ok(run is null ? [] : await runs.ExchangeLogAsync(run.Id, 100, ct));
+});
 // Density screener: walls in the order books of every Binance USDT perpetual and what happens to them; it never trades.
 api.MapGet("/screener", (DensityScreener screener) => Results.Ok(screener.Snapshot()));
 api.MapPost("/screener/start", (DensityScreener screener) => screener.Start()

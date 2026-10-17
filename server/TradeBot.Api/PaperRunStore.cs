@@ -24,6 +24,8 @@ public sealed class PaperRunStore
             create.CommandText = """
                 CREATE TABLE IF NOT EXISTS signal_runs (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, started TEXT NOT NULL, body TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS signal_runs_bot ON signal_runs (bot_id, started);
+                CREATE TABLE IF NOT EXISTS exchange_log (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at INTEGER NOT NULL, body TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS exchange_log_run ON exchange_log (run_id, at);
                 """;
             create.ExecuteNonQuery();
         }
@@ -66,6 +68,44 @@ public sealed class PaperRunStore
             await using var reader = await command.ExecuteReaderAsync(ct);
             var result = new List<SignalRun>();
             while (await reader.ReadAsync(ct)) result.Add(JsonSerializer.Deserialize<SignalRun>(reader.GetString(0), Json)!);
+            return result.ToArray();
+        }
+        finally { gate.Release(); }
+    }
+
+    // The exchange journal of a run: real orders and their results (ExchangeExecutor).
+    public async Task AppendExchangeLogAsync(ExchangeLogEntry entry, CancellationToken ct)
+    {
+        await gate.WaitAsync(ct);
+        try
+        {
+            await using var connection = new SqliteConnection(connectionString);
+            await connection.OpenAsync(ct);
+            using var command = connection.CreateCommand();
+            command.CommandText = "INSERT INTO exchange_log (run_id, at, body) VALUES ($run, $at, $body)";
+            command.Parameters.AddWithValue("$run", entry.RunId);
+            command.Parameters.AddWithValue("$at", entry.AtMs);
+            command.Parameters.AddWithValue("$body", JsonSerializer.Serialize(entry, Json));
+            await command.ExecuteNonQueryAsync(ct);
+        }
+        finally { gate.Release(); }
+    }
+
+    // Newest first.
+    public async Task<ExchangeLogEntry[]> ExchangeLogAsync(string runId, int limit, CancellationToken ct)
+    {
+        await gate.WaitAsync(ct);
+        try
+        {
+            await using var connection = new SqliteConnection(connectionString);
+            await connection.OpenAsync(ct);
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT body FROM exchange_log WHERE run_id = $run ORDER BY id DESC LIMIT $limit";
+            command.Parameters.AddWithValue("$run", runId);
+            command.Parameters.AddWithValue("$limit", limit);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            var result = new List<ExchangeLogEntry>();
+            while (await reader.ReadAsync(ct)) result.Add(JsonSerializer.Deserialize<ExchangeLogEntry>(reader.GetString(0), Json)!);
             return result.ToArray();
         }
         finally { gate.Release(); }

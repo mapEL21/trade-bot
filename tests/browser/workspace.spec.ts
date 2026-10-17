@@ -325,3 +325,118 @@ test('a live run shows the coins the bot watches and the positions it holds', as
   await expect(panel).toContainText('KAVAUSDT лонг от 0.0681, сейчас 0.0684 — отскок от плотности');
   expect((await new AxeBuilder({ page }).include('.signal-run').analyze()).violations).toEqual([]);
 });
+
+test('testnet keys are entered in a panel and a testnet run shows its orders on the exchange', async ({
+  page,
+}) => {
+  const bots = await server(page);
+  bots[0].status = 'running';
+  let configured = false;
+  let saved: { mode: string; apiKey: string; apiSecret: string } | null = null;
+  await page.route('**/api/v1/exchange/keys', (route) => {
+    if (route.request().method() === 'POST') {
+      saved = route.request().postDataJSON();
+      configured = true;
+      return route.fulfill({ json: { balance: 5000 } });
+    }
+    return route.fulfill({
+      json: {
+        testnet: {
+          mode: 'testnet',
+          configured,
+          keyEnd: configured ? 'WXYZ' : null,
+          savedUtc: null,
+        },
+        liveAllowed: false,
+      },
+    });
+  });
+  await page.route('**/api/v1/bots/*/exchange', (route) =>
+    route.fulfill({
+      json: [
+        {
+          runId: 'r',
+          atMs: Date.now(),
+          symbol: 'KAVAUSDT',
+          action: 'защитный стоп',
+          side: 'SELL',
+          quantity: 0,
+          price: 0.0675,
+          clientId: 'tb-s',
+          status: 'NEW',
+          message: 'стоп за уровнем отмены',
+        },
+      ],
+    }),
+  );
+  await page.route('**/api/v1/bots/*/signal', (route) =>
+    route.fulfill({
+      json: [
+        {
+          run: {
+            id: 'r',
+            botId: bots[0].id,
+            fromMs: Date.now() - 3600000,
+            toMs: null,
+            startedUtc: new Date().toISOString(),
+            budget: 20,
+            lossLimit: 2,
+            parameters: bots[0].signal,
+            live: true,
+            execution: 'testnet',
+          },
+          state: 'running',
+          result: {
+            trades: [],
+            skipped: {},
+            signals: 0,
+            incomplete: 0,
+            deposit: 20,
+            recordings: 1,
+            lastDataMs: Date.now(),
+            entriesBlocked: null,
+            pending: 0,
+            unrealized: 0,
+          },
+          live: {
+            watching: [],
+            open: [],
+            segment: '20261018T100000Z',
+            exchange: [
+              {
+                symbol: 'KAVAUSDT',
+                side: 'long',
+                quantity: 1470,
+                entry: 0.0681,
+                stopPrice: 0.0675,
+                openedMs: Date.now(),
+              },
+            ],
+            exchangeProblem: null,
+          },
+        },
+      ],
+    }),
+  );
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Боты/ }).first().click();
+  await page
+    .getByRole('button', { name: /Вынос цены · 5 мин/ })
+    .first()
+    .click();
+  await expect(page.getByText('ТЕСТОВАЯ СЕТЬ', { exact: true })).toBeVisible();
+  await expect(page.getByText('KAVAUSDT лонг 1470 от 0.0681, защитный стоп 0.0675')).toBeVisible();
+  await expect(page.getByRole('region', { name: /Заявки на бирже/ })).toContainText(
+    'стоп за уровнем отмены',
+  );
+  const keys = page.locator('.exchange-keys');
+  await expect(keys).toContainText('ключей нет');
+  await keys.locator('summary').click();
+  await keys.getByLabel('API-ключ').fill('test-key-WXYZ');
+  await keys.getByLabel('Секрет').fill('test-secret');
+  await keys.getByRole('button', { name: 'Сохранить и проверить' }).click();
+  await expect(keys.getByRole('status')).toContainText('Баланс тестового счёта: 5');
+  await expect(keys).toContainText('ключи сохранены (…WXYZ)');
+  expect(saved).toEqual({ mode: 'testnet', apiKey: 'test-key-WXYZ', apiSecret: 'test-secret' });
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});

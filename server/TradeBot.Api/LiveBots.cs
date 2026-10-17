@@ -99,14 +99,15 @@ public sealed class BinanceLiveFeed(ILogger<BinanceLiveFeed> logger) : ILiveFeed
 
 // What a live run shows: the coins the bot watches now (with the screener's wall on each) and the positions it holds.
 public sealed record LiveWatch(string Symbol, int Side, decimal Wall, decimal DistancePct);
-public sealed record LiveView(LiveWatch[] Watching, EnginePosition[] Open, string? Segment);
+// Exchange: real positions on the exchange (testnet runs) and why orders cannot go there, if they cannot.
+public sealed record LiveView(LiveWatch[] Watching, EnginePosition[] Open, string? Segment, ExchangeHolding[]? Exchange = null, string? ExchangeProblem = null);
 
 // Live density bots: for every running live run the screener's walls near the price (within 1.5%) pick the coins to
 // watch; their live stream goes to the run's engine and, line by line, into the run's recording in data/live/<run>/<start>.
 // The engine is the same as for recordings, so a run computed again from its recording gives the same trades. Nothing is
 // sent to an exchange.
 public sealed class LiveBots(PaperRunStore store, DensityScreener screener, IDepthSource source, ILiveFeed feed, IConfiguration configuration,
-    IHostEnvironment environment, ILogger<LiveBots> logger) : IHostedService, IDisposable
+    IHostEnvironment environment, ExchangeCredentials credentials, ExchangeHttp http, ILogger<LiveBots> logger) : IHostedService, IDisposable
 {
     public const decimal WatchPct = 1.5m;
     public const int MaxWatched = 10;
@@ -122,6 +123,9 @@ public sealed class LiveBots(PaperRunStore store, DensityScreener screener, IDep
         public readonly Dictionary<string, LiveWatch> Watching = new(StringComparer.Ordinal);
         public string Screened = "";
         public readonly object Gate = new();
+        // Testnet runs: the engine's decisions also go to the exchange as orders.
+        public ExchangeExecutor? Executor;
+        public string? ExchangeProblem;
 
         public void Write(CaptureEvent item)
         {
@@ -181,13 +185,21 @@ public sealed class LiveBots(PaperRunStore store, DensityScreener screener, IDep
     private async Task SyncOnce(CancellationToken ct)
     {
         var running = (await store.SignalRunsAsync(null, ct)).Where(r => r.Live && r.ToMs is null).ToDictionary(r => r.Id);
-        List<Session> current;
+        List<Session> current, closing;
         lock (gate)
         {
-            foreach (var id in sessions.Keys.Where(id => !running.ContainsKey(id)).ToList()) Close(id);
+            closing = sessions.Where(x => !running.ContainsKey(x.Key)).Select(x => x.Value).ToList();
+            foreach (var session in closing) sessions.Remove(session.Run.Id);
             foreach (var run in running.Values.Where(r => !sessions.ContainsKey(r.Id))) sessions[run.Id] = Open(run);
             current = sessions.Values.ToList();
         }
+        // A stopped testnet run closes its positions on the exchange before the session ends.
+        foreach (var session in closing)
+        {
+            if (session.Executor is { } executor) await executor.FlattenAndStopAsync();
+            Close(session);
+        }
+        foreach (var session in current) session.Executor?.Reconcile();
         var walls = screener.Snapshot().Walls;
         foreach (var session in current) await Follow(session, walls, ct);
     }
@@ -199,17 +211,28 @@ public sealed class LiveBots(PaperRunStore store, DensityScreener screener, IDep
         File.WriteAllText(Path.Combine(directory, "manifest.json"), JsonSerializer.Serialize(new { live = true, run = run.Id, symbols = Array.Empty<object>(), liquidations = false }));
         var writer = new StreamWriter(Path.Combine(directory, StorageHousekeeper.Events), append: true, new UTF8Encoding(false)) { AutoFlush = true };
         logger.LogInformation("Live session {Run} started in {Directory}", run.Id, directory);
-        return new(run, directory, writer);
+        var session = new Session(run, directory, writer);
+        if (run.Execution != SignalRun.Simulation)
+        {
+            if (!ExchangeModes.Allowed(configuration, run.Execution)) session.ExchangeProblem = "Этот режим исполнения не разрешён: заявки не отправляются.";
+            else if (credentials.Load(run.Execution) is not { } keys) session.ExchangeProblem = "Нет API-ключей: заявки не отправляются.";
+            else
+            {
+                var client = new BinanceFuturesClient(http.Client, ExchangeModes.BaseUrl(configuration, run.Execution), keys.Key, keys.Secret);
+                session.Executor = new ExchangeExecutor(client, run, store, logger);
+                session.Engine.Intent += session.Executor.Enqueue;
+            }
+        }
+        return session;
     }
 
-    private void Close(string id)
+    private void Close(Session session)
     {
-        var session = sessions[id];
-        sessions.Remove(id);
         lock (session.Gate)
         {
             foreach (var symbol in session.Watching.Keys) Release(symbol);
             session.Writer.Dispose();
+            session.Executor?.Dispose();
             File.WriteAllText(Path.Combine(session.Directory, "summary.json"), JsonSerializer.Serialize(new { completedUtc = DateTimeOffset.UtcNow }));
         }
     }
@@ -285,13 +308,17 @@ public sealed class LiveBots(PaperRunStore store, DensityScreener screener, IDep
         if (session is null) return null;
         lock (session.Gate)
             return (session.Directory, session.Engine.Current(Path.GetFileName(session.Directory)),
-                new LiveView(session.Watching.Values.OrderBy(w => w.DistancePct).ToArray(), session.Engine.Open(), Path.GetFileName(session.Directory)));
+                new LiveView(session.Watching.Values.OrderBy(w => w.DistancePct).ToArray(), session.Engine.Open(), Path.GetFileName(session.Directory),
+                    session.Executor?.Holdings(), session.ExchangeProblem));
     }
 
     public async Task StopAsync(CancellationToken ct)
     {
         Cancellation.Cancel(shutdown);
-        lock (gate) foreach (var id in sessions.Keys.ToList()) Close(id);
+        List<Session> all;
+        lock (gate) { all = sessions.Values.ToList(); sessions.Clear(); }
+        // On shutdown real positions keep their protective stops on the exchange; the bot reports them after a restart.
+        foreach (var session in all) Close(session);
         foreach (var task in new[] { loop, stream }.OfType<Task>())
             try { await task.WaitAsync(ct); } catch (OperationCanceledException) { }
     }
