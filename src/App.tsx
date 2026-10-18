@@ -141,19 +141,27 @@ export default function App() {
   }, []);
   // While a simulation runs, keep bot statuses current without the loading indicator.
   const anyActive = workspace.bots.some((b) => b.status === 'running');
-  // Whether the data recording runs, for the indicator next to the Laboratory in the menu.
-  const [recording, setRecording] = useState(false);
+  // What of the Laboratory works right now (data recording, processing of recordings, the density screener), for the
+  // indicator next to it in the menu.
+  const [labWork, setLabWork] = useState<string[]>([]);
   useEffect(() => {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
-      try {
-        const s = await api.scanner();
-        if (!stopped) setRecording(s.state === 'starting' || s.state === 'scanning');
-      } catch {
-        if (!stopped) setRecording(false);
-      }
-      if (!stopped) timer = setTimeout(poll, 15000);
+      const [scanner, lab, screener] = await Promise.allSettled([
+        api.scanner(),
+        api.labStatus(),
+        api.screener(),
+      ]);
+      const work: string[] = [];
+      if (scanner.status === 'fulfilled' && ['starting', 'scanning'].includes(scanner.value.state))
+        work.push('запись данных');
+      if (lab.status === 'fulfilled' && lab.value.state === 'running')
+        work.push('обработка записей');
+      if (screener.status === 'fulfilled' && ['starting', 'running'].includes(screener.value.state))
+        work.push('скринер плотностей');
+      if (!stopped) setLabWork(work);
+      if (!stopped) timer = setTimeout(poll, 10000);
     }
     void poll();
     return () => {
@@ -165,9 +173,9 @@ export default function App() {
     bots: anyActive
       ? { on: true, text: 'Есть работающие боты' }
       : { on: false, text: 'Ни один бот не запущен' },
-    scanner: recording
-      ? { on: true, text: 'Запись данных идёт' }
-      : { on: false, text: 'Запись данных не идёт' },
+    scanner: labWork.length
+      ? { on: true, text: `Работает: ${labWork.join(', ')}` }
+      : { on: false, text: 'Ничего не запущено' },
   };
   useEffect(() => {
     if (!anyActive) return;
