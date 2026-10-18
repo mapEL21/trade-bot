@@ -186,7 +186,7 @@ public sealed class SignalLabTests : IDisposable
         using var lab = new SignalLab(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Scanner:Path"] = root }).Build(),
             new Microsoft.Extensions.Hosting.Internal.HostingEnvironment { ContentRootPath = root },
             Microsoft.Extensions.Logging.Abstractions.NullLogger<SignalLab>.Instance);
-        var check = lab.Hypothesis();
+        var check = lab.Check(SignalLab.Hypotheses[0]);
         var spike = check.Signals.Single(x => x.Type == "Вынос цены");
         Assert.Equal((count, 50), (spike.Episodes, spike.Needed));
         Assert.Equal(count == 50 && good == 25 ? "rejected" : verdict == "confirmed" ? "confirmed" : "collecting", spike.Verdict);
@@ -194,6 +194,22 @@ public sealed class SignalLabTests : IDisposable
         Assert.Equal(("collecting", 0), (check.Signals.Single(x => x.Type == "Каскад ликвидаций").Verdict, check.Signals.Single(x => x.Type == "Каскад ликвидаций").Episodes));
         Assert.Equal(verdict, check.Verdict);
         Assert.Equal(.1m, check.FeePct);
+    }
+
+    [Fact]
+    public void TheSecondHypothesisCountsOnlyDataAfterTheRecordingsItWasChosenOnAndKeepsTheFirstInTheHistory()
+    {
+        var current = SignalLab.Hypotheses[^1];
+        Assert.Equal(2, current.Number);
+        // The last recording the choice was made on ended on 17.10.2026 at 09:27 MSK.
+        Assert.Equal(new DateTimeOffset(2026, 10, 17, 10, 0, 0, TimeSpan.FromHours(3)).ToUnixTimeMilliseconds(), current.FromMs);
+        Assert.Equal((100, ("Вынос цены", "follow", 60)), (current.Episodes, Assert.Single(current.Signals)));
+        using var lab = new SignalLab(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Scanner:Path"] = root }).Build(),
+            new Microsoft.Extensions.Hosting.Internal.HostingEnvironment { ContentRootPath = root },
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<SignalLab>.Instance);
+        var check = lab.Hypothesis();
+        Assert.Equal((2, "collecting", 100), (check.Number, check.Verdict, check.Signals[0].Needed));
+        Assert.Equal(1, Assert.Single(check.Previous!).Number);
     }
 
     public void Dispose() { if (Directory.Exists(root)) Directory.Delete(root, true); }

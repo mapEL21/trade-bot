@@ -441,7 +441,7 @@ function HypothesisPanel({ check }: { check: HypothesisCheck }) {
   return (
     <section className="panel hypothesis" aria-labelledby="hypothesis-title">
       <div className="section-line">
-        <h2 id="hypothesis-title">Проверка гипотезы</h2>
+        <h2 id="hypothesis-title">Проверка гипотезы{check.number ? ` № ${check.number}` : ''}</h2>
         <span className={`research-status ${verdictTone[check.verdict]}`}>
           {verdicts[check.verdict]}
         </span>
@@ -480,6 +480,17 @@ function HypothesisPanel({ check }: { check: HypothesisCheck }) {
         ))}
       </div>
       <p className="field-hint">{check.explanation}</p>
+      {check.previous?.map((p) => (
+        <p className="field-hint" key={p.number}>
+          Гипотеза № {p.number}: {p.statement.replace(/\.$/, '')} —{' '}
+          {verdicts[p.verdict].toLowerCase()}
+          {p.signals
+            .filter((s) => s.meanPct !== null)
+            .map((s) => ` · ${s.type.toLowerCase()}: ${pct(s.meanPct)} на ${s.episodes} эпизодах`)
+            .join('')}
+          .
+        </p>
+      ))}
     </section>
   );
 }

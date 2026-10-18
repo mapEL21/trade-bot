@@ -152,6 +152,19 @@ test('signal lab runs the recordings, ranks signals after fees and charts the ch
         signals: [signal('Вынос цены', 12, 0.4), signal('Каскад ликвидаций', 0, null)],
         verdict: 'collecting',
         explanation: 'Собираем данные: каждому сигналу нужно 50 эпизодов с начала проверки.',
+        number: 2,
+        previous: [
+          {
+            number: 1,
+            statement: 'Сделка на 5 минут даёт плюс.',
+            fromMs: 0,
+            feePct: 0.1,
+            hours: 19,
+            signals: [{ ...signal('Вынос цены', 171, -0.23), verdict: 'rejected' }],
+            verdict: 'rejected',
+            explanation: '',
+          },
+        ],
       },
     }),
   );
@@ -308,6 +321,10 @@ test('signal lab runs the recordings, ranks signals after fees and charts the ch
   await expect(hypothesis).toContainText('12 из 50');
   await expect(hypothesis).toContainText('пока +0,4% в среднем');
   await expect(hypothesis).toContainText('эпизодов пока нет');
+  await expect(hypothesis).toContainText('Проверка гипотезы № 2');
+  await expect(hypothesis).toContainText(
+    'Гипотеза № 1: Сделка на 5 минут даёт плюс — не подтвердилась · вынос цены: -0,23% на 171 эпизодах.',
+  );
   await page.getByRole('button', { name: 'Обработать новые записи' }).click();
   await expect(page.getByText('Устойчиво в плюсе после комиссий: 1')).toBeVisible();
   await expect(page.locator('.signal-lab [role="alert"]')).toHaveCount(0);

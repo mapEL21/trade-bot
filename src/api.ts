@@ -122,6 +122,9 @@ export interface HypothesisCheck {
   signals: HypothesisSignal[];
   verdict: Verdict;
   explanation: string;
+  number?: number;
+  // Earlier hypotheses and how they ended.
+  previous?: HypothesisCheck[] | null;
 }
 // Trading sessions by the UTC hour (TradingSessions on the server).
 export const tradingSessions: { id: string; name: string }[] = [

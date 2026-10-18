@@ -32,8 +32,12 @@ public static class TradingSessions
 // One signal of the pre-registered hypothesis and where its check stands: "collecting", "confirmed" or "rejected".
 public sealed record HypothesisSignal(string Type, string Mode, int Horizon, int Episodes, int Needed, decimal? MeanPct, decimal? WinRate,
     decimal? FirstHalf, decimal? SecondHalf, string Verdict);
+// Number: hypotheses are numbered in the order they were fixed; Previous: the earlier ones with their final state.
 public sealed record HypothesisCheck(string Statement, long FromMs, decimal FeePct, decimal Hours, HypothesisSignal[] Signals, string Verdict,
-    string Explanation);
+    string Explanation, int Number = 1, HypothesisCheck[]? Previous = null);
+// A hypothesis fixed in advance: the statement, the moment from which data counts (later than anything it was chosen on), the
+// episodes each signal needs and the signals (type, direction, holding time).
+public sealed record HypothesisDefinition(int Number, string Statement, long FromMs, int Episodes, (string Type, string Mode, int Horizon)[] Signals);
 
 // The signal lab: runs every finished scanner recording through SignalDetector once (the result is kept next to the recording
 // as signal-lab-v1.json) and then sums up, for every event type, both trading directions and every horizon, what the trade
@@ -218,10 +222,23 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
     // The verdict rule was fixed at the same time: each signal needs 50 episodes from the start moment; then it is confirmed when
     // the mean after fees is above zero on the whole and on both halves, otherwise rejected. Changing these after seeing the
     // result would make the check worthless.
+    // Result on 18.10.2026 (19 hours, 171 and 482 episodes): −0.23% and −0.18% after fees, rejected.
     public static readonly long HypothesisFromMs = new DateTimeOffset(2026, 10, 16, 0, 0, 0, TimeSpan.FromHours(3)).ToUnixTimeMilliseconds();
     public const int HypothesisEpisodes = 50;
     public const decimal HypothesisFee = 0.1m;
-    private static readonly (string Type, string Mode, int Horizon)[] HypothesisSignals = [("Вынос цены", "follow", 300), ("Каскад ликвидаций", "follow", 300)];
+
+    // The second one, fixed on 18 October 2026 after the first was rejected: across all 25 recorded hours the only row of the
+    // lab table in the plus after fees was the price spike, with the move, out after 60 s (+0.05% on 204 episodes, both halves
+    // in the plus). It was picked out of 80 rows on the same data, so it is checked only on data recorded after the last
+    // recording it was seen on (ended 17.10.2026 09:27 MSK). The edge is thin, so the rule asks for 100 episodes; the rest of the
+    // rule is the same: the mean after 0.1% fees above zero on the whole and on both halves.
+    public static readonly HypothesisDefinition[] Hypotheses =
+    [
+        new(1, "После выноса цены или каскада ликвидаций сделка по движению с удержанием 5 минут даёт плюс после комиссий 0,1%.",
+            HypothesisFromMs, HypothesisEpisodes, [("Вынос цены", "follow", 300), ("Каскад ликвидаций", "follow", 300)]),
+        new(2, "После выноса цены сделка по движению с выходом через 60 секунд даёт плюс после комиссий 0,1%.",
+            new DateTimeOffset(2026, 10, 17, 10, 0, 0, TimeSpan.FromHours(3)).ToUnixTimeMilliseconds(), 100, [("Вынос цены", "follow", 60)]),
+    ];
 
     // Recorded time from fromMs on, only the part inside the session when one is given (counted by the minute).
     private static long Span(LabRecording r, long from, string? session)
@@ -258,16 +275,20 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
                 n > 0 ? Math.Round(g.Sum(x => x.s.Above4) * 100m / n, 1) : 0, n > 0 ? Math.Round(g.Sum(x => x.s.Above10) * 100m / n, 1) : 0, g.Count());
         }).OrderByDescending(x => x.MeanBps).ToArray();
 
-    public HypothesisCheck Hypothesis()
+    // The current hypothesis, with the earlier ones and how they ended.
+    public HypothesisCheck Hypothesis() =>
+        Check(Hypotheses[^1]) with { Previous = Hypotheses[..^1].Reverse().Select(Check).ToArray() };
+
+    public HypothesisCheck Check(HypothesisDefinition h)
     {
-        var report = Report(HypothesisFee, HypothesisFromMs);
-        var signals = HypothesisSignals.Select(h =>
+        var report = Report(HypothesisFee, h.FromMs);
+        var signals = h.Signals.Select(s =>
         {
-            var row = report.Rows.Single(r => r.Type == h.Type && r.Mode == h.Mode && r.Horizon == h.Horizon);
+            var row = report.Rows.Single(r => r.Type == s.Type && r.Mode == s.Mode && r.Horizon == s.Horizon);
             var has = row.Episodes > 0;
-            var verdict = row.Episodes < HypothesisEpisodes ? "collecting"
+            var verdict = row.Episodes < h.Episodes ? "collecting"
                 : row.MeanPct > 0 && row.FirstHalf > 0 && row.SecondHalf > 0 ? "confirmed" : "rejected";
-            return new HypothesisSignal(h.Type, h.Mode, h.Horizon, row.Episodes, HypothesisEpisodes, has ? row.MeanPct : null,
+            return new HypothesisSignal(s.Type, s.Mode, s.Horizon, row.Episodes, h.Episodes, has ? row.MeanPct : null,
                 has ? row.WinRate : null, row.FirstHalf, row.SecondHalf, verdict);
         }).ToArray();
         var verdict = signals.Any(s => s.Verdict == "confirmed") ? "confirmed"
@@ -275,11 +296,10 @@ public sealed class SignalLab(IConfiguration configuration, IHostEnvironment env
         var explanation = verdict switch
         {
             "confirmed" => "Хотя бы один сигнал прошёл проверку на новых данных. Следующий шаг — бот в живой симуляции с размером от риска; это ещё не доказательство прибыли на реальном счёте.",
-            "rejected" => "Оба сигнала набрали нужные эпизоды и не прошли проверку: гипотеза не подтвердилась. Подгонять пороги под эти данные нельзя — нужна новая гипотеза и новые данные.",
-            _ => $"Собираем данные: каждому сигналу нужно {HypothesisEpisodes} эпизодов с начала проверки. Промежуточный результат при малом числе эпизодов почти случаен — выводов по нему не делаем.",
+            "rejected" => "Сигналы набрали нужные эпизоды и не прошли проверку: гипотеза не подтвердилась. Подгонять пороги под эти данные нельзя — нужна новая гипотеза и новые данные.",
+            _ => $"Собираем данные: каждому сигналу нужно {h.Episodes} эпизодов с начала проверки. Промежуточный результат при малом числе эпизодов почти случаен — выводов по нему не делаем.",
         };
-        return new("После выноса цены или каскада ликвидаций сделка по движению с удержанием 5 минут даёт плюс после комиссий 0,1%.",
-            HypothesisFromMs, HypothesisFee, report.Hours, signals, verdict, explanation);
+        return new(h.Statement, h.FromMs, HypothesisFee, report.Hours, signals, verdict, explanation, h.Number);
     }
 
     // Trades of one signal for the result chart: 100 USDT each, entry and exit at the recorded best prices.
