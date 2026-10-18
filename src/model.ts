@@ -48,7 +48,13 @@ export interface BotConfig {
   strategy: 'signal';
   strategyVersion: string;
   signal?: SignalParameters;
+  // Where the bot trades: virtual trades, Binance's demo account or the real account. A bot on an exchange takes the account
+  // balance as its deposit; its budget is then 100 and lossLimit is a percentage.
+  execution?: Execution;
 }
+export type Execution = 'simulation' | 'testnet' | 'live';
+export const onExchange = (c: { execution?: Execution }) =>
+  c.execution === 'testnet' || c.execution === 'live';
 export interface Trade {
   id: string;
   at: string;
@@ -83,6 +89,8 @@ export interface Bot extends BotConfig {
   createdAt: string;
   // Result of an open position if closed now, after fees; set by the server while a run holds one.
   unrealized?: number | null;
+  // Deposit of the latest run: for a bot on an exchange, the account balance when it started.
+  deposit?: number | null;
 }
 export interface Event {
   botId?: string;
@@ -212,6 +220,7 @@ export function validateConfig(value: unknown): BotConfig {
     'strategy',
     'strategyVersion',
     'signal',
+    'execution',
   ];
   if (Object.keys(v).some((k) => !allowed.includes(k)))
     throw new Error(
@@ -259,6 +268,19 @@ function validateSignalBot(v: Record<string, unknown>): BotConfig {
       new Set(p.sessions).size !== p.sessions.length)
   )
     throw new Error('Неизвестная торговая сессия.');
+  if (
+    v.execution !== undefined &&
+    !['simulation', 'testnet', 'live'].includes(v.execution as string)
+  )
+    throw new Error('Выберите, где торгует бот.');
+  if (onExchange(v as { execution?: Execution })) {
+    if (p.signal !== 'Плотность')
+      throw new Error(
+        'На бирже пока торгует только «Плотность»: у «Выноса цены» нет живого режима.',
+      );
+    if (v.budget !== 100)
+      throw new Error('У бота на бирже депозит — баланс счёта; лимит убытка задаётся в процентах.');
+  }
   return {
     name: (v.name as string).trim(),
     exchange: 'Binance',
@@ -277,10 +299,23 @@ function validateSignalBot(v: Record<string, unknown>): BotConfig {
       maxNotional: p.maxNotional,
       ...(p.sessions?.length ? { sessions: p.sessions } : {}),
     },
+    ...(v.execution === undefined || v.execution === 'simulation'
+      ? {}
+      : { execution: v.execution as Execution }),
   };
 }
 export function exportConfig(bot: Bot): string {
-  const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion, signal } = bot;
+  const {
+    name,
+    exchange,
+    symbol,
+    budget,
+    lossLimit,
+    strategy,
+    strategyVersion,
+    signal,
+    execution,
+  } = bot;
   return JSON.stringify(
     {
       schemaVersion: 1,
@@ -293,6 +328,7 @@ export function exportConfig(bot: Bot): string {
         strategy,
         strategyVersion,
         ...(signal ? { signal } : {}),
+        ...(execution && execution !== 'simulation' ? { execution } : {}),
       },
     },
     null,

@@ -59,7 +59,7 @@ public sealed record SignalRun(string Id, string BotId, long FromMs, long? ToMs,
 public sealed record SignalRunResult(BotTrade[] Trades, Dictionary<string, int> Skipped, int Signals, int Incomplete, decimal Deposit,
     int Recordings, long? LastDataMs, string? EntriesBlocked, int Pending = 0, decimal? Unrealized = null);
 public sealed record SignalRunView(SignalRun Run, SignalRunResult Result, string State, LiveView? Live = null);
-public sealed record SignalStart(long? FromMs = null, string Execution = SignalRun.Simulation);
+public sealed record SignalStart(long? FromMs = null);
 
 // The daily loss limit: the realized result of the Moscow calendar day; at a loss of DailyLossPct of the starting deposit new
 // trades wait for the next day. The money pass and the exchange executor share it.
@@ -76,8 +76,8 @@ public sealed class DailyLoss(decimal budget, decimal pct)
 
 // Bot runs: the engine goes through each finished recording of the run once per settings key (the result is cached next to
 // the recording as bot-<key>.json, computed in the background), then the money pass turns the trades into USDT in time order.
-public sealed class SignalBots(PaperRunStore store, SignalLab lab, LiveBots live, ExchangeCredentials credentials, IConfiguration configuration,
-    ILogger<SignalBots> logger) : IDisposable
+public sealed class SignalBots(PaperRunStore store, SignalLab lab, LiveBots live, ExchangeCredentials credentials, ExchangeHttp http,
+    IConfiguration configuration, ILogger<SignalBots> logger) : IDisposable
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private readonly object gate = new();
@@ -96,20 +96,42 @@ public sealed class SignalBots(PaperRunStore store, SignalLab lab, LiveBots live
         if (from < 0 || from > now) throw new ArgumentException("Начало — момент в прошлом или «сейчас».");
         if ((await store.SignalRunsAsync(bot.Id, ct)).Any(r => r.ToMs is null)) throw new InvalidOperationException("Бот уже работает.");
         var liveRun = request.FromMs is null && bot.Signal.Signal == SignalParameters.Density;
-        if (request.Execution != SignalRun.Simulation)
+        var (budget, lossLimit) = (bot.Budget, bot.LossLimit);
+        if (bot.OnExchange)
         {
-            if (!ExchangeModes.Allowed(configuration, request.Execution))
-                throw new ArgumentException(request.Execution == ExchangeModes.Live
-                    ? "Реальный счёт пока не включён: сначала проверка на тестовой сети."
+            if (!ExchangeModes.Allowed(configuration, bot.Execution))
+                throw new ArgumentException(bot.Execution == ExchangeModes.Live
+                    ? "Реальный счёт пока не включён: сначала проверка на демо-счёте."
                     : "Неизвестный режим исполнения.");
-            if (!liveRun) throw new ArgumentException("Заявки на биржу отправляет только живой режим: бот «Плотность», запуск с этого момента.");
+            if (!liveRun) throw new ArgumentException("Бот на бирже запускается только «с этого момента»: прошлые записи проходит бот-симуляция.");
             if (!live.Enabled) throw new ArgumentException("Живой режим выключен на этом компьютере: запустите приложение через «Запустить Trade Bot.cmd».");
-            if (credentials.Load(request.Execution) is null) throw new ArgumentException("Сначала сохраните API-ключи тестовой сети Binance.");
+            if (credentials.Load(bot.Execution) is not { } keys) throw new ArgumentException("Сначала сохраните API-ключи демо-счёта Binance.");
+            // The deposit is the account's balance now; the loss limit keeps its share of it.
+            ExchangeBalance balance;
+            try
+            {
+                var client = new BinanceFuturesClient(http.Client, ExchangeModes.BaseUrl(configuration, bot.Execution), keys.Key, keys.Secret);
+                await client.SyncTimeAsync(ct);
+                balance = await client.BalanceAsync(ct);
+            }
+            catch (Exception e) when (e is ExchangeException or HttpRequestException or TaskCanceledException)
+            {
+                throw new ArgumentException($"Не удалось узнать баланс счёта: {e.Message}");
+            }
+            if (balance.Wallet < SignalParameters.MinNotional) throw new ArgumentException($"На счёте {balance.Wallet:0.##} USDT: меньше минимальной заявки биржи.");
+            (budget, lossLimit) = ExchangeDeposit(bot, balance.Wallet);
         }
-        var run = new SignalRun(Guid.NewGuid().ToString(), bot.Id, from, null, DateTimeOffset.UtcNow, bot.Budget, bot.LossLimit, bot.Signal,
-            Live: liveRun, Execution: request.Execution);
+        var run = new SignalRun(Guid.NewGuid().ToString(), bot.Id, from, null, DateTimeOffset.UtcNow, budget, lossLimit, bot.Signal,
+            Live: liveRun, Execution: bot.Execution);
         await store.SaveSignalRunAsync(run, ct);
         return run;
+    }
+
+    // A bot on an exchange: the deposit is the account balance, the loss limit the same share of it as in the bot's settings.
+    public static (decimal Budget, decimal LossLimit) ExchangeDeposit(BotConfig bot, decimal balance)
+    {
+        var budget = Math.Round(balance, 2);
+        return (budget, Math.Round(budget * bot.LossLimit / bot.Budget, 2));
     }
 
     public async Task<bool> IsRunningAsync(string botId, CancellationToken ct) =>

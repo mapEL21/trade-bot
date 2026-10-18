@@ -258,15 +258,11 @@ export const api = {
   signalRuns: (bot: Bot, signal?: AbortSignal) =>
     request<SignalRunView[]>(`/bots/${bot.id}/signal`, { signal }),
   // fromMs: also replay the recordings since that moment; without it the bot trades from now on.
-  // execution: simulation (virtual trades) or testnet (orders on Binance's test network too).
-  startSignal: (
-    bot: Bot,
-    fromMs: number | null,
-    execution: 'simulation' | 'testnet' = 'simulation',
-  ) =>
+  // Where the bot trades is its own setting (execution); a run only chooses when it starts.
+  startSignal: (bot: Bot, fromMs: number | null) =>
     request<SignalRun>(`/bots/${bot.id}/signal/start`, {
       method: 'POST',
-      body: JSON.stringify(fromMs === null ? { execution } : { fromMs, execution }),
+      body: JSON.stringify(fromMs === null ? {} : { fromMs }),
     }),
   exchangeKeys: () => request<ExchangeKeys>('/exchange/keys'),
   saveExchangeKeys: (mode: string, apiKey: string, apiSecret: string) =>

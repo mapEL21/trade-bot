@@ -1,13 +1,22 @@
 namespace TradeBot.Api;
 
 // A bot trades one signal of the lab on every coin of the data recording; its Symbol is "*" and its settings are in Signal.
+// Execution — where it trades, chosen when the bot is created: simulation (virtual trades on the recordings and the live
+// stream), testnet (Binance's demo account) or live (the real account, closed until the user decides on it). A bot on an
+// exchange takes the account balance at its start as its deposit; its Budget is then 100 and LossLimit is a percentage of it.
 public record BotConfig(string Name, string Exchange, string Symbol, decimal Budget,
-    decimal LossLimit, string Strategy, string StrategyVersion, SignalParameters? Signal = null);
+    decimal LossLimit, string Strategy, string StrategyVersion, SignalParameters? Signal = null, string Execution = SignalRun.Simulation)
+{
+    public bool OnExchange => Execution != SignalRun.Simulation;
+}
 
 public sealed record Bot(string Id, string Name, string Exchange, string Symbol, decimal Budget,
-    decimal LossLimit, string Strategy, string StrategyVersion, string CreatedAt, long Revision, SignalParameters? Signal = null)
-    : BotConfig(Name, Exchange, Symbol, Budget, LossLimit, Strategy, StrategyVersion, Signal)
+    decimal LossLimit, string Strategy, string StrategyVersion, string CreatedAt, long Revision, SignalParameters? Signal = null,
+    string Execution = SignalRun.Simulation)
+    : BotConfig(Name, Exchange, Symbol, Budget, LossLimit, Strategy, StrategyVersion, Signal, Execution)
 {
+    // The deposit of the bot's latest run (for a bot on an exchange, the account balance when it started); null before any run.
+    public decimal? Deposit { get; init; }
     // draft, running or stopped; filled from the bot's runs when the workspace is read.
     public string Status { get; init; } = "draft";
     // Closed trades of the bot's runs, filled when the workspace is read; never real executions.
@@ -60,6 +69,15 @@ public sealed class StrategyCatalog
             errors["budget"] = ["Депозит бота должен быть от 1 до 1 000 000 USDT."];
         if (config.LossLimit <= 0 || config.LossLimit > config.Budget)
             errors["lossLimit"] = ["Лимит убытка должен быть больше нуля и не больше депозита."];
+        if (config.Execution is not (SignalRun.Simulation or ExchangeModes.Testnet or ExchangeModes.Live))
+            errors["execution"] = ["Выберите, где торгует бот: симуляция, демо-счёт или реальный счёт."];
+        else if (config.OnExchange)
+        {
+            // Orders go out only from the live mode, and only the density strategy has it so far.
+            if (config.Signal?.Signal != SignalParameters.Density)
+                errors["execution"] = ["На бирже пока торгует только «Плотность»: у «Выноса цены» нет живого режима."];
+            if (config.Budget != 100) errors["budget"] = ["У бота на бирже депозит — баланс счёта; лимит убытка задаётся в процентах."];
+        }
         return errors;
     }
 }

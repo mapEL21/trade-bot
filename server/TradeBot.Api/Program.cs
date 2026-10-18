@@ -201,7 +201,8 @@ api.MapGet("/workspace", async (IWorkspaceStore store, PaperRunStore runs, Signa
             {
                 Status = own.Any(r => r.ToMs is null) ? "running" : own.Length > 0 ? "stopped" : "draft",
                 Trades = results.SelectMany(r => r.Trades).OrderBy(t => t.At, StringComparer.Ordinal).TakeLast(10000).ToArray(),
-                Unrealized = results.Where(r => r.Unrealized is not null).Select(r => r.Unrealized).FirstOrDefault()
+                Unrealized = results.Where(r => r.Unrealized is not null).Select(r => r.Unrealized).FirstOrDefault(),
+                Deposit = own.FirstOrDefault()?.Budget
             };
         }).ToArray()
     });

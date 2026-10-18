@@ -226,6 +226,34 @@ test('create, export, import and delete a bot on the server', async ({ page }) =
   expect(bots.some((b) => b.name === 'Импортированный бот')).toBe(false);
 });
 
+test('where a bot trades is chosen when it is created: on the demo account the deposit is the balance', async ({
+  page,
+}) => {
+  const bots = await server(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Создать бота', exact: true }).first().click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('Название бота').fill('Плотность на демо');
+  await dialog.getByLabel('Где торгует').selectOption('testnet');
+  await expect(dialog.getByLabel('Депозит бота, USDT')).toHaveCount(0);
+  await expect(dialog.getByText('Депозит — баланс счёта в момент запуска')).toBeVisible();
+  await dialog.getByLabel('Лимит убытка, % депозита').fill('10');
+  // A scroll of the long form (a click on the dialog itself, inside its box) keeps it open.
+  const box = (await dialog.boundingBox())!;
+  await page.mouse.click(box.x + box.width - 3, box.y + box.height / 2);
+  await expect(dialog).toBeVisible();
+  // The spike strategy has no live mode: the choice falls back to the simulation.
+  await dialog.getByLabel('Стратегия').selectOption('Вынос цены');
+  await expect(dialog.getByLabel('Где торгует')).toHaveValue('simulation');
+  await dialog.getByLabel('Стратегия').selectOption('Плотность');
+  await dialog.getByLabel('Где торгует').selectOption('testnet');
+  await dialog.getByRole('button', { name: 'Создать бота', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Плотность на демо' })).toBeVisible();
+  const created = bots.find((b) => b.name === 'Плотность на демо')!;
+  expect([created.execution, created.budget]).toEqual(['testnet', 100]);
+  await expect(page.getByText('демо-счёт Binance', { exact: true })).toBeVisible();
+});
+
 test('invalid imports are rejected before reaching the server', async ({ page }) => {
   const bots = await server(page);
   await page.goto('/');
@@ -331,6 +359,8 @@ test('testnet keys are entered in a panel and a testnet run shows its orders on 
 }) => {
   const bots = await server(page);
   bots[0].status = 'running';
+  bots[0].execution = 'testnet';
+  bots[0].deposit = 5010.5;
   let configured = false;
   let saved: { mode: string; apiKey: string; apiSecret: string } | null = null;
   await page.route('**/api/v1/exchange/keys', (route) => {
@@ -430,6 +460,7 @@ test('testnet keys are entered in a panel and a testnet run shows its orders on 
     .first()
     .click();
   await expect(page.getByText('ТЕСТОВАЯ СЕТЬ', { exact: true })).toBeVisible();
+  await expect(page.locator('.mode-pill').first()).toHaveText('ДЕМО-СЧЁТ');
   // Stopping a testnet run closes its positions on the exchange: the button says so and asks first.
   let stopped = false;
   await page.route('**/api/v1/bots/*/signal/stop', (route) => {

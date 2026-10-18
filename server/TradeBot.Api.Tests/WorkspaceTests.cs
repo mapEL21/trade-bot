@@ -110,6 +110,29 @@ public sealed class WorkspaceTests : IDisposable
     }
 
     [Fact]
+    public async Task WhereABotTradesIsChosenWhenItIsCreatedAndAnExchangeBotTakesTheAccountBalance()
+    {
+        using var factory = Factory();
+        using var client = Client(factory);
+        var demo = Valid with { Budget = 100, LossLimit = 10, Execution = ExchangeModes.Testnet };
+        var created = await client.PostAsJsonAsync("/api/v1/bots", demo);
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var bot = (await created.Content.ReadFromJsonAsync<Bot>())!;
+        Assert.Equal(ExchangeModes.Testnet, bot.Execution);
+        // Only the density strategy has the live mode that sends orders; an exchange bot's deposit is the balance.
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots",
+            demo with { Signal = new SignalParameters(SignalParameters.Spike) })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", demo with { Budget = 500 })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/v1/bots", Valid with { Execution = "elsewhere" })).StatusCode);
+        // A run from a past moment is a simulation's job.
+        var past = await client.PostAsJsonAsync($"/api/v1/bots/{bot.Id}/signal/start", new SignalStart(DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeMilliseconds()));
+        Assert.Equal(HttpStatusCode.BadRequest, past.StatusCode);
+        // 5000 USDT on the demo account and a 10% limit: the run trades 5000 with a 500 USDT limit.
+        Assert.Equal((5000m, 500m), SignalBots.ExchangeDeposit(demo, 5000));
+        Assert.Equal(SignalRun.Simulation, Valid.Execution);
+    }
+
+    [Fact]
     public async Task BotsOfRemovedStrategiesStayInTheDatabaseButAreNotShown()
     {
         // A leader-lag bot saved by an older version of the application.

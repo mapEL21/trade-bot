@@ -1,6 +1,7 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
 import { Play, Square } from 'lucide-react';
 import { api, tradingSessions, type ExchangeKeys, type SignalRunView } from './api';
+import { onExchange } from './model';
 import { ExchangeBalanceCard, ExchangeKeysPanel, ExchangeLog } from './ExchangePanel';
 import { SelectField } from './components';
 import {
@@ -98,7 +99,6 @@ export function SignalFields({
 export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => void }) {
   const [runs, setRuns] = useState<SignalRunView[] | null>(null);
   const [from, setFrom] = useState('');
-  const [execution, setExecution] = useState<'simulation' | 'testnet'>('simulation');
   const [keys, setKeys] = useState<ExchangeKeys | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -141,8 +141,9 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
   const current = runs?.[0];
   const result = current?.result;
   const density = bot.signal?.signal === 'Плотность';
+  const exchangeBot = onExchange(bot);
   const live = current?.state === 'running' && current.run.live;
-  const onExchange = current?.state === 'running' && current.run.execution === 'testnet';
+  const closesOnExchange = current?.state === 'running' && current.run.execution === 'testnet';
   const skipped = Object.entries(result?.skipped ?? {}).sort((a, b) => b[1] - a[1]);
   return (
     <section className="panel paper-run signal-run" aria-labelledby="signal-run-title">
@@ -157,8 +158,8 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
         {density
           ? 'С этого момента бот работает вживую: монеты, у которых скринер нашёл плотность ближе 1,5% к цене, подключаются к потоку сделок и стакана, и бот решает по каждой сделке. С датой в прошлом он проходит прошлые записи данных.'
           : 'Бот проходит каждую завершённую запись рынка: новые сделки появляются после её окончания, примерно раз в час. С датой в прошлом он сначала пройдёт записи с этого момента.'}{' '}
-        {current?.state === 'running' && current.run.execution === 'testnet'
-          ? 'Решения уходят заявками в тестовую сеть Binance.'
+        {exchangeBot
+          ? 'Бот торгует на демо-счёте Binance: решения уходят заявками, депозит — баланс счёта при запуске.'
           : 'Сделки виртуальные: заявки на биржу не отправляются.'}{' '}
         Бот не входит по устаревшему стакану; после дневного лимита убытка новые сделки ждут
         следующего дня по Москве.
@@ -170,7 +171,7 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
             disabled={busy}
             onClick={() => {
               if (
-                onExchange &&
+                closesOnExchange &&
                 !window.confirm(
                   'Остановить бота и закрыть его позиции на бирже рыночными заявками? Заявки на его монетах будут сняты.',
                 )
@@ -179,44 +180,40 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
               void act(() => api.stopSignal(bot));
             }}
           >
-            <Square size={15} /> {onExchange ? 'Остановить и закрыть всё' : 'Остановить'}
+            <Square size={15} /> {closesOnExchange ? 'Остановить и закрыть всё' : 'Остановить'}
           </button>
         ) : (
           <>
             <button
               className="button primary"
-              disabled={busy}
-              onClick={() =>
-                void act(() => api.startSignal(bot, null, density ? execution : 'simulation'))
-              }
+              disabled={busy || (exchangeBot && !keys?.testnet.configured)}
+              onClick={() => void act(() => api.startSignal(bot, null))}
             >
               <Play size={16} /> Запустить с этого момента
             </button>
-            {density && (
-              <label className="field signal-execution">
-                <span>Исполнение</span>
-                <select
-                  value={execution}
-                  onChange={(e) => setExecution(e.target.value as 'simulation' | 'testnet')}
+            {exchangeBot ? (
+              !keys?.testnet.configured && (
+                <p className="field-hint">Сначала сохраните API-ключи демо-счёта в панели ниже.</p>
+              )
+            ) : (
+              <>
+                <label className="field signal-from">
+                  <span>Или с даты (по прошлым записям)</span>
+                  <input
+                    type="datetime-local"
+                    value={from}
+                    onChange={(e) => setFrom(e.target.value)}
+                  />
+                </label>
+                <button
+                  className="button secondary"
+                  disabled={busy || !from}
+                  onClick={() => void act(() => api.startSignal(bot, new Date(from).getTime()))}
                 >
-                  <option value="simulation">Симуляция (без заявок)</option>
-                  <option value="testnet" disabled={!keys?.testnet.configured}>
-                    Тестовая сеть Binance{keys?.testnet.configured ? '' : ' — нужны ключи'}
-                  </option>
-                </select>
-              </label>
+                  Запустить с даты
+                </button>
+              </>
             )}
-            <label className="field signal-from">
-              <span>Или с даты (по прошлым записям)</span>
-              <input type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} />
-            </label>
-            <button
-              className="button secondary"
-              disabled={busy || !from}
-              onClick={() => void act(() => api.startSignal(bot, new Date(from).getTime()))}
-            >
-              Запустить с даты
-            </button>
           </>
         )}
       </div>
@@ -317,14 +314,14 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
       {current?.run.execution === 'testnet' && (
         <ExchangeLog bot={bot} refresh={bot.trades.length + (runs?.length ?? 0)} />
       )}
-      {density && (
+      {exchangeBot && (
         <ExchangeBalanceCard
           refresh={
             bot.trades.length * 10 + (runs?.length ?? 0) * 2 + (keys?.testnet.configured ? 1 : 0)
           }
         />
       )}
-      {density && <ExchangeKeysPanel onChanged={setKeys} />}
+      {exchangeBot && <ExchangeKeysPanel onChanged={setKeys} />}
     </section>
   );
 }

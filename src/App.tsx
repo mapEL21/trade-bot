@@ -40,9 +40,11 @@ import {
   defaultSignalParameters,
   signalVersion,
   statusLabels,
+  onExchange,
   validateConfig,
   type Bot,
   type BotConfig,
+  type Execution,
   type Status,
   type Workspace,
 } from './model';
@@ -100,7 +102,9 @@ export default function App() {
   const now = Date.now();
   const trades = periodTrades(bot?.trades ?? allTrades, days, now);
   const stat = metrics(trades);
-  const budget = bot?.budget ?? workspace.bots.reduce((s, b) => s + b.budget, 0);
+  // A bot's deposit is that of its latest run (for a bot on an exchange, the account balance at the start).
+  const depositOf = (b: Bot) => b.deposit ?? b.budget;
+  const budget = bot ? depositOf(bot) : workspace.bots.reduce((s, b) => s + depositOf(b), 0);
   // Allocated balance plus every closed simulated trade so far, whatever the period shown.
   const balance = budget + metrics(bot?.trades ?? allTrades).pnl;
   // Open simulated positions right now: the bot's, or the sum over all bots on the overview.
@@ -141,6 +145,7 @@ export default function App() {
   }, []);
   // While a simulation runs, keep bot statuses current without the loading indicator.
   const anyActive = workspace.bots.some((b) => b.status === 'running');
+  const demoRunning = workspace.bots.some((b) => b.status === 'running' && onExchange(b));
   // What of the Laboratory works right now (data recording, processing of recordings, the density screener), for the
   // indicator next to it in the menu.
   const [labWork, setLabWork] = useState<string[]>([]);
@@ -364,10 +369,14 @@ export default function App() {
           <div className="topbar-right">
             <span
               className="mode-pill"
-              title="Реальные заявки не отправляются: боты торгуют виртуально по публичным данным"
+              title={
+                demoRunning
+                  ? 'Работает бот на демо-счёте Binance: заявки с ненастоящими деньгами'
+                  : 'Реальные заявки не отправляются: боты торгуют виртуально по публичным данным'
+              }
             >
               <FlaskConical size={13} />
-              СИМУЛЯЦИЯ
+              {demoRunning ? 'ДЕМО-СЧЁТ' : 'СИМУЛЯЦИЯ'}
             </span>
           </div>
         </header>
@@ -841,13 +850,44 @@ function ConfigForm({
     setForm(config);
     setError('');
   }, [config]);
+  const density = form.signal?.signal === 'Плотность';
+  const exchangeBot = onExchange(form);
+  // On an exchange the deposit is the account balance: the budget becomes 100 and the loss limit a percentage of it.
+  function setExecution(execution: Execution) {
+    if (onExchange({ execution }) === exchangeBot) return setForm({ ...form, execution });
+    const lossPct = (form.lossLimit / form.budget) * 100;
+    setForm(
+      onExchange({ execution })
+        ? {
+            ...form,
+            execution,
+            budget: 100,
+            lossLimit: Number.isFinite(lossPct) ? Math.round(lossPct * 10) / 10 : 30,
+          }
+        : { ...form, execution, budget: 100, lossLimit: form.lossLimit },
+    );
+  }
+  // Only the density strategy trades on an exchange so far.
+  useEffect(() => {
+    if (!density && exchangeBot) setForm((f) => ({ ...f, execution: 'simulation' }));
+  }, [density, exchangeBot]);
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (pending.current) return;
     pending.current = true;
     setSubmitting(true);
     try {
-      const { name, exchange, symbol, budget, lossLimit, strategy, strategyVersion, signal } = form;
+      const {
+        name,
+        exchange,
+        symbol,
+        budget,
+        lossLimit,
+        strategy,
+        strategyVersion,
+        signal,
+        execution,
+      } = form;
       await onSave(
         validateConfig({
           name,
@@ -858,6 +898,7 @@ function ConfigForm({
           strategy,
           strategyVersion,
           signal,
+          execution: execution ?? 'simulation',
         }),
       );
       setError('');
@@ -881,32 +922,68 @@ function ConfigForm({
           required
         />
       </label>
-      <div className="form-grid">
-        <label className="field">
-          <span>Депозит бота, USDT</span>
-          <input
-            type="number"
-            min="1"
-            max="1000000"
-            step="0.01"
-            value={Number.isNaN(form.budget) ? '' : form.budget}
-            onChange={(e) => setForm({ ...form, budget: e.target.valueAsNumber })}
-            required
-          />
-        </label>
-        <label className="field">
-          <span>Лимит убытка, USDT</span>
-          <input
-            type="number"
-            min="0.01"
-            max={form.budget}
-            step="0.01"
-            value={Number.isNaN(form.lossLimit) ? '' : form.lossLimit}
-            onChange={(e) => setForm({ ...form, lossLimit: e.target.valueAsNumber })}
-            required
-          />
-        </label>
-      </div>
+      <label className="field">
+        <span>Где торгует</span>
+        <select
+          value={form.execution ?? 'simulation'}
+          onChange={(e) => setExecution(e.target.value as Execution)}
+        >
+          <option value="simulation">Симуляция: виртуальные сделки, без биржи</option>
+          <option value="testnet" disabled={!density}>
+            Демо-счёт Binance: заявки с ненастоящими деньгами
+            {density ? '' : ' (только «Плотность»)'}
+          </option>
+          <option value="live" disabled>
+            Реальный счёт — после проверки на демо-счёте
+          </option>
+        </select>
+      </label>
+      {exchangeBot ? (
+        <div className="form-grid">
+          <p className="field-hint">
+            Депозит — баланс счёта в момент запуска; размер сделок считается от него.
+          </p>
+          <label className="field">
+            <span>Лимит убытка, % депозита</span>
+            <input
+              type="number"
+              min="0.1"
+              max="100"
+              step="0.1"
+              value={Number.isNaN(form.lossLimit) ? '' : form.lossLimit}
+              onChange={(e) => setForm({ ...form, lossLimit: e.target.valueAsNumber })}
+              required
+            />
+          </label>
+        </div>
+      ) : (
+        <div className="form-grid">
+          <label className="field">
+            <span>Депозит бота, USDT</span>
+            <input
+              type="number"
+              min="1"
+              max="1000000"
+              step="0.01"
+              value={Number.isNaN(form.budget) ? '' : form.budget}
+              onChange={(e) => setForm({ ...form, budget: e.target.valueAsNumber })}
+              required
+            />
+          </label>
+          <label className="field">
+            <span>Лимит убытка, USDT</span>
+            <input
+              type="number"
+              min="0.01"
+              max={form.budget}
+              step="0.01"
+              value={Number.isNaN(form.lossLimit) ? '' : form.lossLimit}
+              onChange={(e) => setForm({ ...form, lossLimit: e.target.valueAsNumber })}
+              required
+            />
+          </label>
+        </div>
+      )}
       {form.signal && <SignalFields form={form} setForm={setForm} />}
       {error && (
         <p id={errorId} className="form-error" role="alert">

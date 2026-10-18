@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { tradingSessions } from './api';
 import { SignalRunPanel } from './SignalBot';
-import { formatMoney, type Bot } from './model';
+import { formatMoney, onExchange, type Bot } from './model';
 
 // What each strategy adds to the common bot page. Everything else — statistics, balance, the result curve, trade
 // quality and trade history — is built from closed trades by TradeAnalysis.tsx and is the same for every strategy.
@@ -13,6 +13,11 @@ export interface StrategyView {
   facts: (bot: Bot) => { label: string; value: string }[];
   note: string;
 }
+const executionLabels = {
+  simulation: 'симуляция',
+  testnet: 'демо-счёт Binance',
+  live: 'реальный счёт Binance',
+} as const;
 const signal: StrategyView = {
   name: 'Сигнал лаборатории',
   live: (bot, onChanged) => <SignalRunPanel bot={bot} onChanged={onChanged} />,
@@ -22,7 +27,13 @@ const signal: StrategyView = {
     return [
       { label: 'Стратегия', value: `${p.signal} · v${bot.strategyVersion}` },
       { label: 'Вход и выход', value: 'по логике стратегии' },
-      { label: 'Депозит', value: `${formatMoney(bot.budget)} USDT` },
+      { label: 'Где торгует', value: executionLabels[bot.execution ?? 'simulation'] },
+      onExchange(bot)
+        ? {
+            label: 'Депозит · лимит убытка',
+            value: `баланс счёта${bot.deposit != null ? ` (${formatMoney(bot.deposit)} USDT)` : ''} · ${pct(bot.lossLimit)}`,
+          }
+        : { label: 'Депозит', value: `${formatMoney(bot.budget)} USDT` },
       { label: 'Риск на сделку', value: `${pct(p.riskPct)} депозита с комиссиями` },
       { label: 'Комиссии круга', value: pct(p.feePct) },
       { label: 'Плечо · сделок одновременно', value: `до ${p.maxLeverage}x · ${p.maxPositions}` },

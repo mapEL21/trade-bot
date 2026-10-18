@@ -1,4 +1,11 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react';
 import { ArrowDownToLine, Check, ChevronDown, CircleHelp, X } from 'lucide-react';
 import { formatMoney, net, type Trade } from './model';
 
@@ -15,6 +22,12 @@ export function Modal({
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
+  const pressedOutside = useRef(false);
+  const outside = (e: ReactMouseEvent<HTMLDialogElement>) => {
+    if (e.target !== e.currentTarget) return false;
+    const r = e.currentTarget.getBoundingClientRect();
+    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+  };
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     const dialog = ref.current;
@@ -31,8 +44,14 @@ export function Modal({
       className="modal"
       aria-labelledby={titleId}
       onCancel={onClose}
+      // Closes only on a press that starts and ends outside the window. A click on the dialog element itself also comes
+      // from its scrollbar and from a text selection released past an edge — those must not throw the form away.
+      onMouseDown={(e) => {
+        pressedOutside.current = outside(e);
+      }}
       onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (pressedOutside.current && outside(e)) onClose();
+        pressedOutside.current = false;
       }}
     >
       <div className="modal-inner">
