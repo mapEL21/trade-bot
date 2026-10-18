@@ -238,6 +238,9 @@ test('where a bot trades is chosen when it is created: on the demo account the d
   await expect(dialog.getByLabel('Депозит бота, USDT')).toHaveCount(0);
   await expect(dialog.getByText('Депозит — баланс счёта в момент запуска')).toBeVisible();
   await dialog.getByLabel('Лимит убытка, % депозита').fill('10');
+  // The fee comes from the account's tariff; the size is the strategy's, within the leverage.
+  await expect(dialog.getByLabel('Комиссии круга, %')).toHaveCount(0);
+  await expect(dialog.getByText('Комиссию бот берёт по тарифу счёта')).toBeVisible();
   // A scroll of the long form (a click on the dialog itself, inside its box) keeps it open.
   const box = (await dialog.boundingBox())!;
   await page.mouse.click(box.x + box.width - 3, box.y + box.height / 2);

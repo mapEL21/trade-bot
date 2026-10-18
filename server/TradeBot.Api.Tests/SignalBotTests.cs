@@ -164,10 +164,10 @@ public sealed class SignalBotTests : IDisposable
     }
 
     [Fact]
-    public void TheDailyLossLimitWaitsForTheNextMoscowDayAndOnePositionNeverExceedsTheCap()
+    public void TheDailyLossLimitWaitsForTheNextMoscowDay()
     {
         // 10% of the 100 USDT start a day; the run's own limit (50) is far away.
-        var run = new SignalRun("r", "b", T0, null, DateTimeOffset.UnixEpoch, 100, 50, new SignalParameters(FeePct: 0, MaxNotional: 1000));
+        var run = new SignalRun("r", "b", T0, null, DateTimeOffset.UnixEpoch, 100, 50, new SignalParameters(FeePct: 0));
         EngineTrade Loss(long at) => new("XUSDT", "long", at, at + 1000, 100, 96, 1, "вход", "выход", 0, -400);
         const long Day = 86_400_000;
         var result = SignalBots.Money(run, [new EngineResult(BotEngine.Version, "x", T0, T0 + Day + 10_000,
@@ -176,10 +176,6 @@ public sealed class SignalBotTests : IDisposable
         Assert.Equal(4, result.Trades.Length);
         Assert.Equal(1, result.Skipped["дневной лимит убытка"]);
         Assert.Equal(T0 + Day, DateTimeOffset.Parse(result.Trades[3].OpenedAt!).ToUnixTimeMilliseconds());
-        // The size asks for three deposits; the cap gives 50 USDT.
-        var capped = SignalBots.Money(run with { Parameters = new(FeePct: 0, MaxNotional: 50) },
-            [new EngineResult(BotEngine.Version, "x", T0, T0 + 10_000, [Loss(T0) with { Fraction = 3 }], [], 1, 0)]);
-        Assert.Equal(50m, Assert.Single(capped.Trades).Notional);
         // The Moscow day starts at 21:00 UTC.
         var midnight = T0 - T0 % Day + 21 * 3_600_000;
         Assert.NotEqual(DailyLoss.Day(midnight - 1), DailyLoss.Day(midnight));

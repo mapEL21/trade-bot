@@ -14,8 +14,6 @@ export interface SignalParameters {
   sessions?: string[];
   // Realized loss of a Moscow day, % of the starting deposit, after which new trades wait for the next day.
   dailyLossPct: number;
-  // Hard cap on one position, USDT.
-  maxNotional: number;
 }
 export const sessionIds = ['asia', 'europe', 'us', 'late'];
 export const strategies: { id: string; description: string }[] = [
@@ -37,7 +35,6 @@ export const defaultSignalParameters: SignalParameters = {
   maxLeverage: 20,
   maxPositions: 3,
   dailyLossPct: 10,
-  maxNotional: 100,
 };
 export interface BotConfig {
   name: string;
@@ -259,8 +256,6 @@ function validateSignalBot(v: Record<string, unknown>): BotConfig {
     throw new Error('Одновременных сделок — от 1 до 20.');
   if (!inRange(p.dailyLossPct, 1, 100))
     throw new Error('Дневной лимит убытка — от 1 до 100% начального депозита.');
-  if (!inRange(p.maxNotional, 5, 1_000_000))
-    throw new Error('Размер позиции — от 5 до 1 000 000 USDT.');
   if (
     p.sessions != null &&
     (!Array.isArray(p.sessions) ||
@@ -296,7 +291,6 @@ function validateSignalBot(v: Record<string, unknown>): BotConfig {
       maxLeverage: p.maxLeverage,
       maxPositions: p.maxPositions,
       dailyLossPct: p.dailyLossPct,
-      maxNotional: p.maxNotional,
       ...(p.sessions?.length ? { sessions: p.sessions } : {}),
     },
     ...(v.execution === undefined || v.execution === 'simulation'

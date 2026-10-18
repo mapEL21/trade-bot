@@ -63,16 +63,20 @@ export function SignalFields({
           ))}
         </SelectField>
         {number('Риск на сделку с комиссиями, % депозита', 'riskPct', 0.1, 5, 0.1)}
-        {number('Комиссии круга, %', 'feePct', 0, 1, 0.01)}
+        {!onExchange(form) && number('Комиссии круга, %', 'feePct', 0, 1, 0.01)}
         {number('Плечо не больше', 'maxLeverage', 1, maxLeverage, 1)}
         {number('Сделок одновременно', 'maxPositions', 1, 20, 1)}
         {number('Дневной лимит убытка, % начального депозита', 'dailyLossPct', 1, 100, 1)}
-        {number('Позиция не больше, USDT', 'maxNotional', 5, 1_000_000, 1)}
       </div>
       <p className="field-hint signal-example">
         {strategies.find((s) => s.id === p.signal)?.description} Вход и выход — по логике стратегии,
         у каждой сделки записана причина. Риск {num(p.riskPct)}% — потеря при отмене сценария вместе
-        с комиссиями: из него считается размер позиции.
+        с комиссиями: из него считается размер позиции, в пределах плеча.
+        {onExchange(form)
+          ? ' Комиссию бот берёт по тарифу счёта с биржи при каждом запуске.'
+          : ''}{' '}
+        Сделок одновременно — сколько монет бот держит сразу: при {p.maxPositions} сделках и риске{' '}
+        {num(p.riskPct)}% одновременно под риском до {num(p.maxPositions * p.riskPct)}% депозита.
       </p>
       <fieldset className="signal-sessions">
         <legend>Торговые сессии (ни одной — все часы)</legend>

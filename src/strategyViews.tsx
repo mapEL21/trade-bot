@@ -35,11 +35,14 @@ const signal: StrategyView = {
           }
         : { label: 'Депозит', value: `${formatMoney(bot.budget)} USDT` },
       { label: 'Риск на сделку', value: `${pct(p.riskPct)} депозита с комиссиями` },
-      { label: 'Комиссии круга', value: pct(p.feePct) },
+      {
+        label: 'Комиссии круга',
+        value: onExchange(bot) ? 'по тарифу счёта, с биржи при запуске' : pct(p.feePct),
+      },
       { label: 'Плечо · сделок одновременно', value: `до ${p.maxLeverage}x · ${p.maxPositions}` },
       {
-        label: 'Дневной лимит · позиция',
-        value: `${pct(p.dailyLossPct ?? 10)} депозита · до ${formatMoney(p.maxNotional ?? 100)} USDT`,
+        label: 'Дневной лимит убытка',
+        value: `${pct(p.dailyLossPct ?? 10)} начального депозита`,
       },
       {
         label: 'Сессии',

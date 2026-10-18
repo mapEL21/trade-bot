@@ -17,7 +17,7 @@ public sealed class ExchangeTests : IDisposable
     private readonly string root = Path.Combine(Path.GetTempPath(), "exchange-tests-" + Guid.NewGuid());
 
     private static readonly SignalRun Run = new("12345678-aaaa-bbbb-cccc-1234567890ab", "bot", 0, null, DateTimeOffset.UnixEpoch, 100, 30,
-        new SignalParameters(MaxLeverage: 20, MaxNotional: 1000), Live: true, Execution: ExchangeModes.Testnet);
+        new SignalParameters(MaxLeverage: 20), Live: true, Execution: ExchangeModes.Testnet);
 
     private (ExchangeExecutor Executor, FakeBinance Exchange, PaperRunStore Store) Executor(SignalRun? run = null)
     {
@@ -132,15 +132,12 @@ public sealed class ExchangeTests : IDisposable
     }
 
     [Fact]
-    public async Task ThePositionCapAndTheDailyLossLimitHoldOnTheExchange()
+    public async Task TheDailyLossLimitHoldsOnTheExchange()
     {
-        // A 40 USDT cap: the 250 USDT the risk asks for becomes 0.4 coins at 100, at 1× leverage.
-        var (executor, exchange, store) = Executor(Run with { Parameters = new SignalParameters(MaxLeverage: 20, MaxNotional: 40, DailyLossPct: 1) });
+        var (executor, exchange, store) = Executor(Run with { Parameters = new SignalParameters(MaxLeverage: 20, DailyLossPct: 1) });
         executor.Enqueue(Entry());
         await executor.DrainAsync();
-        Assert.Equal("0.400", exchange.Requests.First(r => r.Path == "/fapi/v1/order" && r.Method == "POST").Query["quantity"]);
-        Assert.Equal("1", exchange.Requests.Single(r => r.Path == "/fapi/v1/leverage").Query["leverage"]);
-        // A 1.2 USDT loss is over 1% of the 100 USDT start: the next entry today is not sent.
+        // A 7.5 USDT loss on 2.5 coins is over 1% of the 100 USDT start: the next entry today is not sent.
         exchange.Price = 97;
         executor.Enqueue(new("exit", "XUSDT", -1, 0, 0, 97, null, "выход"));
         executor.Enqueue(Entry());
@@ -164,10 +161,11 @@ public sealed class ExchangeTests : IDisposable
     }
 
     [Fact]
-    public async Task TheBalanceIsReadFromTheUsdtAsset()
+    public async Task TheBalanceAndTheFeeRateAreReadFromTheAccount()
     {
         var client = new BinanceFuturesClient(new HttpClient(new FakeBinance()), "https://testnet.example", "key", "secret");
         Assert.Equal(new ExchangeBalance(5010.5m, 5000.5m, 1.25m), await client.BalanceAsync(CancellationToken.None));
+        Assert.Equal(.0005m, await client.TakerFeeAsync(SignalBots.FeeSymbol, CancellationToken.None));
         // The test network is Binance's Demo Trading now.
         Assert.Equal("https://demo-fapi.binance.com", ExchangeModes.BaseUrl(new ConfigurationBuilder().Build(), ExchangeModes.Testnet));
     }

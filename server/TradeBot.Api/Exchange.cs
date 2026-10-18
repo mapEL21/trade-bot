@@ -189,6 +189,13 @@ public sealed class BinanceFuturesClient(HttpClient http, string baseUrl, string
             ["workingType"] = "MARK_PRICE", ["newClientOrderId"] = clientId,
         }, true, ct));
 
+    // The account's taker fee rate (0.0005 = 0.05%) on a coin.
+    public async Task<decimal> TakerFeeAsync(string symbol, CancellationToken ct)
+    {
+        using var doc = JsonDocument.Parse(await Send(HttpMethod.Get, "/fapi/v1/commissionRate", new() { ["symbol"] = symbol }, true, ct));
+        return Dec(doc.RootElement.GetProperty("takerCommissionRate"));
+    }
+
     // Every open order of the coin (stops left behind included).
     public async Task CancelAllAsync(string symbol, CancellationToken ct) =>
         await Send(HttpMethod.Delete, "/fapi/v1/allOpenOrders", new() { ["symbol"] = symbol }, true, ct);
@@ -388,8 +395,7 @@ public sealed class ExchangeExecutor : IDisposable
             return;
         }
         if (!rules.TryGetValue(intent.Symbol, out var r)) rules[intent.Symbol] = r = await client.RulesAsync(intent.Symbol, CancellationToken.None);
-        // The size the risk asks for, never above the bot's cap on one position.
-        var notional = Math.Min(Deposit * intent.Fraction, run.Parameters.MaxNotional);
+        var notional = Deposit * intent.Fraction;
         var quantity = Floor(notional / intent.Price, r.StepSize);
         if (quantity < r.MinQty || quantity * intent.Price < r.MinNotional)
         {
