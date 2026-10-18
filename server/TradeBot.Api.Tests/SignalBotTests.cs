@@ -176,6 +176,19 @@ public sealed class SignalBotTests : IDisposable
     }
 
     [Fact]
+    public void TheSixtySecondVariantLeavesAMinuteAfterTheEntry()
+    {
+        var m = new Market();
+        for (var t = 0; t < 400; t++) m.Second(t, 100);
+        for (var t = 400; t < 410; t++) m.Second(t, 100 + .4m * (t - 399));
+        // The price keeps going up: the stall rule would hold on, the variant leaves after 60 s anyway.
+        for (var t = 410; t < 520; t++) m.Second(t, 104 + .01m * (t - 410));
+        var trade = Assert.Single(m.Run(new SignalParameters(SignalParameters.Spike60)).Trades);
+        Assert.Equal("60 с после входа — выход по гипотезе № 2", trade.ExitReason);
+        Assert.InRange((trade.ClosedMs - trade.OpenedMs) / 1000, 60, 61);
+    }
+
+    [Fact]
     public void MoneyPassSizesFromTheDepositAtEntryAndStopsAtTheLossLimit()
     {
         var run = new SignalRun("r", "b", T0, null, DateTimeOffset.UnixEpoch, 100, 1.5m, new SignalParameters(FeePct: 0));

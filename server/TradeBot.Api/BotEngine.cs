@@ -66,7 +66,12 @@ public sealed class BotEngine
     public BotEngine(SignalParameters parameters, IReadOnlyDictionary<string, decimal> volumes, bool liquidations)
     {
         this.parameters = parameters;
-        strategy = parameters.Signal == SignalParameters.Spike ? new SpikeStrategy() : new DensityStrategy();
+        strategy = parameters.Signal switch
+        {
+            SignalParameters.Spike => new SpikeStrategy(),
+            SignalParameters.Spike60 => new SpikeStrategy(fixedExitMs: 60_000),
+            _ => new DensityStrategy(),
+        };
         detector = new SignalDetector(volumes, liquidations) { Detected = e => strategy.OnSignal(this, e) };
     }
 
@@ -206,15 +211,16 @@ public sealed class BotEngine
     }
 }
 
-// A forced price jerk: follow it while the forced flow lasts (docs/BOT_LOGIC.md, «Вынос цены»).
-public sealed class SpikeStrategy : IBotStrategy
+// A forced price jerk: follow it while the forced flow lasts (docs/BOT_LOGIC.md, «Вынос цены»). With fixedExitMs the exit is
+// that long after the entry instead (hypothesis No. 2: 60 s); the cancel level at the middle of the spike stays.
+public sealed class SpikeStrategy(long? fixedExitMs = null) : IBotStrategy
 {
     private sealed record Spike(decimal Middle);
     public const long StallMs = 60_000, HorizonMs = 300_000;
 
     public void OnSignal(BotEngine bot, LabEvent e)
     {
-        if (e.Type is "Вынос цены" or "Каскад ликвидаций" && bot.PositionOf(e.Symbol) is { Exiting: false } held && held.Side == -e.Direction)
+        if (fixedExitMs is null && e.Type is "Вынос цены" or "Каскад ликвидаций" && bot.PositionOf(e.Symbol) is { Exiting: false } held && held.Side == -e.Direction)
             bot.Close(held, e.AtMs, $"встречный сигнал: {e.Type.ToLowerInvariant()} в обратную сторону");
         if (e.Type != "Вынос цены") return;
         bot.CountSignal();
@@ -229,6 +235,11 @@ public sealed class SpikeStrategy : IBotStrategy
         if (p.Context is not Spike spike) return;
         var price = p.Side > 0 ? view.Bid : view.Ask;
         if (p.Side > 0 ? price <= spike.Middle : price >= spike.Middle) { bot.Close(p, ms, "импульс поглощён: цена вернулась к середине выноса"); return; }
+        if (fixedExitMs is { } hold)
+        {
+            if (ms - p.OpenedMs >= hold) bot.Close(p, ms, $"{hold / 1000} с после входа — выход по гипотезе № 2");
+            return;
+        }
         if (p.Side > 0 ? price > p.Extreme : price < p.Extreme) { p.Extreme = price; p.ExtremeMs = ms; }
         else if (ms - p.ExtremeMs >= StallMs) { bot.Close(p, ms, "движение выдохлось: 60 с без нового экстремума"); return; }
         if (ms - p.OpenedMs >= HorizonMs) bot.Close(p, ms, "горизонт гипотезы: 5 минут");

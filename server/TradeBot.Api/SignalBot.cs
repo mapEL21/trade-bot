@@ -14,8 +14,9 @@ namespace TradeBot.Api;
 public sealed record SignalParameters(string Signal = SignalParameters.Density, decimal RiskPct = 1.5m, decimal FeePct = .1m,
     int MaxLeverage = 20, int MaxPositions = 3, string[]? Sessions = null, decimal DailyLossPct = 10)
 {
-    public const string Density = "Плотность", Spike = "Вынос цены";
-    public static readonly string[] Strategies = [Density, Spike];
+    // Spike60: the price spike with the exit of hypothesis No. 2 — out 60 s after the entry (or at the cancel level).
+    public const string Density = "Плотность", Spike = "Вынос цены", Spike60 = "Вынос цены · 60 с";
+    public static readonly string[] Strategies = [Density, Spike, Spike60];
     public const decimal MinNotional = 5;
     public const int MaxLeverageLimit = 125;
 
