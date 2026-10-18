@@ -255,6 +255,9 @@ test('where a bot trades is chosen when it is created: on the demo account the d
   const created = bots.find((b) => b.name === 'Плотность на демо')!;
   expect([created.execution, created.budget]).toEqual(['testnet', 100]);
   await expect(page.getByText('демо-счёт Binance', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: /^Боты/ }).first().click();
+  const card = page.locator('.bot-card', { hasText: 'Плотность на демо' });
+  await expect(card).toContainText('Баланс · демо-счёт');
 });
 
 test('invalid imports are rejected before reaching the server', async ({ page }) => {

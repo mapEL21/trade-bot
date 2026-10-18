@@ -763,8 +763,8 @@ function BotCard({
   onDuplicate: () => void;
 }) {
   const stat = metrics(bot.trades);
-  // Every trade is simulated, so the card shows the simulated balance.
-  const balance = bot.budget + stat.pnl;
+  // The deposit of the latest run (for a bot on an exchange, the account balance at its start) plus the closed trades.
+  const balance = (bot.deposit ?? bot.budget) + stat.pnl;
   return (
     <article className="panel bot-card">
       <div className="bot-card-header">
@@ -803,7 +803,7 @@ function BotCard({
           <strong>{stat.count}</strong>
         </div>
         <div>
-          <span>{'Баланс · симуляция'}</span>
+          <span>{onExchange(bot) ? 'Баланс · демо-счёт' : 'Баланс · симуляция'}</span>
           <strong>
             {formatMoney(balance)} <small>USDT</small>
           </strong>
