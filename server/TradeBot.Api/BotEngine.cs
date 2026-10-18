@@ -39,7 +39,8 @@ public sealed class BotEngine
     // 3: no entry decided on a book older than BookAge.
     // 4: fee rules of 19.10.2026 (user's decision): no trade whose fees are over 30% of its risk, for every strategy; a break of
     // a density only when the coin's typical minute candle is at least three round-trip fees.
-    public const int Version = 4;
+    // 5: «Вынос цены · 60 с» as hypothesis No. 2 — cancelled only by the whole spike undone (decision of 19.10.2026).
+    public const int Version = 5;
     // A trade whose round-trip fees take more than this share of its risk is not opened: the stop is too close for the fees.
     public const decimal MaxFeeShare = .3m;
     public const long Latency = 250, BookAge = 2_000;
@@ -211,11 +212,12 @@ public sealed class BotEngine
     }
 }
 
-// A forced price jerk: follow it while the forced flow lasts (docs/BOT_LOGIC.md, «Вынос цены»). With fixedExitMs the exit is
-// that long after the entry instead (hypothesis No. 2: 60 s); the cancel level at the middle of the spike stays.
+// A forced price jerk: follow it while the forced flow lasts (docs/BOT_LOGIC.md, «Вынос цены»); cancelled at the middle of
+// the spike. With fixedExitMs it is hypothesis No. 2 as fixed in advance: out that long after the entry (60 s), and the only
+// other exit is the whole spike undone — the price back at its start, which also sets the size and the protective stop.
 public sealed class SpikeStrategy(long? fixedExitMs = null) : IBotStrategy
 {
-    private sealed record Spike(decimal Middle);
+    private sealed record Spike(decimal Cancel);
     public const long StallMs = 60_000, HorizonMs = 300_000;
 
     public void OnSignal(BotEngine bot, LabEvent e)
@@ -225,16 +227,20 @@ public sealed class SpikeStrategy(long? fixedExitMs = null) : IBotStrategy
         if (e.Type != "Вынос цены") return;
         bot.CountSignal();
         if (e.Origin is not { } origin || origin <= 0) { bot.Skip("неизвестно начало выноса"); return; }
-        var middle = (origin + e.Price) / 2;
-        var risk = Math.Abs(e.Price - middle) / e.Price * 100;
-        bot.Open(e.Symbol, e.Direction, e.AtMs, risk, $"вынос цены: {e.Detail}", new Spike(middle));
+        var cancel = fixedExitMs is null ? (origin + e.Price) / 2 : origin;
+        var risk = Math.Abs(e.Price - cancel) / e.Price * 100;
+        bot.Open(e.Symbol, e.Direction, e.AtMs, risk, $"вынос цены: {e.Detail}", new Spike(cancel));
     }
 
     public void Manage(BotEngine bot, BotEngine.Position p, CoinView view, long ms)
     {
         if (p.Context is not Spike spike) return;
         var price = p.Side > 0 ? view.Bid : view.Ask;
-        if (p.Side > 0 ? price <= spike.Middle : price >= spike.Middle) { bot.Close(p, ms, "импульс поглощён: цена вернулась к середине выноса"); return; }
+        if (p.Side > 0 ? price <= spike.Cancel : price >= spike.Cancel)
+        {
+            bot.Close(p, ms, fixedExitMs is null ? "импульс поглощён: цена вернулась к середине выноса" : "вынос отменён целиком: цена вернулась к его началу");
+            return;
+        }
         if (fixedExitMs is { } hold)
         {
             if (ms - p.OpenedMs >= hold) bot.Close(p, ms, $"{hold / 1000} с после входа — выход по гипотезе № 2");

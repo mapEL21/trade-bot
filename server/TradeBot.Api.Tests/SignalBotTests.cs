@@ -189,6 +189,30 @@ public sealed class SignalBotTests : IDisposable
     }
 
     [Fact]
+    public void TheSixtySecondVariantSitsOutAPullbackAndLeavesOnlyWhenTheWholeSpikeIsUndone()
+    {
+        static Market After(decimal price)
+        {
+            var m = new Market();
+            for (var t = 0; t < 400; t++) m.Second(t, 100);
+            for (var t = 400; t < 410; t++) m.Second(t, 100 + .4m * (t - 399));
+            for (var t = 410; t < 520; t++) m.Second(t, price);
+            return m;
+        }
+        // Back to 101, past the middle of the spike: the plain variant is out, the 60 s one holds to its minute.
+        Assert.Equal("импульс поглощён: цена вернулась к середине выноса",
+            Assert.Single(After(101).Run(new SignalParameters(SignalParameters.Spike)).Trades).ExitReason);
+        var held = Assert.Single(After(101).Run(new SignalParameters(SignalParameters.Spike60)).Trades);
+        Assert.Equal("60 с после входа — выход по гипотезе № 2", held.ExitReason);
+        // Below the start of the spike: undone.
+        var undone = Assert.Single(After(99.5m).Run(new SignalParameters(SignalParameters.Spike60)).Trades);
+        Assert.Equal("вынос отменён целиком: цена вернулась к его началу", undone.ExitReason);
+        // The risk reaches to the start of the spike, twice as far as the middle: half the size.
+        var plain = Assert.Single(After(104).Run(new SignalParameters(SignalParameters.Spike)).Trades);
+        Assert.True(held.Fraction < plain.Fraction * .75m);
+    }
+
+    [Fact]
     public void MoneyPassSizesFromTheDepositAtEntryAndStopsAtTheLossLimit()
     {
         var run = new SignalRun("r", "b", T0, null, DateTimeOffset.UnixEpoch, 100, 1.5m, new SignalParameters(FeePct: 0));
