@@ -24,9 +24,10 @@ public sealed class SignalBotTests : IDisposable
     private sealed class Market
     {
         public readonly List<CaptureEvent> Events = [];
-        public Market()
+        // high: the minute candles' high over a low of 100, so the coin's typical minute candle is high − 100 percent.
+        public Market(decimal high = 101)
         {
-            var klines = string.Join(',', Enumerable.Range(0, 62).Select(i => $"[{T0 - (62 - i) * 60_000},\"100\",\"101\",\"100\",\"100\",\"1\",0,\"100\",1,\"1\",\"100\",\"0\"]"));
+            var klines = string.Join(',', Enumerable.Range(0, 62).Select(i => $"[{T0 - (62 - i) * 60_000},\"100\",\"{S(high)}\",\"100\",\"100\",\"1\",0,\"100\",1,\"1\",\"100\",\"0\"]"));
             Events.Add(new(ScanRecorder.Rest, "history", "history", DateTimeOffset.UnixEpoch, 0,
                 $"{{\"symbol\":\"XUSDT\",\"interval\":\"1m\",\"klines\":[{klines}]}}"));
         }
@@ -54,11 +55,11 @@ public sealed class SignalBotTests : IDisposable
     }
 
     // A bid wall at 99.95 from the start; the price touches it, goes up 0.575% and comes back: one known bounce.
-    private static Market BounceSetup(out Dictionary<decimal, decimal> wall)
+    private static Market BounceSetup(out Dictionary<decimal, decimal> wall, decimal high = 101)
     {
         var w = new Dictionary<decimal, decimal> { [99.95m] = 100 };
         wall = w;
-        var m = new Market();
+        var m = new Market(high);
         for (var t = 0; t < 100; t++) m.Second(t, 100, w);
         for (var t = 100; t < 120; t++) m.Second(t, 100.5m, w);
         return m;
@@ -124,6 +125,33 @@ public sealed class SignalBotTests : IDisposable
         var result = m.Run(Density with { FeePct = .2m });
         Assert.Empty(result.Trades);
         Assert.Equal(1, result.Skipped["средний отскок меньше трёх комиссий"]);
+    }
+
+    [Fact]
+    public void ATradeWhoseFeesTakeOverAThirdOfItsRiskIsNotOpened()
+    {
+        // The bounce risks 0.125% (to the wall plus slippage); 0.06% fees would be 32% of the risk with them.
+        var m = BounceSetup(out var wall);
+        for (var t = 120; t < 140; t++) m.Second(t, 100, wall);
+        var result = m.Run(Density with { FeePct = .06m });
+        Assert.Empty(result.Trades);
+        Assert.Equal(1, result.Skipped["комиссия больше 30% риска"]);
+    }
+
+    [Fact]
+    public void ABreakIsNotFollowedWhenTheCoinsTypicalCandleIsUnderThreeFees()
+    {
+        // Typical minute candle 0.1%, under three 0.05% fees.
+        var m = BounceSetup(out var wall, high: 100.1m);
+        for (var t = 120; t < 125; t++) m.Second(t, 100, wall);
+        m.Events.Add(Market.Trade(T0 + 125_300, 99.95m, 60, false));
+        for (var t = 126; t < 130; t++) m.Second(t, 99.85m);
+        for (var t = 130; t < 175; t++) m.Second(t, 99.5m);
+        var result = m.Run(Density with { FeePct = .05m });
+        // The bounce is left before the break, but the break itself is not traded.
+        Assert.Equal("плотность проедают: осталось 40% — выход до пробоя", Assert.Single(result.Trades).ExitReason);
+        // Twice: the flip from the bounce, then the same eaten wall seen again once the coin is free.
+        Assert.Equal(2, result.Skipped["типичная свеча меньше трёх комиссий"]);
     }
 
     [Fact]

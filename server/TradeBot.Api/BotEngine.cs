@@ -37,7 +37,11 @@ public sealed class BotEngine
 {
     // 2: density bounce entry by price steps and the queue before the wall (user's rule of 18.10.2026), screener walls.
     // 3: no entry decided on a book older than BookAge.
-    public const int Version = 3;
+    // 4: fee rules of 19.10.2026 (user's decision): no trade whose fees are over 30% of its risk, for every strategy; a break of
+    // a density only when the coin's typical minute candle is at least three round-trip fees.
+    public const int Version = 4;
+    // A trade whose round-trip fees take more than this share of its risk is not opened: the stop is too close for the fees.
+    public const decimal MaxFeeShare = .3m;
     public const long Latency = 250, BookAge = 2_000;
 
     public sealed class Position(string symbol, int side, decimal fraction, string entryReason, object? context)
@@ -150,6 +154,7 @@ public sealed class BotEngine
         var entries = orders.Where(o => !o.Exit).ToList();
         if (open.Count + entries.Count >= parameters.MaxPositions) { Skip("достигнут предел одновременных сделок"); return false; }
         if (riskPct <= 0) { Skip("нет расстояния до уровня отмены"); return false; }
+        if (parameters.FeePct / (riskPct + parameters.FeePct) > MaxFeeShare) { Skip("комиссия больше 30% риска"); return false; }
         var fraction = parameters.RiskPct / (riskPct + parameters.FeePct);
         var left = parameters.MaxLeverage - open.Sum(p => p.Fraction) - entries.Sum(o => o.Fraction);
         if (left < .05m) { Skip("достигнут предел плеча"); return false; }
@@ -206,7 +211,6 @@ public sealed class SpikeStrategy : IBotStrategy
 {
     private sealed record Spike(decimal Middle);
     public const long StallMs = 60_000, HorizonMs = 300_000;
-    public const decimal MaxFeeShare = .3m;
 
     public void OnSignal(BotEngine bot, LabEvent e)
     {
@@ -217,8 +221,6 @@ public sealed class SpikeStrategy : IBotStrategy
         if (e.Origin is not { } origin || origin <= 0) { bot.Skip("неизвестно начало выноса"); return; }
         var middle = (origin + e.Price) / 2;
         var risk = Math.Abs(e.Price - middle) / e.Price * 100;
-        var fee = bot.Parameters.FeePct;
-        if (fee / (risk + fee) > MaxFeeShare) { bot.Skip("комиссия больше 30% риска"); return; }
         bot.Open(e.Symbol, e.Direction, e.AtMs, risk, $"вынос цены: {e.Detail}", new Spike(middle));
     }
 
@@ -277,6 +279,7 @@ public sealed class DensityStrategy : IBotStrategy
                 if (!seen.Add(key + "|break")) continue;
                 bot.CountSignal();
                 if (view.TypicalPct is not { } t0) { bot.Skip("мало истории монеты"); return; }
+                if (!BreakWorthIt(bot, t0)) return;
                 bot.Open(view.Symbol, -w.Side, ms, Distance(w, view) + t0 / 2,
                     $"проедание плотности {Size(w)} на {N(w.Price, "0.########")}: осталось {Left(w)}", new Break(w.Side, w.Price, t0));
                 return;
@@ -313,6 +316,7 @@ public sealed class DensityStrategy : IBotStrategy
             if (Eaten(wall))
             {
                 bot.Close(p, ms, $"плотность проедают: осталось {Left(wall)} — выход до пробоя");
+                if (!BreakWorthIt(bot, b.TypicalPct)) return;
                 bot.Open(p.Symbol, -b.WallSide, ms, Distance(wall, view) + b.TypicalPct / 2,
                     $"переворот в проедание плотности {Size(wall)} на {N(wall.Price, "0.########")}", new Break(b.WallSide, b.Wall, b.TypicalPct));
                 return;
@@ -329,6 +333,15 @@ public sealed class DensityStrategy : IBotStrategy
             if (p.Side > 0 ? price > p.Extreme : price < p.Extreme) { p.Extreme = price; p.ExtremeMs = ms; }
             else if (ms - p.ExtremeMs >= StallMs) bot.Close(p, ms, "импульс после проедания выдохся: 30 с без нового экстремума");
         }
+    }
+
+    // A break is followed while the move lasts; what it can be expected to give is about the coin's typical minute candle.
+    // When that is under three round-trip fees, the break does not pay (rule of 19.10.2026).
+    private static bool BreakWorthIt(BotEngine bot, decimal typicalPct)
+    {
+        if (typicalPct >= MinTargetFees * bot.Parameters.FeePct) return true;
+        bot.Skip("типичная свеча меньше трёх комиссий");
+        return false;
     }
 
     private static decimal Median(decimal[] values)
