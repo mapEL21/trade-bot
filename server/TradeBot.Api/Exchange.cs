@@ -274,6 +274,8 @@ public sealed class ExchangeExecutor : IDisposable
     private decimal realized;
     private int sequence;
     private bool synced;
+    // The connection to the exchange is lost (a check timed out or failed): written once, and once more when it is back.
+    private bool offline;
 
     public ExchangeExecutor(BinanceFuturesClient client, SignalRun run, PaperRunStore store, ILogger logger, long maxDelayMs = MaxDelayMs)
     {
@@ -337,7 +339,14 @@ public sealed class ExchangeExecutor : IDisposable
                 {
                     case "entry": await Entry(intent); break;
                     case "exit": await Exit(intent.Symbol, intent.Reason); break;
-                    case "reconcile": await ReconcileNow(); break;
+                    case "reconcile":
+                        await ReconcileNow();
+                        if (offline)
+                        {
+                            offline = false;
+                            await Log("", "связь", "", 0, 0, "", "ok", "Связь с биржей восстановлена.");
+                        }
+                        break;
                     case "flatten":
                         List<string> open;
                         lock (holdings) open = holdings.Keys.ToList();
@@ -346,10 +355,22 @@ public sealed class ExchangeExecutor : IDisposable
                         break;
                 }
             }
+            // A routine check that did not get through: the connection is noted once, not every 10 seconds; orders still wait
+            // for their own answers and are looked up by their ids.
+            catch (Exception e) when (intent.Kind == "reconcile" && e is HttpRequestException or TaskCanceledException)
+            {
+                logger.LogWarning(e, "Exchange check failed");
+                synced = false;
+                if (!offline)
+                {
+                    offline = true;
+                    await Log("", "нет связи", "", 0, 0, "", "error", $"{Describe(e)} Бот повторяет проверку каждые 10 с; защитные стопы стоят на бирже.");
+                }
+            }
             catch (Exception e) when (e is ExchangeException or HttpRequestException or TaskCanceledException or JsonException)
             {
                 logger.LogWarning(e, "Exchange order failed");
-                await Log(intent.Symbol, "ошибка", intent.Side == 0 ? "" : Side(intent.Side), 0, 0, "", "error", e.Message);
+                await Log(intent.Symbol, "ошибка", intent.Side == 0 ? "" : Side(intent.Side), 0, 0, "", "error", Describe(e));
             }
             // Anything else must not stop the executor silently: the next orders and the reconciliation still have to run.
             catch (Exception e)
@@ -478,6 +499,15 @@ public sealed class ExchangeExecutor : IDisposable
             catch (ExchangeException e) { await Log(symbol, "ошибка", "", 0, 0, "", "error", $"Не удалось снять заявки: {e.Message}"); }
         }
     }
+
+    // What went wrong, in words: the exchange's own message, or what happened to the connection.
+    private static string Describe(Exception e) => e switch
+    {
+        ExchangeException => e.Message,
+        TaskCanceledException => "Биржа не ответила за 10 с.",
+        HttpRequestException => $"Нет связи с биржей ({e.Message}).",
+        _ => $"Непонятный ответ биржи ({e.Message}).",
+    };
 
     private async Task ReconcileNow()
     {

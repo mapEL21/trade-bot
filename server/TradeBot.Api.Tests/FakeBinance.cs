@@ -12,7 +12,7 @@ internal sealed class FakeBinance : HttpMessageHandler
     public readonly List<(string Method, string Path, Dictionary<string, string> Query)> Requests = [];
     public decimal Price = 100;
     public decimal Position;
-    public bool RefuseStop, LoseNextMarketAnswer;
+    public bool RefuseStop, LoseNextMarketAnswer, Offline;
     public readonly Dictionary<string, string> Orders = [];
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -21,6 +21,7 @@ internal sealed class FakeBinance : HttpMessageHandler
         var q = query.AllKeys.ToDictionary(k => k!, k => query[k]!);
         var path = request.RequestUri.AbsolutePath;
         Requests.Add((request.Method.Method, path, q));
+        if (Offline) throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout of 10 seconds elapsing.");
         if (path != "/fapi/v1/time" && path != "/fapi/v1/exchangeInfo")
         {
             Assert.True(request.Headers.Contains("X-MBX-APIKEY"));

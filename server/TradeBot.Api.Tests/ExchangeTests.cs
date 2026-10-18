@@ -112,6 +112,21 @@ public sealed class ExchangeTests : IDisposable
     }
 
     [Fact]
+    public async Task ALostConnectionIsWrittenOnceAndItsReturnOnce()
+    {
+        var (executor, exchange, store) = Executor();
+        exchange.Offline = true;
+        executor.Reconcile(); executor.Reconcile(); executor.Reconcile();
+        await executor.DrainAsync();
+        exchange.Offline = false;
+        executor.Reconcile(); executor.Reconcile();
+        await executor.DrainAsync();
+        var log = (await store.ExchangeLogAsync(Run.Id, 10, CancellationToken.None)).Reverse().ToList();
+        Assert.Equal(["нет связи", "связь"], log.Select(e => e.Action));
+        Assert.StartsWith("Биржа не ответила за 10 с.", log[0].Message);
+    }
+
+    [Fact]
     public async Task OrdersBelowTheExchangeMinimumAreNotSent()
     {
         var (executor, exchange, store) = Executor();

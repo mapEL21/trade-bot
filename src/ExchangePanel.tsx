@@ -219,7 +219,9 @@ export function ExchangeLog({ bot, refresh }: { bot: Bot; refresh: number }) {
             <tr key={`${e.atMs}-${i}`}>
               <td className="mono">{time(e.atMs)}</td>
               <td>{e.symbol || '—'}</td>
-              <td className={e.action === 'ошибка' || e.action === 'внимание' ? 'negative' : ''}>
+              <td
+                className={['ошибка', 'внимание', 'нет связи'].includes(e.action) ? 'negative' : ''}
+              >
                 {e.action}
               </td>
               <td>{e.side === 'BUY' ? 'покупка' : e.side === 'SELL' ? 'продажа' : '—'}</td>
