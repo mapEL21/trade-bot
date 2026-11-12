@@ -9,7 +9,9 @@ export default defineConfig({
       ignored: [
         '**/artifacts/**',
         '**/.tools/**',
-        '**/server/**/data/**',
+        // Downloaded candle history: tens of thousands of files that made the dev server start for half a minute.
+        '**/data/**',
+        '**/research/**',
         '**/server/**/bin/**',
         '**/server/**/obj/**',
       ],

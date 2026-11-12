@@ -62,7 +62,7 @@ test('catalog creates a server instance that survives a new browser, edits, expo
 
     const secondContext = await browser.newContext();
     const second = await secondContext.newPage();
-    await second.goto('http://127.0.0.1:5175/');
+    await second.goto('/');
     await expect(second.getByText('Данные загружены с сервера')).toBeVisible();
     await second.getByRole('button', { name: /^Боты/ }).first().click();
     await second.getByRole('button', { name: `${name} Сигнал лаборатории v0.2.0` }).click();

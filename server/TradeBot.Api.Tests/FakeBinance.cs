@@ -12,8 +12,21 @@ internal sealed class FakeBinance : HttpMessageHandler
     public readonly List<(string Method, string Path, Dictionary<string, string> Query)> Requests = [];
     public decimal Price = 100;
     public decimal Position;
-    public bool RefuseStop, LoseNextMarketAnswer, Offline;
+    public bool RefuseStop, LoseNextMarketAnswer, Offline, HedgeMode;
     public readonly Dictionary<string, string> Orders = [];
+    public readonly Dictionary<string, string> Stops = [];
+    private int refusal;
+    private string? Refuse(int code) { refusal = code; return null; }
+    private static string Stop(Dictionary<string, string> q) =>
+        $$"""{"algoId":1,"clientAlgoId":"{{q["clientAlgoId"]}}","orderType":"{{q["type"]}}","symbol":"{{q["symbol"]}}","side":"{{q["side"]}}","algoStatus":"NEW","triggerPrice":"{{q["triggerPrice"]}}","actualPrice":"0","closePosition":true}""";
+    // The stop fired on the exchange: the position is gone and the stop reports its fill price.
+    public void TriggerStop(decimal price)
+    {
+        foreach (var (id, json) in Stops.ToList())
+            Stops[id] = json.Replace("\"algoStatus\":\"NEW\"", "\"algoStatus\":\"FINISHED\"")
+                .Replace("\"actualPrice\":\"0\"", $"\"actualPrice\":\"{price.ToString(CultureInfo.InvariantCulture)}\"");
+        Position = 0;
+    }
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
@@ -22,7 +35,7 @@ internal sealed class FakeBinance : HttpMessageHandler
         var path = request.RequestUri.AbsolutePath;
         Requests.Add((request.Method.Method, path, q));
         if (Offline) throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout of 10 seconds elapsing.");
-        if (path != "/fapi/v1/time" && path != "/fapi/v1/exchangeInfo")
+        if (path != "/fapi/v1/time" && path != "/fapi/v1/exchangeInfo" && path != "/fapi/v1/ticker/price")
         {
             Assert.True(request.Headers.Contains("X-MBX-APIKEY"));
             Assert.True(q.ContainsKey("signature") && q.ContainsKey("timestamp"));
@@ -37,7 +50,16 @@ internal sealed class FakeBinance : HttpMessageHandler
             ("GET", "/fapi/v2/balance") => """[{"asset":"USDT","balance":"5010.5","availableBalance":"5000.5","crossUnPnl":"1.25"}]""",
             ("POST", "/fapi/v1/marginType") or ("POST", "/fapi/v1/leverage") => "{}",
             ("GET", "/fapi/v1/commissionRate") => $"{{\"symbol\":\"{q["symbol"]}\",\"makerCommissionRate\":\"0.0002\",\"takerCommissionRate\":\"0.0005\"}}",
-            ("POST", "/fapi/v1/order") when q["type"] == "STOP_MARKET" => RefuseStop ? null : Orders[q["newClientOrderId"]] = Order(q["newClientOrderId"], "NEW", 0, 0, q["side"], "STOP_MARKET"),
+            // Conditional orders go through the Algo Order API only; the old endpoint refuses them.
+            ("POST", "/fapi/v1/order") when q["type"] == "STOP_MARKET" => Refuse(-4120),
+            ("POST", "/fapi/v1/algoOrder") => RefuseStop ? null : Stops[q["clientAlgoId"]] = Stop(q),
+            ("GET", "/fapi/v1/algoOrder") => Stops.GetValueOrDefault(q["clientAlgoId"]),
+            // A stop that already triggered cannot be cancelled, but it can still be asked about.
+            ("DELETE", "/fapi/v1/algoOrder") => Stops.GetValueOrDefault(q["clientAlgoId"])?.Contains("\"NEW\"") == true && Stops.Remove(q["clientAlgoId"]) ? "{}" : null,
+            ("DELETE", "/fapi/v1/algoOpenOrders") => "{}",
+            ("GET", "/fapi/v1/positionSide/dual") => $$"""{"dualSidePosition":{{(HedgeMode ? "true" : "false")}}}""",
+            ("GET", "/fapi/v1/ticker/price") => $$"""{"symbol":"XUSDT","price":"{{S(Price)}}"}""",
+            ("POST", "/fapi/v1/order") when q.GetValueOrDefault("reduceOnly") == "true" && Position == 0 => Refuse(-2022),
             ("POST", "/fapi/v1/order") => Market(q, Order),
             ("GET", "/fapi/v1/order") => Orders.GetValueOrDefault(q["origClientOrderId"]),
             ("DELETE", "/fapi/v1/order") => "{}",
@@ -48,7 +70,8 @@ internal sealed class FakeBinance : HttpMessageHandler
         if (body == "lost") throw new HttpRequestException("connection reset");
         if (body is null)
         {
-            var code = (request.Method.Method, path) == ("GET", "/fapi/v1/order") ? -2013 : -2021;
+            var code = refusal != 0 ? refusal : (request.Method.Method, path) == ("GET", "/fapi/v1/order") ? -2013 : -2021;
+            refusal = 0;
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)
                 { Content = new StringContent($"{{\"code\":{code},\"msg\":\"refused\"}}", Encoding.UTF8) });
         }

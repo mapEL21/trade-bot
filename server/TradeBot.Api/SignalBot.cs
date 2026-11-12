@@ -115,6 +115,8 @@ public sealed class SignalBots(PaperRunStore store, SignalLab lab, LiveBots live
             {
                 var client = new BinanceFuturesClient(http.Client, ExchangeModes.BaseUrl(configuration, bot.Execution), keys.Key, keys.Secret);
                 await client.SyncTimeAsync(ct);
+                if (await client.HedgeModeAsync(ct))
+                    throw new ArgumentException("На счёте включён режим хеджирования. Бот работает только в режиме «в одну сторону» (One-way): переключите режим позиций на бирже.");
                 balance = await client.BalanceAsync(ct);
                 // Fees are the account's own: market orders on both sides pay the taker rate.
                 var taker = await client.TakerFeeAsync(FeeSymbol, ct);

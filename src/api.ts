@@ -270,6 +270,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ mode, apiKey, apiSecret }),
     }),
+  // Opens, protects with a stop and closes the smallest position on the demo account: every request the bot sends.
+  exchangeSelfTest: () =>
+    request<{ name: string; ok: boolean; detail: string }[]>('/exchange/selftest/testnet', {
+      method: 'POST',
+    }),
   deleteExchangeKeys: (mode: string) =>
     request<void>(`/exchange/keys/${mode}`, { method: 'DELETE' }),
   exchangeBalance: (mode = 'testnet') => request<ExchangeBalance>(`/exchange/balance/${mode}`),

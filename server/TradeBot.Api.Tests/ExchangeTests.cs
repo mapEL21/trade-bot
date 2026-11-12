@@ -43,7 +43,11 @@ public sealed class ExchangeTests : IDisposable
         Assert.Equal("ISOLATED", exchange.Requests.Single(r => r.Path == "/fapi/v1/marginType").Query["marginType"]);
         Assert.Equal("3", exchange.Requests.Single(r => r.Path == "/fapi/v1/leverage").Query["leverage"]);
         // The stop is 0.3% beyond the 99.5 cancel level, down to the price step: 99.2015 → 99.20.
-        Assert.Equal(("STOP_MARKET", "SELL", "99.20", "true"), (orders[1].Query["type"], orders[1].Query["side"], orders[1].Query["stopPrice"], orders[1].Query["closePosition"]));
+        // It goes through the Algo Order API: the ordinary order endpoint no longer takes conditional orders.
+        var stop = exchange.Requests.Single(r => r.Path == "/fapi/v1/algoOrder" && r.Method == "POST").Query;
+        Assert.Equal(("CONDITIONAL", "STOP_MARKET", "SELL", "99.20", "true", "MARK_PRICE"),
+            (stop["algoType"], stop["type"], stop["side"], stop["triggerPrice"], stop["closePosition"], stop["workingType"]));
+        Assert.Single(orders);
         var holding = Assert.Single(executor.Holdings());
         Assert.Equal(("long", 2.5m, 99.2m), (holding.Side, holding.Quantity, holding.StopPrice));
 
@@ -51,7 +55,7 @@ public sealed class ExchangeTests : IDisposable
         executor.Enqueue(new("exit", "XUSDT", -1, 0, 2.5m, 101, null, "цена отошла от плотности на средний отскок"));
         await executor.DrainAsync();
         Assert.Empty(executor.Holdings());
-        Assert.Contains(exchange.Requests, r => r.Method == "DELETE" && r.Query["origClientOrderId"] == orders[1].Query["newClientOrderId"]);
+        Assert.Contains(exchange.Requests, r => r.Method == "DELETE" && r.Path == "/fapi/v1/algoOrder" && r.Query["clientAlgoId"] == stop["clientAlgoId"]);
         var exit = exchange.Requests.Last(r => r.Path == "/fapi/v1/order" && r.Method == "POST");
         Assert.Equal(("SELL", "true", "2.500"), (exit.Query["side"], exit.Query["reduceOnly"], exit.Query["quantity"]));
         Assert.Equal(0m, exchange.Position);
@@ -124,6 +128,48 @@ public sealed class ExchangeTests : IDisposable
         var log = (await store.ExchangeLogAsync(Run.Id, 10, CancellationToken.None)).Reverse().ToList();
         Assert.Equal(["нет связи", "связь"], log.Select(e => e.Action));
         Assert.StartsWith("Биржа не ответила за 10 с.", log[0].Message);
+    }
+
+    [Fact]
+    public async Task AStrategyExitAfterTheStopAlreadyFiredIsNotAnError()
+    {
+        var (executor, exchange, store) = Executor();
+        executor.Enqueue(Entry());
+        await executor.DrainAsync();
+        exchange.TriggerStop(99.1m);
+        executor.Enqueue(new("exit", "XUSDT", -1, 0, 2.5m, 99, null, "плотность сняли"));
+        await executor.DrainAsync();
+        Assert.Empty(executor.Holdings());
+        var last = (await store.ExchangeLogAsync(Run.Id, 1, CancellationToken.None))[0];
+        // The result is counted at the stop's own fill price: 2.5 × (99.1 − 100) and the fees.
+        Assert.Equal(("закрыта биржей", 99.1m), (last.Action, last.Price));
+        Assert.Equal(100 - 2.25m - 2.5m * 199.1m * .1m / 200, executor.Deposit);
+    }
+
+    [Fact]
+    public async Task TheOrderCheckOpensProtectsAndClosesTheSmallestPositionAndCleansUpWhenTheStopIsRefused()
+    {
+        var exchange = new FakeBinance();
+        var client = new BinanceFuturesClient(new HttpClient(exchange), "https://testnet.example", "key", "secret");
+        var steps = await ExchangeSelfTest.RunAsync(client, "XUSDT", CancellationToken.None);
+        Assert.All(steps, s => Assert.True(s.Ok, s.Detail));
+        Assert.Equal(9, steps.Length);
+        // 5 USDT minimum × 1.5 at 100: 0.075 coins.
+        Assert.Equal("0.075", exchange.Requests.First(r => r.Path == "/fapi/v1/order" && r.Method == "POST").Query["quantity"]);
+        Assert.Equal((0m, 0), (exchange.Position, exchange.Stops.Count));
+
+        // The exchange refuses the stop: the check says so and still leaves nothing behind.
+        exchange.RefuseStop = true;
+        steps = await ExchangeSelfTest.RunAsync(client, "XUSDT", CancellationToken.None);
+        Assert.False(steps.Single(s => s.Name == "Защитный стоп на бирже").Ok);
+        Assert.Equal(0m, exchange.Position);
+
+        // Hedge mode: nothing is sent at all.
+        exchange.RefuseStop = false; exchange.HedgeMode = true;
+        var before = exchange.Requests.Count(r => r.Path == "/fapi/v1/order");
+        steps = await ExchangeSelfTest.RunAsync(client, "XUSDT", CancellationToken.None);
+        Assert.Contains("хеджирования", Assert.Single(steps).Detail);
+        Assert.Equal(before, exchange.Requests.Count(r => r.Path == "/fapi/v1/order"));
     }
 
     [Fact]

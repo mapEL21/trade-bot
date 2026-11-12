@@ -21,6 +21,11 @@ export default defineConfig({
         Storage__Path: resolve('artifacts/browser-workspace.db'),
         Ui__Origin: 'http://127.0.0.1:5175',
         Market__Path: resolve('artifacts/browser-market'),
+        // Never the real recordings, screener journal, live runs or exchange keys: the tests must not reach the exchange.
+        Scanner__Path: resolve('artifacts/browser-scans'),
+        Screener__Path: resolve('artifacts/browser-screener'),
+        Live__Path: resolve('artifacts/browser-live'),
+        Exchange__KeysPath: resolve('artifacts/browser-exchange-keys.json'),
       },
       reuseExistingServer: false,
     },

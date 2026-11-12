@@ -112,6 +112,23 @@ export function ExchangeKeysPanel({ onChanged }: { onChanged?: (keys: ExchangeKe
       setBusy(false);
     }
   }
+  const [steps, setSteps] = useState<{ name: string; ok: boolean; detail: string }[] | null>(null);
+  async function check() {
+    if (
+      !window.confirm('Отправить на демо-счёт проверочные заявки: вход, стоп и выход на XRPUSDT?')
+    )
+      return;
+    setBusy(true);
+    setError('');
+    setSteps(null);
+    try {
+      setSteps(await api.exchangeSelfTest());
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
   async function remove() {
     setBusy(true);
     try {
@@ -174,6 +191,32 @@ export function ExchangeKeysPanel({ onChanged }: { onChanged?: (keys: ExchangeKe
           </button>
         )}
       </form>
+      {status?.configured && (
+        <div className="exchange-check">
+          <button
+            type="button"
+            className="button secondary"
+            disabled={busy}
+            onClick={() => void check()}
+          >
+            Проверить заявки на демо-счёте
+          </button>
+          <p className="field-hint">
+            Бот откроет самую маленькую позицию на XRPUSDT, поставит защитный стоп, снимет его и
+            закроет позицию: за минуту видно, принимает ли биржа каждую его заявку. Деньги
+            ненастоящие; комиссия демо-счёта — несколько центов.
+          </p>
+          {steps && (
+            <ol className="exchange-check-steps" aria-label="Результат проверки заявок">
+              {steps.map((s) => (
+                <li key={s.name} className={s.ok ? 'positive' : 'negative'}>
+                  {s.ok ? '✓' : '✗'} {s.name}: <span className="muted">{s.detail}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
       {message && (
         <p className="field-hint positive" role="status">
           {message}

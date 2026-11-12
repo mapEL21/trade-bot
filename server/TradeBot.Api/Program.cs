@@ -151,6 +151,14 @@ api.MapGet("/exchange/balance/{mode}", async (string mode, ExchangeCredentials c
     catch (ExchangeException e) { return Results.Problem(statusCode: 400, title: $"Биржа отказала: {e.Message}"); }
     catch (Exception e) when (e is HttpRequestException or TaskCanceledException) { return Results.Problem(statusCode: 503, title: "Биржа не отвечает."); }
 });
+// The order check: a smallest position with a stop on the demo account, opened and closed at once. Demo account only.
+api.MapPost("/exchange/selftest/{mode}", async (string mode, ExchangeCredentials credentials, ExchangeHttp http, IConfiguration configuration, CancellationToken ct) =>
+{
+    if (mode != ExchangeModes.Testnet) return Results.Problem(statusCode: 400, title: "Проверка заявок доступна только на демо-счёте.");
+    if (credentials.Load(mode) is not { } keys) return Results.Problem(statusCode: 404, title: "Ключей нет.");
+    var client = new BinanceFuturesClient(http.Client, ExchangeModes.BaseUrl(configuration, mode), keys.Key, keys.Secret);
+    return Results.Ok(await ExchangeSelfTest.RunAsync(client, configuration["Exchange:SelfTestSymbol"] ?? ExchangeSelfTest.DefaultSymbol, ct));
+});
 api.MapDelete("/exchange/keys/{mode}", (string mode, ExchangeCredentials credentials) =>
     credentials.Delete(mode) ? Results.NoContent() : Results.Problem(statusCode: 404, title: "Ключей нет."));
 api.MapGet("/bots/{id:guid}/exchange", async (Guid id, PaperRunStore runs, CancellationToken ct) =>

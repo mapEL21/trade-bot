@@ -181,13 +181,42 @@ public sealed class BinanceFuturesClient(HttpClient http, string baseUrl, string
             ["reduceOnly"] = reduceOnly ? "true" : "false", ["newOrderRespType"] = "RESULT",
         }, true, ct));
 
-    // The protective stop: closes the whole position at the market when the mark price reaches the stop price.
+    // The protective stop: closes the whole position at the market when the mark price reaches the stop price. Since
+    // 9 December 2025 Binance takes conditional orders only through the Algo Order API (the old endpoint answers -4120).
     public async Task<ExchangeOrder> StopAsync(string symbol, string side, decimal stopPrice, string clientId, CancellationToken ct) =>
-        Order(await Send(HttpMethod.Post, "/fapi/v1/order", new()
+        Algo(await Send(HttpMethod.Post, "/fapi/v1/algoOrder", new()
         {
-            ["symbol"] = symbol, ["side"] = side, ["type"] = "STOP_MARKET", ["stopPrice"] = S(stopPrice), ["closePosition"] = "true",
-            ["workingType"] = "MARK_PRICE", ["newClientOrderId"] = clientId,
+            ["algoType"] = "CONDITIONAL", ["symbol"] = symbol, ["side"] = side, ["type"] = "STOP_MARKET", ["triggerPrice"] = S(stopPrice),
+            ["closePosition"] = "true", ["workingType"] = "MARK_PRICE", ["clientAlgoId"] = clientId,
         }, true, ct));
+
+    // The stop as the exchange knows it now: AvgPrice is the fill price once it has triggered; null when it cannot be found.
+    public async Task<ExchangeOrder?> QueryStopAsync(string clientId, CancellationToken ct)
+    {
+        try { return Algo(await Send(HttpMethod.Get, "/fapi/v1/algoOrder", new() { ["clientAlgoId"] = clientId }, true, ct)); }
+        catch (ExchangeException) { return null; }
+    }
+
+    // Already triggered or cancelled stops are refused by the exchange; either way the stop is not waiting any more.
+    public async Task CancelStopAsync(string clientId, CancellationToken ct)
+    {
+        try { await Send(HttpMethod.Delete, "/fapi/v1/algoOrder", new() { ["clientAlgoId"] = clientId }, true, ct); }
+        catch (ExchangeException) { }
+    }
+
+    // true: the account is in hedge mode (separate long and short positions), which this adapter does not trade.
+    public async Task<bool> HedgeModeAsync(CancellationToken ct)
+    {
+        using var doc = JsonDocument.Parse(await Send(HttpMethod.Get, "/fapi/v1/positionSide/dual", null, true, ct));
+        var mode = doc.RootElement.GetProperty("dualSidePosition");
+        return mode.ValueKind == JsonValueKind.True || mode.ValueKind == JsonValueKind.String && mode.GetString() == "true";
+    }
+
+    public async Task<decimal> PriceAsync(string symbol, CancellationToken ct)
+    {
+        using var doc = JsonDocument.Parse(await Send(HttpMethod.Get, "/fapi/v1/ticker/price", new() { ["symbol"] = symbol }, false, ct));
+        return Dec(doc.RootElement.GetProperty("price"));
+    }
 
     // The account's taker fee rate (0.0005 = 0.05%) on a coin.
     public async Task<decimal> TakerFeeAsync(string symbol, CancellationToken ct)
@@ -196,9 +225,12 @@ public sealed class BinanceFuturesClient(HttpClient http, string baseUrl, string
         return Dec(doc.RootElement.GetProperty("takerCommissionRate"));
     }
 
-    // Every open order of the coin (stops left behind included).
-    public async Task CancelAllAsync(string symbol, CancellationToken ct) =>
+    // Every open order of the coin, ordinary and conditional (stops left behind).
+    public async Task CancelAllAsync(string symbol, CancellationToken ct)
+    {
         await Send(HttpMethod.Delete, "/fapi/v1/allOpenOrders", new() { ["symbol"] = symbol }, true, ct);
+        await Send(HttpMethod.Delete, "/fapi/v1/algoOpenOrders", new() { ["symbol"] = symbol }, true, ct);
+    }
 
     public async Task<ExchangeOrder?> QueryAsync(string symbol, string clientId, CancellationToken ct)
     {
@@ -222,6 +254,16 @@ public sealed class BinanceFuturesClient(HttpClient http, string baseUrl, string
             .Where(p => p.Amount != 0).ToArray();
     }
 
+    private static ExchangeOrder Algo(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var o = doc.RootElement;
+        string Text(string name) => o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString()! : "";
+        decimal Number(string name) => o.TryGetProperty(name, out var v)
+            && (v.ValueKind == JsonValueKind.Number || v.ValueKind == JsonValueKind.String && v.GetString() is { Length: > 0 }) ? Dec(v) : 0;
+        return new(Text("clientAlgoId"), Text("algoStatus"), Number("actualQty"), Number("actualPrice"), Text("side"), Text("orderType"));
+    }
+
     private static ExchangeOrder Order(string json)
     {
         using var doc = JsonDocument.Parse(json);
@@ -229,6 +271,96 @@ public sealed class BinanceFuturesClient(HttpClient http, string baseUrl, string
         return new(o.GetProperty("clientOrderId").GetString()!, o.GetProperty("status").GetString()!,
             o.TryGetProperty("executedQty", out var q) ? Dec(q) : 0, o.TryGetProperty("avgPrice", out var p) ? Dec(p) : 0,
             o.GetProperty("side").GetString()!, o.GetProperty("type").GetString()!);
+    }
+}
+
+// One step of the order check and how it went.
+public sealed record SelfTestStep(string Name, bool Ok, string Detail);
+
+// The order check on the demo account: the smallest position on one coin is opened, protected by a stop, the stop is asked
+// about and cancelled, and the position is closed — every kind of request the bot sends, in a minute, without waiting for a
+// signal. Whatever fails, the position is closed and the coin's orders are cancelled at the end.
+public static class ExchangeSelfTest
+{
+    public const string DefaultSymbol = "XRPUSDT";
+
+    public static async Task<SelfTestStep[]> RunAsync(BinanceFuturesClient client, string symbol, CancellationToken ct)
+    {
+        var steps = new List<SelfTestStep>();
+        var opened = 0m;
+        async Task<bool> Step(string name, Func<Task<string>> action)
+        {
+            try { steps.Add(new(name, true, await action())); return true; }
+            catch (Exception e) when (e is ExchangeException or HttpRequestException or TaskCanceledException or JsonException)
+            {
+                steps.Add(new(name, false, e is TaskCanceledException ? "Биржа не ответила за 10 с." : e.Message));
+                return false;
+            }
+        }
+        string N(decimal v) => v.ToString("0.########", CultureInfo.InvariantCulture);
+        var id = $"tbcheck{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+        SymbolRules? rules = null;
+        decimal price = 0, quantity = 0;
+        var ok = await Step("Связь и режим позиций", async () =>
+        {
+            await client.SyncTimeAsync(ct);
+            if (await client.HedgeModeAsync(ct)) throw new ExchangeException("На счёте режим хеджирования: нужен режим «в одну сторону» (One-way).");
+            if ((await client.PositionsAsync(ct)).Any(p => p.Symbol == symbol))
+                throw new ExchangeException($"На {symbol} уже есть позиция: проверка её не трогает. Закройте позицию или остановите бота.");
+            return "режим «в одну сторону», позиции на монете проверки нет";
+        });
+        ok = ok && await Step("Правила монеты и цена", async () =>
+        {
+            rules = await client.RulesAsync(symbol, ct);
+            price = await client.PriceAsync(symbol, ct);
+            var units = Math.Ceiling(Math.Max(rules.MinNotional * 1.5m / price, rules.MinQty) / rules.StepSize);
+            quantity = units * rules.StepSize;
+            return $"{symbol}: цена {N(price)}, заявка {N(quantity)} (около {N(Math.Round(quantity * price, 2))} USDT)";
+        });
+        ok = ok && await Step("Маржа и плечо", async () => { await client.SetupAsync(symbol, 1, ct); return "изолированная маржа, плечо 1x"; });
+        ok = ok && await Step("Вход рыночной заявкой", async () =>
+        {
+            var order = await client.MarketAsync(symbol, "BUY", quantity, id + "e", false, ct);
+            opened = order.ExecutedQty;
+            if (opened <= 0) throw new ExchangeException($"Заявка не исполнилась: {order.Status}.");
+            return $"куплено {N(opened)} по {N(order.AvgPrice)}";
+        });
+        if (opened > 0)
+        {
+            var stopPrice = Math.Floor(price * .9m / rules!.TickSize) * rules.TickSize;
+            var placed = await Step("Защитный стоп на бирже", async () =>
+            {
+                var stop = await client.StopAsync(symbol, "SELL", stopPrice, id + "s", ct);
+                return $"стоп {N(stopPrice)} принят, статус {stop.Status}";
+            });
+            if (placed)
+            {
+                await Step("Запрос состояния стопа", async () =>
+                    await client.QueryStopAsync(id + "s", ct) is { } stop ? $"статус {stop.Status}" : throw new ExchangeException("Биржа не находит поставленный стоп."));
+                await Step("Снятие стопа", async () =>
+                {
+                    await client.CancelStopAsync(id + "s", ct);
+                    return await client.QueryStopAsync(id + "s", ct) is { Status: "NEW" } ? throw new ExchangeException("Стоп остался на бирже.") : "стоп снят";
+                });
+            }
+            await Step("Выход с закрытием позиции", async () =>
+            {
+                var order = await client.MarketAsync(symbol, "SELL", opened, id + "x", true, ct);
+                return $"продано {N(order.ExecutedQty)} по {N(order.AvgPrice)}";
+            });
+            await Step("Сверка: позиции и заявок не осталось", async () =>
+            {
+                await client.CancelAllAsync(symbol, ct);
+                var left = (await client.PositionsAsync(ct)).FirstOrDefault(p => p.Symbol == symbol);
+                if (left is not null)
+                {
+                    await client.MarketAsync(symbol, left.Amount > 0 ? "SELL" : "BUY", Math.Abs(left.Amount), id + "z", true, ct);
+                    throw new ExchangeException($"После выхода оставалась позиция {N(left.Amount)}: закрыта повторной заявкой.");
+                }
+                return "на монете проверки пусто";
+            });
+        }
+        return steps.ToArray();
     }
 }
 
@@ -467,9 +599,16 @@ public sealed class ExchangeExecutor : IDisposable
         Holding? h;
         lock (holdings) holdings.Remove(symbol, out h);
         if (h is null) return;
-        await client.CancelAsync(symbol, h.StopId, CancellationToken.None);
+        await client.CancelStopAsync(h.StopId, CancellationToken.None);
         var id = Id("x");
-        var order = await Market(symbol, Side(-h.Side), h.Quantity, id, true);
+        ExchangeOrder order;
+        try { order = await Market(symbol, Side(-h.Side), h.Quantity, id, true); }
+        // -2022: nothing to reduce — the stop on the exchange closed the position before the strategy's exit.
+        catch (ExchangeException e) when (e.Code == -2022)
+        {
+            await ClosedByExchange(h);
+            return;
+        }
         var pnl = h.Side * h.Quantity * (order.AvgPrice - h.Entry) - h.Quantity * (h.Entry + order.AvgPrice) * run.Parameters.FeePct / 200;
         Realize(pnl);
         await Log(symbol, "выход", Side(-h.Side), order.ExecutedQty, order.AvgPrice, id, order.Status, $"{reason}. Результат {Money(pnl)} USDT (комиссия — оценка).");
@@ -509,6 +648,16 @@ public sealed class ExchangeExecutor : IDisposable
         _ => $"Непонятный ответ биржи ({e.Message}).",
     };
 
+    private async Task ClosedByExchange(Holding h)
+    {
+        var stop = await client.QueryStopAsync(h.StopId, CancellationToken.None);
+        var price = stop is { AvgPrice: > 0 } ? stop.AvgPrice : h.StopPrice;
+        var pnl = h.Side * h.Quantity * (price - h.Entry) - h.Quantity * (h.Entry + price) * run.Parameters.FeePct / 200;
+        Realize(pnl);
+        await Log(h.Symbol, "закрыта биржей", Side(-h.Side), h.Quantity, price, h.StopId, stop?.Status ?? "unknown",
+            $"Позиции на бирже больше нет: сработал защитный стоп. Результат {Money(pnl)} USDT.");
+    }
+
     private async Task ReconcileNow()
     {
         var positions = await client.PositionsAsync(CancellationToken.None);
@@ -518,12 +667,7 @@ public sealed class ExchangeExecutor : IDisposable
         {
             // The exchange closed it: the protective stop (or a liquidation).
             lock (holdings) holdings.Remove(h.Symbol);
-            var stop = await client.QueryAsync(h.Symbol, h.StopId, CancellationToken.None);
-            var price = stop is { AvgPrice: > 0 } ? stop.AvgPrice : h.StopPrice;
-            var pnl = h.Side * h.Quantity * (price - h.Entry) - h.Quantity * (h.Entry + price) * run.Parameters.FeePct / 200;
-            Realize(pnl);
-            await Log(h.Symbol, "закрыта биржей", Side(-h.Side), h.Quantity, price, h.StopId, stop?.Status ?? "unknown",
-                $"Позиции на бирже больше нет: сработал защитный стоп. Результат {Money(pnl)} USDT.");
+            await ClosedByExchange(h);
         }
         foreach (var p in positions.Where(p => mine.All(h => h.Symbol != p.Symbol) && strangers.Add(p.Symbol)))
             await Log(p.Symbol, "внимание", p.Amount > 0 ? "BUY" : "SELL", Math.Abs(p.Amount), p.EntryPrice, "", "unknown",
