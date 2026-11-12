@@ -173,6 +173,71 @@ public sealed class ExchangeTests : IDisposable
     }
 
     [Fact]
+    public async Task ARestartKeepsTheResultAndTheDailyLimitAndClosesWhatTheStrategyNoLongerFollows()
+    {
+        var exchange = new FakeBinance();
+        var client = new BinanceFuturesClient(new HttpClient(exchange), "https://testnet.example", "key", "secret");
+        var store = new PaperRunStore(Path.Combine(root, "workspace.db"));
+        var run = Run with { Parameters = new SignalParameters(MaxLeverage: 20, DailyLossPct: 1) };
+        // Before the restart: one losing trade (over the 1% daily limit) and one position still open.
+        using (var first = new ExchangeExecutor(client, run, store, NullLogger.Instance))
+        {
+            first.Enqueue(Entry());
+            await first.DrainAsync();
+            exchange.Price = 99;
+            first.Enqueue(new("exit", "XUSDT", -1, 0, 0, 99, null, "плотность сняли"));
+            await first.DrainAsync();
+        }
+        var saved = store.ExchangeState(run.Id)!;
+        var trade = Assert.Single(saved.Trades);
+        Assert.Equal((false, "long", 100m, 99m, 2.5m, "отскок от плотности", "плотность сняли"),
+            (trade.Simulated, trade.Side, trade.Entry, trade.Exit, trade.Quantity, trade.EntryReason, trade.ExitReason));
+        // A position the application "forgot": opened, then the process ends.
+        using (var second = new ExchangeExecutor(client, run with { Parameters = new SignalParameters(MaxLeverage: 20, DailyLossPct: 100) }, store, NullLogger.Instance))
+        {
+            exchange.Price = 100;
+            second.Enqueue(Entry());
+            await second.DrainAsync();
+            Assert.Single(second.Holdings());
+        }
+        Assert.True(exchange.Position > 0);
+
+        using var restarted = new ExchangeExecutor(client, run, store, NullLogger.Instance);
+        await restarted.DrainAsync();
+        // The deposit and the open position are back.
+        Assert.Equal(100 + trade.Gross - trade.Fee, restarted.Deposit);
+        Assert.Single(restarted.Holdings());
+        // The first check closes the position the strategy no longer follows; nothing is left unknown on the exchange.
+        restarted.Reconcile();
+        await restarted.DrainAsync();
+        Assert.Empty(restarted.Holdings());
+        Assert.Equal(0m, exchange.Position);
+        Assert.Equal(2, restarted.Trades().Length);
+        // The day's loss was not forgotten: with the 1% limit the next entry is refused.
+        restarted.Enqueue(Entry());
+        await restarted.DrainAsync();
+        Assert.StartsWith("Достигнут дневной лимит убытка", (await store.ExchangeLogAsync(run.Id, 1, CancellationToken.None))[0].Message);
+        // Order ids never repeat after a restart.
+        var ids = exchange.Requests.Where(r => r.Query.ContainsKey("newClientOrderId")).Select(r => r.Query["newClientOrderId"]).ToList();
+        Assert.Equal(ids.Count, ids.Distinct().Count());
+    }
+
+    [Fact]
+    public async Task AFailedCloseKeepsThePositionKnownAndProtected()
+    {
+        var (executor, exchange, _) = Executor();
+        executor.Enqueue(Entry());
+        await executor.DrainAsync();
+        exchange.Offline = true;
+        executor.Enqueue(new("exit", "XUSDT", -1, 0, 0, 101, null, "выход"));
+        await executor.DrainAsync();
+        exchange.Offline = false;
+        // The close did not get through: the bot still knows the position and its stop is still on the exchange.
+        Assert.Single(executor.Holdings());
+        Assert.Single(exchange.Stops);
+    }
+
+    [Fact]
     public async Task OrdersBelowTheExchangeMinimumAreNotSent()
     {
         var (executor, exchange, store) = Executor();

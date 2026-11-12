@@ -26,6 +26,7 @@ public sealed class PaperRunStore
                 CREATE INDEX IF NOT EXISTS signal_runs_bot ON signal_runs (bot_id, started);
                 CREATE TABLE IF NOT EXISTS exchange_log (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at INTEGER NOT NULL, body TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS exchange_log_run ON exchange_log (run_id, at);
+                CREATE TABLE IF NOT EXISTS exchange_state (run_id TEXT PRIMARY KEY, body TEXT NOT NULL);
                 """;
             create.ExecuteNonQuery();
         }
@@ -87,6 +88,38 @@ public sealed class PaperRunStore
             command.Parameters.AddWithValue("$at", entry.AtMs);
             command.Parameters.AddWithValue("$body", JsonSerializer.Serialize(entry, Json));
             await command.ExecuteNonQueryAsync(ct);
+        }
+        finally { gate.Release(); }
+    }
+
+    // What a run holds on the exchange and has made there, so that a restart of the application loses nothing.
+    public async Task SaveExchangeStateAsync(string runId, ExchangeState state, CancellationToken ct)
+    {
+        await gate.WaitAsync(ct);
+        try
+        {
+            await using var connection = new SqliteConnection(connectionString);
+            await connection.OpenAsync(ct);
+            using var command = connection.CreateCommand();
+            command.CommandText = "INSERT INTO exchange_state (run_id, body) VALUES ($run, $body) ON CONFLICT(run_id) DO UPDATE SET body = excluded.body";
+            command.Parameters.AddWithValue("$run", runId);
+            command.Parameters.AddWithValue("$body", JsonSerializer.Serialize(state, Json));
+            await command.ExecuteNonQueryAsync(ct);
+        }
+        finally { gate.Release(); }
+    }
+
+    public ExchangeState? ExchangeState(string runId)
+    {
+        gate.Wait();
+        try
+        {
+            using var connection = new SqliteConnection(connectionString);
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT body FROM exchange_state WHERE run_id = $run";
+            command.Parameters.AddWithValue("$run", runId);
+            return command.ExecuteScalar() is string body ? JsonSerializer.Deserialize<ExchangeState>(body, Json) : null;
         }
         finally { gate.Release(); }
     }

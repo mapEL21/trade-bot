@@ -418,6 +418,11 @@ export function TradesTable({
                     {showBot && <td>{t.botName ?? botName}</td>}
                     <td className="table-symbol">
                       {t.symbol ?? '—'}
+                      {t.simulated === false && (
+                        <span className="sim-tag" title="Сделка исполнена на бирже (демо-счёт)">
+                          БИРЖА
+                        </span>
+                      )}
                       {t.simulated && (
                         <span
                           className="sim-tag"

@@ -72,6 +72,9 @@ public sealed class DailyLoss(decimal budget, decimal pct)
     public static long Day(long ms) => (ms + 3 * 3_600_000) / 86_400_000;
     public decimal Limit => budget * pct / 100;
     public void Add(long ms, decimal pnl) { Roll(ms); result += pnl; }
+    // The day's result so far, to carry it over a restart.
+    public (long Day, decimal Result) Snapshot => (day, result);
+    public void Restore(long savedDay, decimal savedResult) { day = savedDay; result = savedResult; }
     public bool Blocked(long ms) { Roll(ms); return -result >= Limit; }
     private void Roll(long ms) { var d = Day(ms); if (d > day) { day = d; result = 0; } }
 }
@@ -194,6 +197,13 @@ public sealed class SignalBots(PaperRunStore store, SignalLab lab, LiveBots live
             else { pending++; Enqueue(directory, run.Parameters); }
         }
         var money = Money(run, results, pending);
+        // A bot on an exchange shows what happened there: the trades the exchange filled and the deposit they left. The
+        // engine's own trades are a simulation and can differ (an entry the exchange refused, a stop that fired).
+        if (run.Execution != SignalRun.Simulation)
+        {
+            var state = store.ExchangeState(run.Id);
+            money = money with { Trades = state?.Trades ?? [], Deposit = Math.Round(run.Budget + (state?.Realized ?? 0), 4) };
+        }
         if (current is { } now && now.View.Open.Length > 0)
         {
             var fee = run.Parameters.FeePct;

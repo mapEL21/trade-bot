@@ -274,6 +274,14 @@ public sealed class BinanceFuturesClient(HttpClient http, string baseUrl, string
     }
 }
 
+// A position the run holds on the exchange, with its stop.
+public sealed record Holding(string Symbol, int Side, decimal Quantity, decimal Entry, decimal StopPrice, string StopId, long OpenedMs,
+    string EntryReason = "");
+// Everything of a run on the exchange that has to survive a restart: open positions, the closed trades and their sum, the
+// day's result for the daily limit, the order counter and the coins the run has traded.
+public sealed record ExchangeState(Holding[] Holdings, BotTrade[] Trades, decimal Realized, long DailyDay, decimal DailyResult, int Sequence,
+    string[] Touched);
+
 // One step of the order check and how it went.
 public sealed record SelfTestStep(string Name, bool Ok, string Detail);
 
@@ -387,7 +395,6 @@ public sealed class ExchangeExecutor : IDisposable
     public const decimal StopBufferPct = .3m;
     // An entry decided on data older than this (by the exchange's clock) is not sent: the market may already be elsewhere.
     public const long MaxDelayMs = 3_000;
-    private sealed record Holding(string Symbol, int Side, decimal Quantity, decimal Entry, decimal StopPrice, string StopId, long OpenedMs);
 
     private readonly BinanceFuturesClient client;
     private readonly SignalRun run;
@@ -403,6 +410,10 @@ public sealed class ExchangeExecutor : IDisposable
     private readonly DailyLoss daily;
     private readonly long maxDelayMs;
     private readonly Task worker;
+    private readonly List<BotTrade> trades = [];
+    // Positions carried over a restart: the strategy no longer follows them, so they are closed at the first check.
+    private readonly HashSet<string> recovered = new(StringComparer.Ordinal);
+    private bool loaded;
     private decimal realized;
     private int sequence;
     private bool synced;
@@ -419,6 +430,8 @@ public sealed class ExchangeExecutor : IDisposable
     public void Enqueue(EngineIntent intent) => queue.Writer.TryWrite(intent);
     public void Reconcile() => queue.Writer.TryWrite(new("reconcile", "", 0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 0, 0, null, ""));
     public decimal Deposit => run.Budget + realized;
+
+    public BotTrade[] Trades() { lock (holdings) return trades.ToArray(); }
 
     public ExchangeHolding[] Holdings()
     {
@@ -465,6 +478,7 @@ public sealed class ExchangeExecutor : IDisposable
         {
             try
             {
+                if (!loaded) await Load();
                 if (intent.Kind == "drain") { if (drains.TryDequeue(out var done)) done.TrySetResult(); continue; }
                 if (!synced) { await client.SyncTimeAsync(CancellationToken.None); synced = true; }
                 switch (intent.Kind)
@@ -580,15 +594,17 @@ public sealed class ExchangeExecutor : IDisposable
             var stop = await client.StopAsync(intent.Symbol, Side(-intent.Side), stopPrice, stopId, CancellationToken.None);
             await Log(intent.Symbol, "защитный стоп", Side(-intent.Side), order.ExecutedQty, stopPrice, stopId, stop.Status, "Стоп на бирже за уровнем отмены сценария.");
             lock (holdings) holdings[intent.Symbol] = new(intent.Symbol, intent.Side, order.ExecutedQty, order.AvgPrice, stopPrice, stopId,
-                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), intent.Reason);
+            await Save();
         }
         catch (Exception e) when (e is ExchangeException or HttpRequestException or TaskCanceledException)
         {
             // Never leave a position without protection: close it at once.
             await Log(intent.Symbol, "ошибка", Side(-intent.Side), order.ExecutedQty, stopPrice, stopId, "error", $"Защитный стоп не поставлен ({e.Message}): позиция закрывается.");
             var close = await Market(intent.Symbol, Side(-intent.Side), order.ExecutedQty, Id("x"), true);
-            var pnl = intent.Side * order.ExecutedQty * (close.AvgPrice - order.AvgPrice) - order.ExecutedQty * (order.AvgPrice + close.AvgPrice) * run.Parameters.FeePct / 200;
-            Realize(pnl);
+            var unprotected = new Holding(intent.Symbol, intent.Side, order.ExecutedQty, order.AvgPrice, stopPrice, stopId,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), intent.Reason);
+            var pnl = await Closed(unprotected, close.AvgPrice, "защитный стоп не поставлен: позиция закрыта сразу");
             await Log(intent.Symbol, "выход", Side(-intent.Side), close.ExecutedQty, close.AvgPrice, close.ClientId, close.Status,
                 $"Закрыта: не удалось поставить защитный стоп. Результат {Money(pnl)} USDT.");
         }
@@ -597,27 +613,68 @@ public sealed class ExchangeExecutor : IDisposable
     private async Task Exit(string symbol, string reason)
     {
         Holding? h;
-        lock (holdings) holdings.Remove(symbol, out h);
+        lock (holdings) holdings.TryGetValue(symbol, out h);
         if (h is null) return;
-        await client.CancelStopAsync(h.StopId, CancellationToken.None);
         var id = Id("x");
         ExchangeOrder order;
+        // The position is closed first and the stop cancelled after: if the close fails, the position stays known and
+        // protected, and the next check tries again.
         try { order = await Market(symbol, Side(-h.Side), h.Quantity, id, true); }
         // -2022: nothing to reduce — the stop on the exchange closed the position before the strategy's exit.
         catch (ExchangeException e) when (e.Code == -2022)
         {
+            lock (holdings) holdings.Remove(symbol);
             await ClosedByExchange(h);
             return;
         }
-        var pnl = h.Side * h.Quantity * (order.AvgPrice - h.Entry) - h.Quantity * (h.Entry + order.AvgPrice) * run.Parameters.FeePct / 200;
-        Realize(pnl);
+        lock (holdings) holdings.Remove(symbol);
+        await client.CancelStopAsync(h.StopId, CancellationToken.None);
+        var pnl = await Closed(h, order.AvgPrice, reason);
         await Log(symbol, "выход", Side(-h.Side), order.ExecutedQty, order.AvgPrice, id, order.Status, $"{reason}. Результат {Money(pnl)} USDT (комиссия — оценка).");
     }
 
-    private void Realize(decimal pnl)
+    // A position is closed: its result (the fee is the tariff's estimate) goes into the deposit, the daily limit and the
+    // run's trades, and all of it is saved.
+    private async Task<decimal> Closed(Holding h, decimal exit, string reason)
     {
-        realized += pnl;
-        daily.Add(client.Now, pnl);
+        var gross = h.Side * h.Quantity * (exit - h.Entry);
+        var fee = h.Quantity * (h.Entry + exit) * run.Parameters.FeePct / 200;
+        var now = client.Now;
+        realized += gross - fee;
+        daily.Add(now, gross - fee);
+        trades.Add(new($"{run.Id}-{h.Symbol}-{h.OpenedMs}", DateTimeOffset.FromUnixTimeMilliseconds(now).ToString("O"), h.Side > 0 ? "long" : "short",
+            Math.Round(gross, 6), Math.Round(fee, 6), h.Entry, exit, h.Quantity, run.Id, Simulated: false, h.Symbol, "Binance",
+            DateTimeOffset.FromUnixTimeMilliseconds(h.OpenedMs).ToString("O"), Math.Max(0, now - h.OpenedMs) / 1000.0, Math.Round(h.Quantity * h.Entry, 2),
+            reason, EntryReason: h.EntryReason));
+        await Save();
+        return gross - fee;
+    }
+
+    private Task Save()
+    {
+        ExchangeState state;
+        lock (holdings)
+            state = new(holdings.Values.ToArray(), trades.ToArray(), realized, daily.Snapshot.Day, daily.Snapshot.Result, sequence, touched.ToArray());
+        return store.SaveExchangeStateAsync(run.Id, state, CancellationToken.None);
+    }
+
+    // After a restart: what the run held and made before it. The order counter jumps ahead so that an id is never used twice.
+    private async Task Load()
+    {
+        loaded = true;
+        if (store.ExchangeState(run.Id) is not { } state) return;
+        lock (holdings)
+        {
+            foreach (var h in state.Holdings) { holdings[h.Symbol] = h; recovered.Add(h.Symbol); }
+            trades.AddRange(state.Trades);
+        }
+        realized = state.Realized;
+        daily.Restore(state.DailyDay, state.DailyResult);
+        sequence = state.Sequence + 100;
+        foreach (var symbol in state.Touched) touched.Add(symbol);
+        if (state.Holdings.Length > 0)
+            await Log("", "перезапуск", "", 0, 0, "", "ok",
+                $"Приложение перезапускалось. Позиций на бирже было: {state.Holdings.Length} — они будут закрыты, потому что стратегия их больше не ведёт.");
     }
 
     // After the run's own exits: a position still open on a coin the run traded (an answer lost, a fill the bot did not see)
@@ -652,8 +709,7 @@ public sealed class ExchangeExecutor : IDisposable
     {
         var stop = await client.QueryStopAsync(h.StopId, CancellationToken.None);
         var price = stop is { AvgPrice: > 0 } ? stop.AvgPrice : h.StopPrice;
-        var pnl = h.Side * h.Quantity * (price - h.Entry) - h.Quantity * (h.Entry + price) * run.Parameters.FeePct / 200;
-        Realize(pnl);
+        var pnl = await Closed(h, price, "сработал защитный стоп на бирже");
         await Log(h.Symbol, "закрыта биржей", Side(-h.Side), h.Quantity, price, h.StopId, stop?.Status ?? "unknown",
             $"Позиции на бирже больше нет: сработал защитный стоп. Результат {Money(pnl)} USDT.");
     }
@@ -668,6 +724,12 @@ public sealed class ExchangeExecutor : IDisposable
             // The exchange closed it: the protective stop (or a liquidation).
             lock (holdings) holdings.Remove(h.Symbol);
             await ClosedByExchange(h);
+        }
+        // Carried over a restart and still open: closed now, the strategy has lost track of them.
+        foreach (var symbol in recovered.ToList())
+        {
+            recovered.Remove(symbol);
+            await Exit(symbol, "приложение перезапускалось: стратегия больше не ведёт эту позицию");
         }
         foreach (var p in positions.Where(p => mine.All(h => h.Symbol != p.Symbol) && strangers.Add(p.Symbol)))
             await Log(p.Symbol, "внимание", p.Amount > 0 ? "BUY" : "SELL", Math.Abs(p.Amount), p.EntryPrice, "", "unknown",
