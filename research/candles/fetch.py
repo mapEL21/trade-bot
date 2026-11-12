@@ -1,4 +1,5 @@
 """Downloads Binance USDT-M history for docs/CANDLE_STUDY.md into data/candles (not in git)."""
+import http.client
 import concurrent.futures as cf, csv, io, json, pathlib, re, sys, time, urllib.error, urllib.request, zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2] / 'data' / 'candles'
@@ -27,7 +28,7 @@ def get(url):
             if e.code == 404:
                 return None
             time.sleep(min(30, 2 ** attempt))
-        except OSError:
+        except (OSError, http.client.HTTPException):  # a dropped connection, a response cut short
             time.sleep(min(30, 2 ** attempt))
     raise RuntimeError(f'failed: {url}')
 
@@ -45,7 +46,7 @@ def fallback_symbols():
         data = get(url)
         if data:
             names |= set(pick(json.loads(data)))
-    return sorted(s for s in names if s.endswith('USDT') and not SKIP.match(s))
+    return sorted(s for s in names if re.fullmatch(r'[A-Z0-9]+USDT', s) and not SKIP.match(s))
 
 
 def symbols():
@@ -57,7 +58,8 @@ def symbols():
         found += re.findall(r'<Prefix>data/futures/um/monthly/klines/([^/<]+)/</Prefix>', text)
         next_marker = re.search(r'<NextMarker>([^<]+)</NextMarker>', text)
         if not next_marker:
-            return sorted({s for s in found if s.endswith('USDT') and not SKIP.match(s)})
+            # Latin names only: the archive also lists a few coins with other characters, which this downloader cannot ask for.
+            return sorted({s for s in found if re.fullmatch(r'[A-Z0-9]+USDT', s) and not SKIP.match(s)})
         marker = next_marker.group(1)
 
 
