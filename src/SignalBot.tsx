@@ -63,37 +63,47 @@ export function SignalFields({
           ))}
         </SelectField>
         {number('Риск на сделку с комиссиями, % депозита', 'riskPct', 0.1, 5, 0.1)}
-        {!onExchange(form) && number('Комиссии круга, %', 'feePct', 0, 1, 0.01)}
-        {number('Плечо не больше', 'maxLeverage', 1, maxLeverage, 1)}
-        {number('Сделок одновременно', 'maxPositions', 1, 20, 1)}
-        {number('Дневной лимит убытка, % начального депозита', 'dailyLossPct', 1, 100, 1)}
       </div>
       <p className="field-hint signal-example">
         {strategies.find((s) => s.id === p.signal)?.description} Вход и выход — по логике стратегии,
         у каждой сделки записана причина. Риск {num(p.riskPct)}% — потеря при отмене сценария вместе
-        с комиссиями: из него считается размер позиции, в пределах плеча.
-        {onExchange(form)
-          ? ' Комиссию бот берёт по тарифу счёта с биржи при каждом запуске.'
-          : ''}{' '}
-        Сделок одновременно — сколько монет бот держит сразу: при {p.maxPositions} сделках и риске{' '}
-        {num(p.riskPct)}% одновременно под риском до {num(p.maxPositions * p.riskPct)}% депозита.
+        с комиссиями: из него считается размер позиции.
+        {onExchange(form) ? ' Комиссию бот берёт по тарифу счёта с биржи при каждом запуске.' : ''}
       </p>
-      <fieldset className="signal-sessions">
-        <legend>Торговые сессии (ни одной — все часы)</legend>
-        {tradingSessions.map((s) => (
-          <label className="checkbox-field" key={s.id}>
-            <input
-              type="checkbox"
-              checked={p.sessions?.includes(s.id) ?? false}
-              onChange={(e) => {
-                const next = (p.sessions ?? []).filter((x) => x !== s.id);
-                set({ sessions: e.target.checked ? [...next, s.id] : next });
-              }}
-            />
-            <span>{s.name}</span>
-          </label>
-        ))}
-      </fieldset>
+      {/* The rest has working defaults: the form stays short and fits the screen without scrolling. */}
+      <details className="form-more">
+        <summary>
+          Дополнительно: плечо до {p.maxLeverage}x, сделок сразу {p.maxPositions}, дневной лимит{' '}
+          {num(p.dailyLossPct)}%
+          {p.sessions?.length ? `, сессий ${p.sessions.length}` : ', все часы'}
+        </summary>
+        <div className="form-grid">
+          {!onExchange(form) && number('Комиссии круга, %', 'feePct', 0, 1, 0.01)}
+          {number('Плечо не больше', 'maxLeverage', 1, maxLeverage, 1)}
+          {number('Сделок одновременно', 'maxPositions', 1, 20, 1)}
+          {number('Дневной лимит убытка, % начального депозита', 'dailyLossPct', 1, 100, 1)}
+        </div>
+        <p className="field-hint">
+          Сделок одновременно — сколько монет бот держит сразу: при {p.maxPositions} сделках и риске{' '}
+          {num(p.riskPct)}% под риском одновременно до {num(p.maxPositions * p.riskPct)}% депозита.
+        </p>
+        <fieldset className="signal-sessions">
+          <legend>Торговые сессии (ни одной — все часы)</legend>
+          {tradingSessions.map((s) => (
+            <label className="checkbox-field" key={s.id}>
+              <input
+                type="checkbox"
+                checked={p.sessions?.includes(s.id) ?? false}
+                onChange={(e) => {
+                  const next = (p.sessions ?? []).filter((x) => x !== s.id);
+                  set({ sessions: e.target.checked ? [...next, s.id] : next });
+                }}
+              />
+              <span>{s.name}</span>
+            </label>
+          ))}
+        </fieldset>
+      </details>
     </>
   );
 }
@@ -149,6 +159,29 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
   const live = current?.state === 'running' && current.run.live;
   const closesOnExchange = current?.state === 'running' && current.run.execution === 'testnet';
   const skipped = Object.entries(result?.skipped ?? {}).sort((a, b) => b[1] - a[1]);
+  // One line that answers "what is the bot doing now and why are there no trades".
+  const skippedTotal = skipped.reduce((sum, [, n]) => sum + n, 0);
+  const now = !current
+    ? ''
+    : [
+        current.state !== 'running'
+          ? 'Сейчас: остановлен'
+          : result?.entriesBlocked
+            ? 'Сейчас: новые сделки не открываются'
+            : live && current.live
+              ? current.live.open.length > 0
+                ? `Сейчас: в сделке — ${current.live.open.map((p) => p.symbol).join(', ')}`
+                : current.live.watching.length > 0
+                  ? `Сейчас: следит за ${current.live.watching.length} монет., ждёт входа`
+                  : 'Сейчас: ждёт, пока скринер найдёт плотность у цены'
+              : (result?.pending ?? 0) > 0
+                ? `Сейчас: считает записи, осталось ${result!.pending}`
+                : 'Сейчас: ждёт новую запись данных',
+        `сделок ${result?.trades.length ?? 0}`,
+        skippedTotal > 0
+          ? `пропущено сигналов ${skippedTotal}, чаще всего «${skipped[0][0]}» (${skipped[0][1]})`
+          : 'пропущенных сигналов нет',
+      ].join(' · ');
   return (
     <section className="panel paper-run signal-run" aria-labelledby="signal-run-title">
       <div className="section-line">
@@ -221,6 +254,7 @@ export function SignalRunPanel({ bot, onChanged }: { bot: Bot; onChanged: () => 
           </>
         )}
       </div>
+      {now && <p className="bot-now">{now}</p>}
       {error && <p role="alert">{error}</p>}
       {current && result && (
         <>

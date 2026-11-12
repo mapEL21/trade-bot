@@ -355,6 +355,9 @@ test('a live run shows the coins the bot watches and the positions it holds', as
   const panel = page.locator('.signal-run');
   await expect(panel.getByRole('heading', { name: 'Живой режим' })).toBeVisible();
   await expect(panel).toContainText('Следит за монетами: 1');
+  await expect(panel.locator('.bot-now')).toHaveText(
+    'Сейчас: в сделке — KAVAUSDT · сделок 0 · пропущенных сигналов нет',
+  );
   await expect(panel).toContainText('KAVAUSDT — плотность на покупку 0.068, цена в 0,42%');
   await expect(panel).toContainText('KAVAUSDT лонг от 0.0681, сейчас 0.0684 — отскок от плотности');
   expect((await new AxeBuilder({ page }).include('.signal-run').analyze()).violations).toEqual([]);
